@@ -21,7 +21,12 @@
 // Maintenance: when adding a TEST_CASE with a new top-level tag category, append
 // it to the alias spec below. Catch2 v3 expands the alias at filter-parse time, so
 // the change is local to this file.
+// Note on [Determinism]: the harness has both Production and DevTest tests. Only
+// Production runs by default — `[Determinism][Production]` is an AND-spec (matches
+// tests carrying BOTH tags), so DevTest ([Determinism][DevTest]) and the future
+// KU1CrossArch mode ([Determinism][KU1CrossArch], Task 4) stay OPT-IN and are NOT
+// pulled in by [@og].
 CATCH_REGISTER_TAG_ALIAS("[@og]",
-    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock]")
+    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[Determinism][Production]")
 
 #endif // WITH_LOW_LEVEL_TESTS
