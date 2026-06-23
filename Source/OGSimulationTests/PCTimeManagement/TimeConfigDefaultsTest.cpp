@@ -20,10 +20,11 @@
 //     `hardResyncThresholdTicks > rollbackWindowHardCap`. With T1's values
 //     (21 > 20) this passes by a margin of 1.
 //
-// Stage hand-off note: `redundancyDepthTicks == 5` is the Stage 1 interim value
-// (matches the current 100 Hz runtime). Stage 2 task T15 flips both the
-// TimeConfig.h default AND this assertion to `== 3` in the same atomic change,
-// when the runtime moves to the ratified 60 Hz target (proposal §11).
+// Stage hand-off note: `redundancyDepthTicks == 3` is the ratified 60 Hz target
+// value (active since Stage 2 / T15). The historical Stage 1 interim value was 5
+// (matched the 100 Hz runtime). Stage 2 task T15 flipped both the TimeConfig.h
+// default AND this assertion 5 -> 3 in the same atomic change, when the runtime
+// moved to the ratified 60 Hz target (proposal §11).
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
@@ -58,8 +59,10 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     REQUIRE(tc.hardResyncThresholdTicks == 21);
 
     // --- Input redundancy (FInputRedundancyBundle) -------------------------
-    // Stage 1 interim (100 Hz). T15 flips this to == 3 at the 60 Hz target.
-    REQUIRE(tc.redundancyDepthTicks == 5);
+    // 60 Hz ratified target (active default since Stage 2 / T15). The historical
+    // 100 Hz interim value was 5; T15 flipped both this assertion and the
+    // TimeConfig.h default to 3 in the same atomic change.
+    REQUIRE(tc.redundancyDepthTicks == 3);
 
     // --- Test harness mode selector ----------------------------------------
     REQUIRE(tc.harnessMode == TimeConfig::HarnessMode::Production);

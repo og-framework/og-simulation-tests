@@ -26,7 +26,12 @@
 // tests carrying BOTH tags), so DevTest ([Determinism][DevTest]) and the future
 // KU1CrossArch mode ([Determinism][KU1CrossArch], Task 4) stay OPT-IN and are NOT
 // pulled in by [@og].
+// Note on [WireFormat]: Stage 1 wire-type regression tests (Task 12). The
+// engine-agnostic FInputRedundancyBundle codec tests carry [WireFormat][Bundle]
+// and run by default. The UE-coupled buffer-NetSerialize tests ([WireFormat]
+// [Buffers]) are deferred to a future engine-coupled LLT target (see Task 12
+// impl notes / docs/low-level-tests.md "Future: testing UE-coupled code").
 CATCH_REGISTER_TAG_ALIAS("[@og]",
-    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[Determinism][Production]")
+    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Determinism][Production]")
 
 #endif // WITH_LOW_LEVEL_TESTS
