@@ -38,6 +38,7 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     REQUIRE(tc.rttSmoothingAlpha == 0.15);
     REQUIRE(tc.jitterSmoothingAlpha == 0.15);
     REQUIRE(tc.jitterMultiplier == 2.0);
+    REQUIRE(tc.predOffsetFloorTicks == 4);
 
     // --- Drift correction (ClientPredictionClock) --------------------------
     REQUIRE(tc.softDriftThresholdTicks == 3);
