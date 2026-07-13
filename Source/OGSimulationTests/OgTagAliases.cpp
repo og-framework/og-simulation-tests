@@ -32,6 +32,6 @@
 // [Buffers]) are deferred to a future engine-coupled LLT target (see Task 12
 // impl notes / docs/low-level-tests.md "Future: testing UE-coupled code").
 CATCH_REGISTER_TAG_ALIAS("[@og]",
-    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Determinism][Production]")
+    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Determinism][Production],[SimulatableList],[StorageView],[SystemsExecutor]")
 
 #endif // WITH_LOW_LEVEL_TESTS
