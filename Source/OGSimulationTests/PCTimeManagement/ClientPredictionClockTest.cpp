@@ -204,4 +204,120 @@ TEST_CASE("PCTM.ClientPredictionClock.Resimulation", "[PCTM][ClientPredictionClo
     REQUIRE(clock.getResimulationTick() == clock.getPredictionTick());
 }
 
+// ===========================================================================
+// Fix B (Task 24) — one-sided (authority-only) warm-up pastGuard.
+//
+// The pastGuard in advancePrediction() and evaluateDrift() used to require BOTH
+// m_predictionTick >= minTicksBeforeDriftCheck AND targetTick >= that threshold.
+// In the cooked late-connect scenario the client walks its own ticks 0..59 by
+// normal-advance while the server is already at 600+, so drift correction was
+// blocked for ~1 s and every incoming correction was discarded. Fix B trusts
+// authority as soon as the *authority* tick crosses the warm-up threshold.
+// See ../og-brawler-hit-resolution/netcode_finding_pred_offset_floor.md §3.2.
+//
+// These cases use the DEFAULT TimeConfig (minTicksBeforeDriftCheck = 60,
+// softDriftThresholdTicks = 3, hardResyncThresholdTicks = 21,
+// gradualCorrectionRate = 4, predOffsetFloorTicks = 4, tickFrequency = 60.0)
+// so the guard threshold and the T23 predOffset floor are both in effect.
+// ===========================================================================
+
+// ---------------------------------------------------------------------------
+// WarmupGuard.PIESymmetric — regression: Fix B must NOT destabilize the
+// symmetric-startup (PIE listen-server) case where both clocks tick from 0.
+// Asserts SEMANTIC properties, NOT exact tick numbers for when Skip fires
+// (under Fix B the first graduated Skip fires ~4 ticks earlier than under the
+// old two-sided guard — expected + beneficial, not a regression).
+// ---------------------------------------------------------------------------
+TEST_CASE("PCTM.ClientPredictionClock.WarmupGuard.PIESymmetric", "[PCTM][ClientPredictionClock][WarmupGuard]")
+{
+    TimeConfig cfg;   // all defaults
+
+    NetworkTimeEstimator est(cfg, nullptr);
+    ClientPredictionClock clock(cfg, est, nullptr);
+
+    // One LAN RTT sample so getPredictionOffsetTicks() settles at the T23 floor (4).
+    est.updateRTT(0.0005);   // 0.5 ms loopback
+
+    const unsigned int softLimit = static_cast<unsigned int>(cfg.softDriftThresholdTicks) + 1u;
+
+    // Lockstep startup: advance authorityTick by 1 before each advancePrediction()
+    // (server and client tick in the same physics loop).
+    for (unsigned int authorityTick = 1; authorityTick <= 120; ++authorityTick)
+    {
+        est.recordAuthorityTick(authorityTick);
+        const ClientPredictionClock::AdvanceResult result = clock.advancePrediction();
+
+        // (a) HardResync MUST NEVER fire in the symmetric case.
+        REQUIRE(result != ClientPredictionClock::AdvanceResult::HardResync);
+
+        // (b) Once authority is past the warm-up threshold, the client stays
+        //     predictively at or ahead of authority (Fix A's invariant).
+        if (authorityTick >= cfg.minTicksBeforeDriftCheck)
+            REQUIRE(clock.getPredictionTick() >= authorityTick);
+
+        // (c) Drift stabilizes into the dead band (|drift| <= softDrift + 1)
+        //     well before the loop ends.
+        if (authorityTick >= 90)
+        {
+            const int drift = static_cast<int>(est.getTargetPredictionTick())
+                            - static_cast<int>(clock.getPredictionTick());
+            const unsigned int absDrift =
+                drift >= 0 ? static_cast<unsigned int>(drift) : static_cast<unsigned int>(-drift);
+            REQUIRE(absDrift <= softLimit);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// WarmupGuard.LateConnect — the load-bearing test. Client at predictionTick 0
+// meets an authority already at tick 1000. Under Fix B the authority-only guard
+// opens immediately (targetTick = 1004 >= 60) and HardResync jumps the client
+// forward. Under the OLD two-sided guard predictionTick 0 < 60 would block the
+// correction and the call would return Normal — so this test proves Fix B is
+// applied in advancePrediction().
+// ---------------------------------------------------------------------------
+TEST_CASE("PCTM.ClientPredictionClock.WarmupGuard.LateConnect", "[PCTM][ClientPredictionClock][WarmupGuard]")
+{
+    TimeConfig cfg;   // all defaults
+
+    NetworkTimeEstimator est(cfg, nullptr);
+    ClientPredictionClock clock(cfg, est, nullptr);
+
+    est.updateRTT(0.0005);          // one sample → predOffset floored to 4 (T23)
+    est.recordAuthorityTick(1000);  // authority already far ahead
+
+    // Sanity: target = authorityTick + predOffsetFloorTicks = 1004.
+    REQUIRE(est.getTargetPredictionTick() == 1004u);
+
+    const ClientPredictionClock::AdvanceResult result = clock.advancePrediction();
+
+    REQUIRE(result == ClientPredictionClock::AdvanceResult::HardResync);
+    REQUIRE(clock.getPredictionTick() == 1004u);
+}
+
+// ---------------------------------------------------------------------------
+// WarmupGuard.EvaluateDriftConsistency — the finding-gap-plug test, and the
+// first-ever caller of evaluateDrift() in the codebase. With the SAME
+// late-connect state, evaluateDrift() must report the SAME drift zone that
+// advancePrediction() acts on (HardResync). If evaluateDrift() still carried
+// the old two-sided guard it would return None here — so this pins the two
+// pastGuard occurrences together against future one-sided edits.
+// ---------------------------------------------------------------------------
+TEST_CASE("PCTM.ClientPredictionClock.WarmupGuard.EvaluateDriftConsistency", "[PCTM][ClientPredictionClock][WarmupGuard]")
+{
+    TimeConfig cfg;   // all defaults
+
+    NetworkTimeEstimator est(cfg, nullptr);
+    ClientPredictionClock clock(cfg, est, nullptr);
+
+    est.updateRTT(0.0005);
+    est.recordAuthorityTick(1000);
+
+    // BEFORE advancing: the pure-query drift zone must already be HardResync.
+    REQUIRE(clock.evaluateDrift() == ClientPredictionClock::DriftAction::HardResync);
+
+    // And advancePrediction() acts on that SAME zone — the two call-sites agree.
+    REQUIRE(clock.advancePrediction() == ClientPredictionClock::AdvanceResult::HardResync);
+}
+
 #endif // WITH_LOW_LEVEL_TESTS
