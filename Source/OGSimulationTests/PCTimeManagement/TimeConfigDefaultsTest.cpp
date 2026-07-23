@@ -67,24 +67,56 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
 
     // --- Test harness mode selector ----------------------------------------
     REQUIRE(tc.harnessMode == TimeConfig::HarnessMode::Production);
+
+    // --- C.2 tiered input delay (Stage 5) ----------------------------------
+    REQUIRE(tc.forcedInputLatencyTicks == 2);
+
+    REQUIRE(tc.rttTierBoundariesMs[0] == 30);
+    REQUIRE(tc.rttTierBoundariesMs[1] == 80);
+    REQUIRE(tc.rttTierBoundariesMs[2] == 150);
+    REQUIRE(tc.rttTierBoundariesMs[3] == 999);
+
+    REQUIRE(tc.rttTierInputDelays[0] == 1);
+    REQUIRE(tc.rttTierInputDelays[1] == 2);
+    REQUIRE(tc.rttTierInputDelays[2] == 3);
+    REQUIRE(tc.rttTierInputDelays[3] == 4);
+
+    REQUIRE(tc.rttTierRollbackCeilings[0] == 6);
+    REQUIRE(tc.rttTierRollbackCeilings[1] == 9);
+    REQUIRE(tc.rttTierRollbackCeilings[2] == 12);
+    REQUIRE(tc.rttTierRollbackCeilings[3] == 20);
+
+    REQUIRE(tc.tierHysteresisMs == 10);
+    REQUIRE(tc.tierMinDwellTicks == 60);
+
+    // `muteEchoOnDegradedTier` has NO consumer this initiative (optional task
+    // T15 owns the behaviour). The default is asserted anyway so that if T15
+    // flips it, the flip is a deliberate, visible change rather than a silent
+    // drift.
+    REQUIRE(tc.muteEchoOnDegradedTier == true);
+    REQUIRE(tc.lanZeroDelayOverride == false);
+
+    // --- Stage 4 observability (fields only, no consumer yet) --------------
+    REQUIRE(tc.sn1BroadcastPolicy == TimeConfig::Sn1BroadcastPolicy::RttTiered);
+    REQUIRE(tc.sn1IdleBroadcastIntervalTicks == 6);
+    REQUIRE(tc.hashBroadcastPolicy == TimeConfig::HashBroadcastPolicy::EveryTick);
+    REQUIRE(tc.hashBroadcastIntervalTicks == 1);
+    REQUIRE(tc.hashMismatchTickThreshold == 5);
+    REQUIRE(tc.hashMismatchReaction == TimeConfig::HashMismatchReaction::LogOnly);
+    REQUIRE(tc.sparseSaveMode == false);
+    REQUIRE(tc.recordSkipEvents == true);
+    REQUIRE(tc.recordStallEvents == true);
+    REQUIRE(tc.recordSubstitutionEvents == true);
+    REQUIRE(tc.recordRedundancyHits == false);
+    REQUIRE(tc.aggregateSiblingInputBundles == false);
+    REQUIRE(tc.hashLogRingCapacity == 600);
 }
 
-// ---------------------------------------------------------------------------
-// R-D3 ordering sanity — failsafe backstop must fire strictly later than the
-// soft cap. Carries the extra [Determinism] tag so it can be filtered apart
-// from the default-drift gate (it still carries [PCTM] so the [@og] alias and
-// `oglltest simulation` default filter pick it up).
-// ---------------------------------------------------------------------------
-TEST_CASE("PCTM.TimeConfig.HardResyncOrderingInvariant", "[PCTM][TimeConfig][Determinism]")
-{
-    TimeConfig tc;
-
-    // `hardResyncThresholdTicks` is uint32_t; `rollbackWindowHardCap` is int32_t.
-    // Cast the int32 side explicitly to uint32_t so the strict-inequality
-    // comparison does not emit -Wsign-compare on the Clang/GCC standalone CMake
-    // build path (T1 reviewer forward-looking requirement). Both defaults are
-    // small positive values, so the cast is value-preserving.
-    REQUIRE(tc.hardResyncThresholdTicks > static_cast<uint32_t>(tc.rollbackWindowHardCap));
-}
+// NOTE: the R-D3 HardResync ordering invariant that previously lived here has
+// MOVED to the sibling TimeConfigOrderingTest.cpp (D3.10 completion), which is
+// the dedicated home for TimeConfig ordering/relational invariants. The test
+// name, tags and assertion are preserved verbatim there — this is a relocation,
+// not a removal, and the file was split so the ordering invariants sit together
+// rather than being buried in the default-drift gate.
 
 #endif // WITH_LOW_LEVEL_TESTS

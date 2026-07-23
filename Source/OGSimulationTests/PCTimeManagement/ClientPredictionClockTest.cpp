@@ -2,6 +2,8 @@
 #if WITH_LOW_LEVEL_TESTS
 
 #include "catch_amalgamated.hpp"
+#include "OGSimulation/Network/ConnectionTierTable.h"
+#include "OGSimulation/Network/ReplicatedTierConsumer.h"
 #include "OGSimulation/PCTimeManagement/ClientPredictionClock.h"
 #include "OGSimulation/PCTimeManagement/NetworkTimeEstimator.h"
 
@@ -318,6 +320,183 @@ TEST_CASE("PCTM.ClientPredictionClock.WarmupGuard.EvaluateDriftConsistency", "[P
 
     // And advancePrediction() acts on that SAME zone — the two call-sites agree.
     REQUIRE(clock.advancePrediction() == ClientPredictionClock::AdvanceResult::HardResync);
+}
+
+// ===========================================================================
+// T11 — tier-transition rollback (D5.3)
+//
+// HOW "ROLLBACK" IS MEASURED. The prediction frontier is monotonically
+// non-decreasing outside a hard resync (see the rationale comment on the debt
+// paydown in ClientPredictionClock.cpp), so a rollback is a RELATIVE regression:
+// the clock ends up N ticks behind where the identical drive sequence would
+// otherwise have left it. Every case below therefore runs a CONTROL clock with
+// no rollback requested, drives both identically, and asserts on the gap. A
+// test that asserted an absolute decrement of getPredictionTick() would be
+// asserting the invariant-breaking behaviour we deliberately did not implement.
+//
+// The tier -> delay deltas are taken from the SHARED tierDelayDeltaTicks lookup
+// rather than written as literals, so these cases follow a TimeConfig retune
+// instead of silently testing stale numbers.
+// ===========================================================================
+
+namespace
+{
+    // A dead-band config: drift correction can never fire, so the only thing
+    // that can move the two clocks apart is the rollback under test.
+    TimeConfig makeRollbackTestConfig()
+    {
+        TimeConfig cfg;
+        cfg.minTicksBeforeDriftCheck = 0;      // no startup guard
+        cfg.softDriftThresholdTicks  = 1000;   // everything below is dead-band
+        cfg.hardResyncThresholdTicks = 5000;   // never reached in these cases
+        cfg.tickFrequency            = 60.0;
+        return cfg;
+    }
+
+    // Drive a clock n times against a fixed authority tick of 0. With the config
+    // above this is pure dead-band, so each call advances by exactly 1 unless a
+    // rollback Stall consumes it.
+    void driveTicks(ClientPredictionClock& clock, NetworkTimeEstimator& est, unsigned int n)
+    {
+        for (unsigned int i = 0; i < n; ++i)
+        {
+            est.recordAuthorityTick(0);
+            clock.advancePrediction();
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// AC-T11-1 — an UPWARD tier transition (0 -> 2) makes the client give back
+// exactly `tierDelayDeltaTicks` predicted ticks.
+// ---------------------------------------------------------------------------
+TEST_CASE("PCTM.ClientPredictionClock.UpwardTierTransitionTriggersProactiveRollback",
+          "[PCTM][ClientPredictionClock][TierRollback]")
+{
+    TimeConfig cfg = makeRollbackTestConfig();
+
+    // Model the client's tier state exactly as production does: a
+    // ReplicatedTierConsumer fed from OnRep, with the delta taken from the
+    // shared lookup. No client-side tier derivation (Option A).
+    ReplicatedTierConsumer consumer(cfg);
+    consumer.onReplicatedTierReceived(0);
+    const int32_t fromTier = consumer.currentTierIndex();
+    consumer.onReplicatedTierReceived(2);
+    const int32_t toTier = consumer.currentTierIndex();
+
+    const int32_t delta = tierDelayDeltaTicks(fromTier, toTier, cfg);
+    REQUIRE(delta > 0);        // premise: 0 -> 2 really is an upward transition
+
+    NetworkTimeEstimator estA(cfg, nullptr);
+    NetworkTimeEstimator estB(cfg, nullptr);
+    ClientPredictionClock control(cfg, estA, nullptr);
+    ClientPredictionClock rolled(cfg, estB, nullptr);
+
+    rolled.requestTierTransitionRollback(delta);
+    REQUIRE(rolled.getPendingTierRollbackTicks() == static_cast<unsigned int>(delta));
+
+    // Enough ticks to pay the debt off in full and then run on normally.
+    const unsigned int kDriveTicks = 40;
+    driveTicks(control, estA, kDriveTicks);
+    driveTicks(rolled,  estB, kDriveTicks);
+
+    // Debt fully paid, and the frontier sits exactly `delta` ticks behind the
+    // control clock that was driven identically.
+    REQUIRE(rolled.getPendingTierRollbackTicks() == 0u);
+    REQUIRE(control.getPredictionTick() - rolled.getPredictionTick()
+            == static_cast<unsigned int>(delta));
+
+    // The debt is paid as Stalls, and a Stall does not advance either cursor —
+    // so the resim cursor must still sit at the frontier (not resimulating).
+    REQUIRE_FALSE(rolled.isResimulating());
+}
+
+// ---------------------------------------------------------------------------
+// AC-T11-2 — a DOWNWARD tier transition (2 -> 0) causes NO rollback. The client
+// may now predict further ahead; that is a natural extension reached by the
+// ordinary drift path, not something to undo here.
+// ---------------------------------------------------------------------------
+TEST_CASE("PCTM.ClientPredictionClock.DownwardTierTransitionDoesNotRollback",
+          "[PCTM][ClientPredictionClock][TierRollback]")
+{
+    TimeConfig cfg = makeRollbackTestConfig();
+
+    ReplicatedTierConsumer consumer(cfg);
+    consumer.onReplicatedTierReceived(2);
+    const int32_t fromTier = consumer.currentTierIndex();
+    consumer.onReplicatedTierReceived(0);
+    const int32_t toTier = consumer.currentTierIndex();
+
+    const int32_t delta = tierDelayDeltaTicks(fromTier, toTier, cfg);
+    REQUIRE(delta < 0);        // premise: 2 -> 0 really is a downward transition
+
+    NetworkTimeEstimator estA(cfg, nullptr);
+    NetworkTimeEstimator estB(cfg, nullptr);
+    ClientPredictionClock control(cfg, estA, nullptr);
+    ClientPredictionClock rolled(cfg, estB, nullptr);
+
+    rolled.requestTierTransitionRollback(delta);
+
+    // The negative delta was dropped outright — no debt was ever registered.
+    REQUIRE(rolled.getPendingTierRollbackTicks() == 0u);
+
+    const unsigned int kDriveTicks = 40;
+    driveTicks(control, estA, kDriveTicks);
+    driveTicks(rolled,  estB, kDriveTicks);
+
+    // No regression whatsoever: the two clocks are indistinguishable.
+    REQUIRE(rolled.getPredictionTick() == control.getPredictionTick());
+}
+
+// ---------------------------------------------------------------------------
+// AC-T11-3 — consecutive UPWARD transitions (0 -> 1 -> 3) accumulate: the total
+// rollback is the SUM of the deltas, not just the most recent one. Both
+// transitions are registered before any tick is driven, so the second lands
+// while the first is still unpaid — the case that would expose an
+// overwrite-instead-of-accumulate bug.
+// ---------------------------------------------------------------------------
+TEST_CASE("PCTM.ClientPredictionClock.MultipleUpwardTransitionsAccumulate",
+          "[PCTM][ClientPredictionClock][TierRollback]")
+{
+    TimeConfig cfg = makeRollbackTestConfig();
+
+    ReplicatedTierConsumer consumer(cfg);
+    consumer.onReplicatedTierReceived(0);
+    const int32_t tier0 = consumer.currentTierIndex();
+    consumer.onReplicatedTierReceived(1);
+    const int32_t tier1 = consumer.currentTierIndex();
+    consumer.onReplicatedTierReceived(3);
+    const int32_t tier3 = consumer.currentTierIndex();
+
+    const int32_t deltaA = tierDelayDeltaTicks(tier0, tier1, cfg);
+    const int32_t deltaB = tierDelayDeltaTicks(tier1, tier3, cfg);
+    REQUIRE(deltaA > 0);
+    REQUIRE(deltaB > 0);
+
+    NetworkTimeEstimator estA(cfg, nullptr);
+    NetworkTimeEstimator estB(cfg, nullptr);
+    ClientPredictionClock control(cfg, estA, nullptr);
+    ClientPredictionClock rolled(cfg, estB, nullptr);
+
+    rolled.requestTierTransitionRollback(deltaA);
+    rolled.requestTierTransitionRollback(deltaB);
+
+    // Accumulated, not overwritten.
+    REQUIRE(rolled.getPendingTierRollbackTicks()
+            == static_cast<unsigned int>(deltaA + deltaB));
+
+    const unsigned int kDriveTicks = 40;
+    driveTicks(control, estA, kDriveTicks);
+    driveTicks(rolled,  estB, kDriveTicks);
+
+    REQUIRE(rolled.getPendingTierRollbackTicks() == 0u);
+    REQUIRE(control.getPredictionTick() - rolled.getPredictionTick()
+            == static_cast<unsigned int>(deltaA + deltaB));
+
+    // And the cumulative rollback genuinely exceeds either single transition —
+    // guards against a "last delta wins" implementation passing by accident.
+    REQUIRE(control.getPredictionTick() - rolled.getPredictionTick()
+            > static_cast<unsigned int>(deltaB));
 }
 
 #endif // WITH_LOW_LEVEL_TESTS
