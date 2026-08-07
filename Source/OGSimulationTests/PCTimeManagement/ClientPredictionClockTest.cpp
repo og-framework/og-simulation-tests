@@ -10,11 +10,26 @@
 // ---------------------------------------------------------------------------
 // Test helpers
 //
-// Strategy: NetworkTimeEstimator has no RTT sample on construction →
-//   getPredictionOffsetTicks() == 0  →  getTargetPredictionTick() == authorityTick.
-// We control the "target" simply by calling recordAuthorityTick() before each
+// Strategy: we control the "target" by calling recordAuthorityTick() before each
 // advancePrediction().  TimeConfig is stored by const-ref, so mutating the
 // local cfg object is immediately visible to both estimator and clock.
+//
+// ⚠ CORRECTED BY T26a — READ THIS BEFORE ADDING A CASE. This comment used to
+// say "no RTT sample on construction → getPredictionOffsetTicks() == 0 →
+// getTargetPredictionTick() == authorityTick". That premise is DEAD. The
+// architect's T26a ruling makes the no-sample path return
+// `predOffsetFloorTicks`, because the floor is a STRUCTURAL INVARIANT ("the
+// client predicts forward") rather than an estimate, and returning 0 there
+// re-created the dead-band lock the floor exists to prevent. So for an estimator
+// that has been fed no RTT sample:
+//
+//     getTargetPredictionTick() == authorityTick + predOffsetFloorTicks
+//
+// A case that needs a SPECIFIC drift must therefore subtract the offset when it
+// sets the authority tick — see StallCorrection and HardResync below, which are
+// the two that do. Cases whose intended drift merely has to land in a
+// particular zone (ZeroDrift, SkipCorrection) are unaffected and are left
+// untouched.
 // ---------------------------------------------------------------------------
 
 // Advance the clock N times with a huge soft-drift threshold (dead-band) so no
@@ -114,8 +129,12 @@ TEST_CASE("PCTM.ClientPredictionClock.StallCorrection", "[PCTM][ClientPrediction
     for (unsigned int call = 1; call <= 4; ++call)
     {
         const unsigned int before = clock.getPredictionTick();
-        // authorityTick = predTick - 5 → target = predTick - 5 → drift = -5
-        const int authTick = static_cast<int>(clock.getPredictionTick()) - 5;
+        // INTENDED DRIFT IS -5 (client ahead). target = authorityTick + offset,
+        // and with no RTT sample that offset is predOffsetFloorTicks (T26a — it
+        // used to be 0, which is why this line used to omit the subtraction).
+        // Subtracting it keeps the drift this case is named for.
+        const int authTick = static_cast<int>(clock.getPredictionTick()) - 5
+                           - static_cast<int>(est.getPredictionOffsetTicks());
         est.recordAuthorityTick(static_cast<unsigned int>(authTick));
         clock.advancePrediction();
         const unsigned int delta = clock.getPredictionTick() - before;
@@ -154,9 +173,13 @@ TEST_CASE("PCTM.ClientPredictionClock.HardResync", "[PCTM][ClientPredictionClock
         callbackTick  = newTick;
     });
 
-    // Set drift to +20 (well above hardResyncThreshold=15)
+    // Set drift to +20 (well above hardResyncThreshold=15).
+    // target = authorityTick + offset, and with no RTT sample that offset is
+    // predOffsetFloorTicks (T26a — it used to be 0, which is why this line used
+    // to record `targetTick` directly). The authority tick is set that much
+    // lower so the TARGET is the +20 this case asserts against.
     const unsigned int targetTick = clock.getPredictionTick() + 20;
-    est.recordAuthorityTick(targetTick);
+    est.recordAuthorityTick(targetTick - est.getPredictionOffsetTicks());
     clock.advancePrediction();
 
     REQUIRE(callbackFired);
@@ -323,14 +346,14 @@ TEST_CASE("PCTM.ClientPredictionClock.WarmupGuard.EvaluateDriftConsistency", "[P
 }
 
 // ===========================================================================
-// T11 — tier-transition rollback (D5.3)
+// T11 — tier-transition stall (D5.3)
 //
-// HOW "ROLLBACK" IS MEASURED. The prediction frontier is monotonically
+// HOW THE STALL IS MEASURED. The prediction frontier is monotonically
 // non-decreasing outside a hard resync (see the rationale comment on the debt
-// paydown in ClientPredictionClock.cpp), so a rollback is a RELATIVE regression:
+// paydown in ClientPredictionClock.cpp), so the effect is a RELATIVE regression:
 // the clock ends up N ticks behind where the identical drive sequence would
 // otherwise have left it. Every case below therefore runs a CONTROL clock with
-// no rollback requested, drives both identically, and asserts on the gap. A
+// no stall requested, drives both identically, and asserts on the gap. A
 // test that asserted an absolute decrement of getPredictionTick() would be
 // asserting the invariant-breaking behaviour we deliberately did not implement.
 //
@@ -342,8 +365,8 @@ TEST_CASE("PCTM.ClientPredictionClock.WarmupGuard.EvaluateDriftConsistency", "[P
 namespace
 {
     // A dead-band config: drift correction can never fire, so the only thing
-    // that can move the two clocks apart is the rollback under test.
-    TimeConfig makeRollbackTestConfig()
+    // that can move the two clocks apart is the stall under test.
+    TimeConfig makeStallTestConfig()
     {
         TimeConfig cfg;
         cfg.minTicksBeforeDriftCheck = 0;      // no startup guard
@@ -355,7 +378,7 @@ namespace
 
     // Drive a clock n times against a fixed authority tick of 0. With the config
     // above this is pure dead-band, so each call advances by exactly 1 unless a
-    // rollback Stall consumes it.
+    // debt-paydown Stall consumes it.
     void driveTicks(ClientPredictionClock& clock, NetworkTimeEstimator& est, unsigned int n)
     {
         for (unsigned int i = 0; i < n; ++i)
@@ -370,10 +393,10 @@ namespace
 // AC-T11-1 — an UPWARD tier transition (0 -> 2) makes the client give back
 // exactly `tierDelayDeltaTicks` predicted ticks.
 // ---------------------------------------------------------------------------
-TEST_CASE("PCTM.ClientPredictionClock.UpwardTierTransitionTriggersProactiveRollback",
-          "[PCTM][ClientPredictionClock][TierRollback]")
+TEST_CASE("PCTM.ClientPredictionClock.UpwardTierTransitionTriggersProactiveStall",
+          "[PCTM][ClientPredictionClock][TierStall]")
 {
-    TimeConfig cfg = makeRollbackTestConfig();
+    TimeConfig cfg = makeStallTestConfig();
 
     // Model the client's tier state exactly as production does: a
     // ReplicatedTierConsumer fed from OnRep, with the delta taken from the
@@ -390,36 +413,36 @@ TEST_CASE("PCTM.ClientPredictionClock.UpwardTierTransitionTriggersProactiveRollb
     NetworkTimeEstimator estA(cfg, nullptr);
     NetworkTimeEstimator estB(cfg, nullptr);
     ClientPredictionClock control(cfg, estA, nullptr);
-    ClientPredictionClock rolled(cfg, estB, nullptr);
+    ClientPredictionClock stalled(cfg, estB, nullptr);
 
-    rolled.requestTierTransitionRollback(delta);
-    REQUIRE(rolled.getPendingTierRollbackTicks() == static_cast<unsigned int>(delta));
+    stalled.requestInputDelayIncreaseStall(delta);
+    REQUIRE(stalled.getRequiredInputDelayIncreaseStallTicks() == static_cast<unsigned int>(delta));
 
     // Enough ticks to pay the debt off in full and then run on normally.
     const unsigned int kDriveTicks = 40;
     driveTicks(control, estA, kDriveTicks);
-    driveTicks(rolled,  estB, kDriveTicks);
+    driveTicks(stalled, estB, kDriveTicks);
 
     // Debt fully paid, and the frontier sits exactly `delta` ticks behind the
     // control clock that was driven identically.
-    REQUIRE(rolled.getPendingTierRollbackTicks() == 0u);
-    REQUIRE(control.getPredictionTick() - rolled.getPredictionTick()
+    REQUIRE(stalled.getRequiredInputDelayIncreaseStallTicks() == 0u);
+    REQUIRE(control.getPredictionTick() - stalled.getPredictionTick()
             == static_cast<unsigned int>(delta));
 
     // The debt is paid as Stalls, and a Stall does not advance either cursor —
     // so the resim cursor must still sit at the frontier (not resimulating).
-    REQUIRE_FALSE(rolled.isResimulating());
+    REQUIRE_FALSE(stalled.isResimulating());
 }
 
 // ---------------------------------------------------------------------------
-// AC-T11-2 — a DOWNWARD tier transition (2 -> 0) causes NO rollback. The client
+// AC-T11-2 — a DOWNWARD tier transition (2 -> 0) causes NO stall. The client
 // may now predict further ahead; that is a natural extension reached by the
 // ordinary drift path, not something to undo here.
 // ---------------------------------------------------------------------------
-TEST_CASE("PCTM.ClientPredictionClock.DownwardTierTransitionDoesNotRollback",
-          "[PCTM][ClientPredictionClock][TierRollback]")
+TEST_CASE("PCTM.ClientPredictionClock.DownwardTierTransitionDoesNotStall",
+          "[PCTM][ClientPredictionClock][TierStall]")
 {
-    TimeConfig cfg = makeRollbackTestConfig();
+    TimeConfig cfg = makeStallTestConfig();
 
     ReplicatedTierConsumer consumer(cfg);
     consumer.onReplicatedTierReceived(2);
@@ -433,32 +456,32 @@ TEST_CASE("PCTM.ClientPredictionClock.DownwardTierTransitionDoesNotRollback",
     NetworkTimeEstimator estA(cfg, nullptr);
     NetworkTimeEstimator estB(cfg, nullptr);
     ClientPredictionClock control(cfg, estA, nullptr);
-    ClientPredictionClock rolled(cfg, estB, nullptr);
+    ClientPredictionClock stalled(cfg, estB, nullptr);
 
-    rolled.requestTierTransitionRollback(delta);
+    stalled.requestInputDelayIncreaseStall(delta);
 
     // The negative delta was dropped outright — no debt was ever registered.
-    REQUIRE(rolled.getPendingTierRollbackTicks() == 0u);
+    REQUIRE(stalled.getRequiredInputDelayIncreaseStallTicks() == 0u);
 
     const unsigned int kDriveTicks = 40;
     driveTicks(control, estA, kDriveTicks);
-    driveTicks(rolled,  estB, kDriveTicks);
+    driveTicks(stalled, estB, kDriveTicks);
 
     // No regression whatsoever: the two clocks are indistinguishable.
-    REQUIRE(rolled.getPredictionTick() == control.getPredictionTick());
+    REQUIRE(stalled.getPredictionTick() == control.getPredictionTick());
 }
 
 // ---------------------------------------------------------------------------
 // AC-T11-3 — consecutive UPWARD transitions (0 -> 1 -> 3) accumulate: the total
-// rollback is the SUM of the deltas, not just the most recent one. Both
+// stall is the SUM of the deltas, not just the most recent one. Both
 // transitions are registered before any tick is driven, so the second lands
 // while the first is still unpaid — the case that would expose an
 // overwrite-instead-of-accumulate bug.
 // ---------------------------------------------------------------------------
 TEST_CASE("PCTM.ClientPredictionClock.MultipleUpwardTransitionsAccumulate",
-          "[PCTM][ClientPredictionClock][TierRollback]")
+          "[PCTM][ClientPredictionClock][TierStall]")
 {
-    TimeConfig cfg = makeRollbackTestConfig();
+    TimeConfig cfg = makeStallTestConfig();
 
     ReplicatedTierConsumer consumer(cfg);
     consumer.onReplicatedTierReceived(0);
@@ -476,26 +499,26 @@ TEST_CASE("PCTM.ClientPredictionClock.MultipleUpwardTransitionsAccumulate",
     NetworkTimeEstimator estA(cfg, nullptr);
     NetworkTimeEstimator estB(cfg, nullptr);
     ClientPredictionClock control(cfg, estA, nullptr);
-    ClientPredictionClock rolled(cfg, estB, nullptr);
+    ClientPredictionClock stalled(cfg, estB, nullptr);
 
-    rolled.requestTierTransitionRollback(deltaA);
-    rolled.requestTierTransitionRollback(deltaB);
+    stalled.requestInputDelayIncreaseStall(deltaA);
+    stalled.requestInputDelayIncreaseStall(deltaB);
 
     // Accumulated, not overwritten.
-    REQUIRE(rolled.getPendingTierRollbackTicks()
+    REQUIRE(stalled.getRequiredInputDelayIncreaseStallTicks()
             == static_cast<unsigned int>(deltaA + deltaB));
 
     const unsigned int kDriveTicks = 40;
     driveTicks(control, estA, kDriveTicks);
-    driveTicks(rolled,  estB, kDriveTicks);
+    driveTicks(stalled, estB, kDriveTicks);
 
-    REQUIRE(rolled.getPendingTierRollbackTicks() == 0u);
-    REQUIRE(control.getPredictionTick() - rolled.getPredictionTick()
+    REQUIRE(stalled.getRequiredInputDelayIncreaseStallTicks() == 0u);
+    REQUIRE(control.getPredictionTick() - stalled.getPredictionTick()
             == static_cast<unsigned int>(deltaA + deltaB));
 
-    // And the cumulative rollback genuinely exceeds either single transition —
+    // And the cumulative stall genuinely exceeds either single transition —
     // guards against a "last delta wins" implementation passing by accident.
-    REQUIRE(control.getPredictionTick() - rolled.getPredictionTick()
+    REQUIRE(control.getPredictionTick() - stalled.getPredictionTick()
             > static_cast<unsigned int>(deltaB));
 }
 

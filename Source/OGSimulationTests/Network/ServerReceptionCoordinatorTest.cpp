@@ -805,4 +805,668 @@ TEST_CASE("ReceptionCoordinator drain still delivers after a delay decrease", "[
     REQUIRE(deliver.calls[0].value == 42);
 }
 
+// ---------------------------------------------------------------------------
+// T12 — the OUT-OF-DOMAIN RECEIPT GATE (og-netcode-v2-input-relay;
+// RelayDelaySpectrumDesign.md §8.1). At receipt, before the dedup watermark and
+// before park/claim/relay, a capture tick outside
+//     [serverTick - rollbackWindowHardCap, serverTick + hardResyncThresholdTicks]
+// is refused: not parked, not claimed, not delivered — counted and summarised in
+// one rate-limited [Warning][InputDomain] line per window.
+//
+// The gate's tick reference is armed ONLY by reapConnections (the game-thread
+// drain hook the adapter already drives every physics frame), which is why every
+// case below calls it first and why the pre-T12 cases above — which never drive a
+// tick — are completely unaffected (the last case here pins that fail-open
+// property explicitly).
+//
+// Bounds are read from the SAME TimeConfig the coordinator borrows, never
+// hardcoded, so these cases keep pinning the real window if a default moves.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+    // The gate's accepted window for a given server tick, derived exactly as the
+    // production code derives it (both bounds inclusive).
+    struct DomainWindow
+    {
+        std::int32_t lower;
+        std::int32_t upper;
+    };
+
+    DomainWindow domainWindowFor(const TimeConfig& cfg, std::int32_t serverTick)
+    {
+        return DomainWindow{
+            serverTick - cfg.rollbackWindowHardCap,
+            serverTick + static_cast<std::int32_t>(cfg.hardResyncThresholdTicks) };
+    }
+}
+
+TEST_CASE("ReceptionCoordinator rejects a capture tick below the domain window", "[Network][ReceptionCoordinator]")
+{
+    TimeConfig cfg;
+    TestCoordinator coord(cfg);
+
+    const FStandaloneTestHandle wire = live(1);
+    const std::int32_t serverTick = 600;
+    const DomainWindow w = domainWindowFor(cfg, serverTick);
+
+    coord.reapConnections(serverTick);       // arm the gate
+
+    const ReceiveRemoteInputResult r =
+        coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, w.lower - 1, 42);
+
+    REQUIRE(r.rejectedOutOfDomain);
+    REQUIRE_FALSE(r.parked);
+    REQUIRE_FALSE(r.acceptedNew);            // the relay signal must not fire either
+
+    // Nothing reached the queue, the claim map, or the relay tap.
+    REQUIRE(coord.claimCount() == 0);
+    REQUIRE_FALSE(coord.delayQueue().hasConnection(wire));
+    REQUIRE(coord.outOfDomainRejectCount() == 1);
+}
+
+TEST_CASE("ReceptionCoordinator rejects a capture tick above the domain window", "[Network][ReceptionCoordinator]")
+{
+    TimeConfig cfg;
+    TestCoordinator coord(cfg);
+
+    const FStandaloneTestHandle wire = live(1);
+    const std::int32_t serverTick = 600;
+    const DomainWindow w = domainWindowFor(cfg, serverTick);
+
+    coord.reapConnections(serverTick);
+
+    const ReceiveRemoteInputResult r =
+        coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, w.upper + 1, 42);
+
+    REQUIRE(r.rejectedOutOfDomain);
+    REQUIRE_FALSE(r.parked);
+    REQUIRE(coord.claimCount() == 0);
+    REQUIRE(coord.outOfDomainRejectCount() == 1);
+}
+
+TEST_CASE("ReceptionCoordinator pins both domain-window edges as inclusive", "[Network][ReceptionCoordinator]")
+{
+    TimeConfig cfg;
+    TestCoordinator coord(cfg);
+
+    const FStandaloneTestHandle wire = live(1);
+    const std::int32_t serverTick = 600;
+    const DomainWindow w = domainWindowFor(cfg, serverTick);
+
+    // The window is [serverTick - 20, serverTick + 21] at the defaults, and the
+    // ordering invariant hardResyncThresholdTicks > rollbackWindowHardCap keeps it
+    // non-empty.
+    REQUIRE(w.lower == serverTick - cfg.rollbackWindowHardCap);
+    REQUIRE(w.upper == serverTick + static_cast<std::int32_t>(cfg.hardResyncThresholdTicks));
+    REQUIRE(w.upper > w.lower);
+
+    coord.reapConnections(serverTick);
+
+    // BOTH EDGES ARE INSIDE the accepted window (inclusive), and the first tick
+    // outside on each side is refused. Distinct slots so each park is independent.
+    REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, w.lower, 1).parked);
+    REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/11, wire, /*slot=*/1, w.upper, 2).parked);
+    REQUIRE(coord.outOfDomainRejectCount() == 0);        // neither edge was refused
+
+    REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/12, wire, /*slot=*/2, w.lower - 1, 3).rejectedOutOfDomain);
+    REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/13, wire, /*slot=*/3, w.upper + 1, 4).rejectedOutOfDomain);
+    REQUIRE(coord.outOfDomainRejectCount() == 2);
+
+    // Only the two in-window edges parked.
+    REQUIRE(coord.claimCount() == 2);
+    REQUIRE(coord.delayQueue().slotCountFor<MockSimA>(wire) == 2);
+}
+
+TEST_CASE("ReceptionCoordinator refuses a warm-up client's free-running capture ticks", "[Network][ReceptionCoordinator]")
+{
+    TimeConfig cfg;
+    TestCoordinator coord(cfg);
+    std::vector<std::string> logged;
+    coord.setLogger([&logged](const char* m) { logged.emplace_back(m); });
+
+    const FStandaloneTestHandle wire = live(1);
+    const std::int32_t serverTick = 600;
+
+    coord.reapConnections(serverTick);
+
+    // THE MOTIVATING SCENARIO: a client that has not yet been anchored to the
+    // server's numbering emits its own counter, 0..59, while the server is at 600.
+    // Every one of those is outside [580, 621] and must die here — once T3 makes
+    // receipt-time input peer-visible, relaying them would push a foreign timeline
+    // onto every other client.
+    for (std::int32_t t = 0; t < 60; ++t)
+    {
+        const ReceiveRemoteInputResult r =
+            coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, t, static_cast<int>(t));
+        REQUIRE(r.rejectedOutOfDomain);
+        REQUIRE_FALSE(r.parked);        // NEVER parked
+        REQUIRE_FALSE(r.acceptedNew);   // NEVER relayed (the T3 relay gate)
+    }
+
+    REQUIRE(coord.outOfDomainRejectCount() == 60);
+    REQUIRE(coord.claimCount() == 0);
+    REQUIRE_FALSE(coord.delayQueue().hasConnection(wire));
+
+    // 60 rejects produced ZERO log lines so far — the summary is rate-limited onto
+    // the window boundary, never emitted per rejection.
+    REQUIRE_FALSE(hasLineContaining(logged, "[InputDomain]"));
+
+    // And the drain has nothing to release — the garbage never entered the queue.
+    RecordingDeliver deliver;
+    coord.releaseDelayedInputs<MockSimA>(serverTick, /*numSteps=*/4, std::ref(deliver));
+    REQUIRE(deliver.calls.empty());
+
+    // Once the same client IS anchored, its input flows normally through the very
+    // same coordinator — the gate is not sticky per id/wire.
+    REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, serverTick + 2, 7).parked);
+    REQUIRE(coord.outOfDomainRejectCount() == 60);
+}
+
+TEST_CASE("ReceptionCoordinator does not deliver an out-of-domain bundle slot", "[Network][ReceptionCoordinator]")
+{
+    TimeConfig cfg;
+    BundleCoordinator coord(cfg);
+
+    const FStandaloneTestHandle wire = live(1);
+    RecordingDeliverySink deliver;
+    const std::int32_t serverTick = 600;
+
+    coord.reapConnections(serverTick);
+
+    // A malformed slot normally falls back to UNDELAYED DELIVERY (the case above
+    // pins that). An out-of-domain tick must NOT take that fallback — it is the one
+    // false-parked path that discards, otherwise the gate would be a no-op for any
+    // client that also has a broken slot.
+    const std::uint8_t badSlot = ConnectionSlotKey<FStandaloneTestHandle>::kMaxPlayerSlot + 1;
+    coord.receiveInputBundle<BundleSim>(/*id=*/10, wire, badSlot, makeBundle({ { 5u, 1 } }), deliver);
+    REQUIRE(deliver.calls.empty());
+    REQUIRE(coord.outOfDomainRejectCount() == 1);
+
+    // A VALID slot carrying an out-of-domain tick: not parked, not delivered.
+    coord.receiveInputBundle<BundleSim>(/*id=*/10, wire, /*slot=*/0, makeBundle({ { 5u, 1 } }), deliver);
+    REQUIRE(deliver.calls.empty());
+    REQUIRE(coord.claimCount() == 0);
+    REQUIRE(coord.outOfDomainRejectCount() == 2);
+
+    // In-domain slots on the same wire are parked exactly as before the gate.
+    coord.receiveInputBundle<BundleSim>(
+        /*id=*/10, wire, /*slot=*/0,
+        makeBundle({ { static_cast<std::uint32_t>(serverTick), 2 } }), deliver);
+    REQUIRE(deliver.calls.empty());
+    REQUIRE(coord.claimCount() == 1);
+    REQUIRE(coord.outOfDomainRejectCount() == 2);
+}
+
+TEST_CASE("ReceptionCoordinator does not let a rejected tick poison the dedup watermark", "[Network][ReceptionCoordinator]")
+{
+    TimeConfig cfg;
+    TestCoordinator coord(cfg);
+
+    const FStandaloneTestHandle wire = live(1);
+    const std::int32_t serverTick = 600;
+    const DomainWindow w = domainWindowFor(cfg, serverTick);
+
+    coord.reapConnections(serverTick);
+
+    // WHY THE GATE RUNS BEFORE noteCaptureTick. The watermark is a monotonic max;
+    // a single wild future tick would raise it forever and every subsequent
+    // LEGITIMATE input would then report acceptedNew == false — silently killing
+    // the [Park] trace and, post-T3, the relay write itself.
+    REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, w.upper + 5000, 1)
+                .rejectedOutOfDomain);
+
+    // The very next in-window input is still ACCEPTED-NEW: the watermark never saw
+    // the garbage.
+    const ReceiveRemoteInputResult good =
+        coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, serverTick, 2);
+    REQUIRE(good.parked);
+    REQUIRE(good.acceptedNew);
+    REQUIRE_FALSE(good.rejectedOutOfDomain);
+}
+
+TEST_CASE("ReceptionCoordinator emits one rate-limited [InputDomain] line per burst", "[Network][ReceptionCoordinator]")
+{
+    TimeConfig cfg;
+    TestCoordinator coord(cfg);
+    std::vector<std::string> logged;
+    coord.setLogger([&logged](const char* m) { logged.emplace_back(m); });
+
+    const FStandaloneTestHandle wire = live(1);
+    const std::int32_t serverTick = 600;
+    // The [InputStats] window (T25) the [InputDomain] line deliberately rides.
+    const std::int32_t window = static_cast<std::int32_t>(2.0 * cfg.tickFrequency);
+
+    coord.reapConnections(serverTick);       // arms the gate AND opens the window
+
+    // A burst: 30 rejects inside one window must NOT produce 30 log lines.
+    for (std::int32_t i = 0; i < 30; ++i)
+    {
+        REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, i, 1).rejectedOutOfDomain);
+    }
+    REQUIRE_FALSE(hasLineContaining(logged, "[InputDomain]"));   // nothing yet — rate-limited
+
+    // Closing the window emits exactly ONE summary line, at Warning severity, with
+    // the burst count and the most recent offender.
+    coord.reapConnections(serverTick + window);
+    REQUIRE(hasLineContaining(logged, "[InputDomain]"));
+    REQUIRE(hasLineContaining(logged, "[Warning]"));
+    REQUIRE(hasLineContaining(logged, "rejected 30 out-of-domain"));
+    REQUIRE(hasLineContaining(logged, "captureTick=29"));
+
+    std::size_t lines = 0;
+    for (const std::string& s : logged)
+    {
+        if (s.find("[InputDomain]") != std::string::npos) ++lines;
+    }
+    REQUIRE(lines == 1);
+
+    // A quiet window emits nothing more (the counter reset with the window), while
+    // the LIFETIME total is preserved.
+    coord.reapConnections(serverTick + 2 * window);
+    REQUIRE(coord.outOfDomainRejectCount() == 30);
+    lines = 0;
+    for (const std::string& s : logged)
+    {
+        if (s.find("[InputDomain]") != std::string::npos) ++lines;
+    }
+    REQUIRE(lines == 1);
+}
+
+TEST_CASE("ReceptionCoordinator leaves in-domain receipt untouched and fails open unarmed", "[Network][ReceptionCoordinator]")
+{
+    TimeConfig cfg;
+    TestCoordinator coord(cfg);
+    std::vector<std::string> logged;
+    coord.setLogger([&logged](const char* m) { logged.emplace_back(m); });
+
+    const FStandaloneTestHandle wire = live(1);
+
+    // (a) FAIL OPEN BEFORE THE FIRST TICK REFERENCE. Nothing has armed the gate, so
+    // it cannot judge and must accept — a gate that failed CLOSED here would drop
+    // every player input on any path that never fed it. This is also exactly why
+    // every pre-T12 case in this file is unaffected by the gate.
+    REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 42).parked);
+    REQUIRE(coord.outOfDomainRejectCount() == 0);
+    REQUIRE_FALSE(hasLineContaining(logged, "[InputDomain]"));
+
+    // (b) ARMED, IN-WINDOW: the accepted path is unchanged — parked, claimed,
+    // accepted-new, no reject flag, no counter movement, and it drains normally at
+    // captureTick + delay with its original tick.
+    const std::int32_t serverTick = 600;
+    coord.reapConnections(serverTick);
+
+    const ReceiveRemoteInputResult r =
+        coord.receiveRemoteInput<MockSimA>(/*id=*/11, wire, /*slot=*/1, serverTick + 3, 7);
+    REQUIRE(r.parked);
+    REQUIRE(r.acceptedNew);
+    REQUIRE_FALSE(r.rejectedOutOfDomain);
+    REQUIRE(coord.outOfDomainRejectCount() == 0);
+
+    RecordingDeliver deliver;
+    coord.releaseDelayedInputs<MockSimA>(serverTick + 3 + cfg.forcedInputLatencyTicks,
+                                         /*numSteps=*/1, std::ref(deliver));
+    REQUIRE(deliver.calls.size() == 1);
+    REQUIRE(deliver.calls[0].captureTick == static_cast<std::uint32_t>(serverTick + 3));
+    REQUIRE(deliver.calls[0].value == 7);
+}
+
+// ---------------------------------------------------------------------------
+// T3 — THE RELAY TAP (og-netcode-v2-input-relay; InputRelayDesign.md §3a,
+// RelayDelaySpectrumDesign.md §5). At receipt, each GENUINELY NEW capture tick is
+// handed to a RemoteInputRelaySink stamped with the wire's effective delay at that
+// moment (`dA`), so a peer can derive the application tick as `captureTick + dA`.
+//
+// WHAT THESE CASES PIN, in the order the risk lives:
+//   * the stamp is the effective delay AT RECEIPT, and it follows a tier change on
+//     the NEXT accepted input while already-relayed entries keep their own stamp;
+//   * exactly-once per newer capture tick — a redundancy re-send relays nothing;
+//   * an out-of-order-OLDER tick is APPLIED by the server but NOT relayed (the
+//     stream is monotonic at depth 1), counted as relayOooSkipCount();
+//   * NO relay on either false-parked path — the malformed-slot fallback (review
+//     A6: `acceptedNew` is TRUE there, so a bare-acceptedNew gate would relay a
+//     stamp promising a delay the authority is not applying) and the out-of-domain
+//     rejection.
+//
+// The DUAL-WRITE / additivity half of the task is proven by every case ABOVE this
+// section still passing unchanged: they call the same entry points without a relay
+// sink, which binds the defaulted no-op sink, and none of their expectations moved.
+// ---------------------------------------------------------------------------
+namespace
+{
+    // A RemoteInputRelaySink (T3) recording every relay the core taps through it.
+    struct RecordingRelaySink
+    {
+        struct Relayed
+        {
+            unsigned int  id;
+            std::uint32_t captureTick;
+            std::uint8_t  dA;
+            int           value;
+        };
+        std::vector<Relayed> calls;
+
+        void relayRemoteInput(unsigned int id, std::uint32_t captureTick,
+                              std::uint8_t dA, const int& in)
+        {
+            calls.push_back(Relayed{ id, captureTick, dA, in });
+        }
+
+        std::size_t countFor(unsigned int id) const
+        {
+            std::size_t n = 0;
+            for (const Relayed& r : calls) if (r.id == id) ++n;
+            return n;
+        }
+    };
+    static_assert(RemoteInputRelaySink<RecordingRelaySink, int>,
+        "the mock relay sink must satisfy the concept it is standing in for");
+
+    // The same, typed for the BundleSim pack used by the receiveInputBundle cases.
+    struct RecordingBundleRelaySink
+    {
+        struct Relayed
+        {
+            unsigned int  id;
+            std::uint32_t captureTick;
+            std::uint8_t  dA;
+            std::int32_t  value;
+        };
+        std::vector<Relayed> calls;
+
+        void relayRemoteInput(unsigned int id, std::uint32_t captureTick,
+                              std::uint8_t dA, const BundleInput& in)
+        {
+            calls.push_back(Relayed{ id, captureTick, dA, in.value });
+        }
+    };
+    static_assert(RemoteInputRelaySink<RecordingBundleRelaySink, BundleInput>,
+        "the mock bundle relay sink must satisfy the concept it is standing in for");
+
+    // THE "A SINK MISSING THE METHOD IS A COMPILE ERROR" AC, expressed as the
+    // compile-time NEGATIVE (a genuinely non-compiling call cannot be a test case).
+    // Both of these FAIL the concept, so passing either to receiveRemoteInput /
+    // receiveInputBundle is a hard constraint failure at the call site.
+    struct SinkWithoutRelay
+    {
+        void deliverRemoteInput(unsigned int, std::uint32_t, const int&) {}
+    };
+    static_assert(!RemoteInputRelaySink<SinkWithoutRelay, int>,
+        "a sink with no relayRemoteInput must NOT satisfy RemoteInputRelaySink");
+
+    // Missing the STAMP specifically — the pre-spectrum (InputRelayDesign.md §3a
+    // draft) signature. It must not silently pass: the whole scheduled read depends
+    // on dA travelling with the entry.
+    struct SinkWithUnstampedRelay
+    {
+        void relayRemoteInput(unsigned int, std::uint32_t, const int&) {}
+    };
+    static_assert(!RemoteInputRelaySink<SinkWithUnstampedRelay, int>,
+        "the unstamped (id, captureTick, input) signature must NOT satisfy the concept");
+
+    // ...and the defaulted no-op sink DOES satisfy it, which is what makes every
+    // pre-T3 call site compile untouched.
+    static_assert(RemoteInputRelaySink<NullRemoteInputRelaySink, int>,
+        "the default no-op sink must satisfy RemoteInputRelaySink");
+}
+
+TEST_CASE("ReceptionCoordinator relays each newer capture tick once, stamped at receipt", "[Network][ReceptionCoordinator][RelayTap]")
+{
+    TimeConfig cfg;
+    TestCoordinator coord(cfg);
+
+    const FStandaloneTestHandle wire = live(1);
+    RecordingRelaySink relay;
+
+    // No tier sampled for this wire yet, so the effective delay is the queue's
+    // no-tier fallback. Read it from the queue rather than hardcoding it — the
+    // stamp must be whatever the release schedule is actually using.
+    const std::int32_t expectedDA = coord.delayQueue().effectiveDelay(wire);
+    REQUIRE(expectedDA == cfg.forcedInputLatencyTicks);
+
+    const ReceiveRemoteInputResult a =
+        coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 42, relay);
+
+    REQUIRE(a.parked);
+    REQUIRE(a.acceptedNew);
+
+    REQUIRE(relay.calls.size() == 1);
+    REQUIRE(relay.calls[0].id == 10);
+    REQUIRE(relay.calls[0].captureTick == 100u);
+    REQUIRE(relay.calls[0].dA == static_cast<std::uint8_t>(expectedDA));
+    REQUIRE(relay.calls[0].value == 42);
+
+    // A newer tick relays again — once, with its own stamp.
+    REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/101, 43, relay).acceptedNew);
+    REQUIRE(relay.calls.size() == 2);
+    REQUIRE(relay.calls[1].captureTick == 101u);
+    REQUIRE(relay.calls[1].value == 43);
+
+    // Two couch-coop owners on ONE wire relay independently, each under its own id.
+    REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/11, wire, /*slot=*/1, /*captureTick=*/100, 7, relay).acceptedNew);
+    REQUIRE(relay.countFor(10) == 2);
+    REQUIRE(relay.countFor(11) == 1);
+
+    // Nothing here is out-of-order, so the skip counter never moved.
+    REQUIRE(coord.relayOooSkipCount() == 0);
+}
+
+TEST_CASE("ReceptionCoordinator does not relay a duplicate capture tick", "[Network][ReceptionCoordinator][RelayTap]")
+{
+    TimeConfig cfg;
+    TestCoordinator coord(cfg);
+
+    const FStandaloneTestHandle wire = live(1);
+    RecordingRelaySink relay;
+
+    coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 42, relay);
+
+    // The redundancy bundle re-sends recent ticks BY DESIGN (depth 3 in production),
+    // so this is the common case, not an error. It must not re-write the peers' ring
+    // and must not be counted as a relay hole — the value the authority parked is
+    // first-wins anyway.
+    coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 42, relay);
+    coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 99, relay);
+
+    REQUIRE(relay.calls.size() == 1);
+    REQUIRE(relay.calls[0].value == 42);
+    REQUIRE(coord.relayOooSkipCount() == 0);
+}
+
+TEST_CASE("ReceptionCoordinator applies but does not relay an out-of-order-older capture tick", "[Network][ReceptionCoordinator][RelayTap]")
+{
+    TimeConfig cfg;
+    TestCoordinator coord(cfg);
+    std::vector<std::string> logged;
+    coord.setLogger([&logged](const char* m) { logged.emplace_back(m); });
+
+    const FStandaloneTestHandle wire = live(1);
+    RecordingRelaySink relay;
+    const std::int32_t delay = cfg.forcedInputLatencyTicks;
+
+    coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 1, relay);
+    coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/103, 2, relay);
+    REQUIRE(relay.calls.size() == 2);
+
+    // 101 now arrives LATE — after 103 already moved the watermark. It is genuinely
+    // new (the delay queue has never seen it), so the SERVER takes it...
+    const ReceiveRemoteInputResult late =
+        coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/101, 3, relay);
+    REQUIRE(late.parked);
+    REQUIRE_FALSE(late.acceptedNew);
+
+    // ...but it is NOT relayed: at depth 1 the payload is replace-latest, so writing
+    // an older input would drag every peer's "latest" backwards. The peer sees a
+    // hole and falls back to last-known; the state channel heals it.
+    REQUIRE(relay.calls.size() == 2);
+    REQUIRE(relay.calls[1].captureTick == 103u);      // still the newest relayed
+
+    // Counted + traced, because the depth>1 future reopens this gate decision on
+    // measured evidence (T9's probe reads exactly this counter).
+    REQUIRE(coord.relayOooSkipCount() == 1);
+    REQUIRE(hasLineContaining(logged, "[RelaySkip]"));
+    REQUIRE(hasLineContaining(logged, "[Verbose]"));
+    REQUIRE(hasLineContaining(logged, "captureTick=101"));
+
+    // AND THE SERVER REALLY DOES APPLY IT — the half that makes the skip a relay
+    // hole rather than an input drop. The drain releases in CAPTURE order (T26's
+    // min-scan), so 101 comes out between 100 and 103 despite arriving last.
+    RecordingDeliver deliver;
+    coord.releaseDelayedInputs<MockSimA>(/*firstUpcomingSimTick=*/100 + delay,
+                                         /*numSteps=*/4, std::ref(deliver));
+    REQUIRE(deliver.calls.size() == 3);
+    REQUIRE(deliver.calls[0].captureTick == 100u);
+    REQUIRE(deliver.calls[1].captureTick == 101u);    // the never-relayed tick, applied
+    REQUIRE(deliver.calls[2].captureTick == 103u);
+}
+
+TEST_CASE("ReceptionCoordinator stamps the relay with the effective delay in force at that receipt", "[Network][ReceptionCoordinator][RelayTap]")
+{
+    TimeConfig cfg;
+    TestCoordinator coord(cfg);
+
+    const FStandaloneTestHandle wire = live(1);
+    RecordingRelaySink relay;
+    RecordingTierSink tierSink;
+
+    // (a) One low-RTT sample puts the wire in tier 0, so the queue now answers the
+    // TIER delay rather than the no-tier fallback.
+    coord.noteRttSample(wire, /*ownerId=*/10, /*serverTick=*/0, /*rttMs=*/10.0, tierSink);
+    const std::int32_t d0 = coord.delayQueue().effectiveDelay(wire);
+    REQUIRE(d0 == cfg.rttTierInputDelays[0]);
+
+    coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 1, relay);
+    REQUIRE(relay.calls.size() == 1);
+    REQUIRE(relay.calls[0].dA == static_cast<std::uint8_t>(d0));
+
+    // (b) A full dwell of tier-1-band samples (60 ms sits in ( >30+hysteresis,
+    // <80 )) moves the wire 0 -> 1, which changes the effective delay.
+    for (std::int32_t t = 1; t <= cfg.tierMinDwellTicks; ++t)
+        coord.noteRttSample(wire, /*ownerId=*/10, /*serverTick=*/t, /*rttMs=*/60.0, tierSink);
+
+    REQUIRE(coord.lookupTierIndex(wire) == 1);
+    const std::int32_t d1 = coord.delayQueue().effectiveDelay(wire);
+    REQUIRE(d1 == cfg.rttTierInputDelays[1]);
+    // Guard against a config edit making this case vacuous: the two delays MUST
+    // differ or nothing below discriminates.
+    REQUIRE(d1 != d0);
+
+    // (c) The NEXT accepted input carries the NEW stamp...
+    coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/101, 2, relay);
+    REQUIRE(relay.calls.size() == 2);
+    REQUIRE(relay.calls[1].dA == static_cast<std::uint8_t>(d1));
+
+    // ...while the ALREADY-RELAYED entry keeps the stamp it was actually relayed
+    // with. The stamp is PER ENTRY (spectrum doc §5.3, intended-vs-actual): a
+    // mid-session delay change must not retroactively rewrite a peer's schedule for
+    // an input the authority already committed to.
+    REQUIRE(relay.calls[0].dA == static_cast<std::uint8_t>(d0));
+}
+
+TEST_CASE("ReceptionCoordinator never relays on the malformed-slot fallback path", "[Network][ReceptionCoordinator][RelayTap]")
+{
+    TimeConfig cfg;
+    TestCoordinator coord(cfg);
+
+    const FStandaloneTestHandle wire = live(1);
+    RecordingRelaySink relay;
+    const std::uint8_t badSlot = ConnectionSlotKey<FStandaloneTestHandle>::kMaxPlayerSlot + 1;
+
+    const ReceiveRemoteInputResult r =
+        coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, badSlot, /*captureTick=*/100, 42, relay);
+
+    // THE TRAP THIS CASE EXISTS FOR (review A6). `acceptedNew` is computed BEFORE
+    // the parked/fallback split, so it is TRUE here even though the input was NOT
+    // parked and the adapter will deliver it UNDELAYED. A relay gated on bare
+    // `acceptedNew` would forward it stamped `captureTick + dA` while the authority
+    // applies it at arrival — the peer would schedule it wrongly.
+    REQUIRE_FALSE(r.parked);
+    REQUIRE(r.acceptedNew);
+    REQUIRE(relay.calls.empty());
+
+    // Nor is the undelayed input mistaken for an out-of-order relay hole.
+    REQUIRE(coord.relayOooSkipCount() == 0);
+}
+
+TEST_CASE("ReceptionCoordinator never relays an out-of-domain capture tick", "[Network][ReceptionCoordinator][RelayTap]")
+{
+    TimeConfig cfg;
+    TestCoordinator coord(cfg);
+
+    const FStandaloneTestHandle wire = live(1);
+    RecordingRelaySink relay;
+    const std::int32_t serverTick = 600;
+    const DomainWindow w = domainWindowFor(cfg, serverTick);
+
+    coord.reapConnections(serverTick);       // arm T12's gate
+
+    // The composition T12's notes flagged forward: the gate runs first, so a
+    // warm-up/free-running client's garbage tick can never reach the tap. This is
+    // the whole reason T12 was mandatory BEFORE the relay made receipt peer-visible.
+    REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, w.lower - 1, 1, relay)
+                .rejectedOutOfDomain);
+    REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, w.upper + 1, 2, relay)
+                .rejectedOutOfDomain);
+    REQUIRE(relay.calls.empty());
+    REQUIRE(coord.relayOooSkipCount() == 0);
+
+    // An in-window tick from the same client on the same wire still relays.
+    coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, serverTick, 3, relay);
+    REQUIRE(relay.calls.size() == 1);
+    REQUIRE(relay.calls[0].captureTick == static_cast<std::uint32_t>(serverTick));
+}
+
+TEST_CASE("ReceptionCoordinator receiveInputBundle relays every newer slot exactly once", "[Network][ReceptionCoordinator][RelayTap]")
+{
+    TimeConfig cfg;
+    BundleCoordinator coord(cfg);
+
+    const FStandaloneTestHandle wire = live(1);
+    RecordingDeliverySink deliver;
+    RecordingBundleRelaySink relay;
+
+    const std::int32_t expectedDA = coord.delayQueue().effectiveDelay(wire);
+
+    // Both slots park; both relay. Delivery is untouched — the relay is an outbound
+    // tap, not a second delivery path.
+    coord.receiveInputBundle<BundleSim>(/*id=*/10, wire, /*slot=*/0,
+                                        makeBundle({ { 100u, 42 }, { 101u, 43 } }),
+                                        deliver, relay);
+    REQUIRE(deliver.calls.empty());
+    REQUIRE(relay.calls.size() == 2);
+    REQUIRE(relay.calls[0].captureTick == 100u);
+    REQUIRE(relay.calls[0].dA == static_cast<std::uint8_t>(expectedDA));
+    REQUIRE(relay.calls[1].captureTick == 101u);
+    REQUIRE(relay.calls[1].value == 43);
+
+    // The NEXT bundle overlaps by design (redundancy depth): only the genuinely
+    // newer slot relays, so the peer's ring is written once per capture tick.
+    coord.receiveInputBundle<BundleSim>(/*id=*/10, wire, /*slot=*/0,
+                                        makeBundle({ { 101u, 43 }, { 102u, 44 } }),
+                                        deliver, relay);
+    REQUIRE(relay.calls.size() == 3);
+    REQUIRE(relay.calls[2].captureTick == 102u);
+    REQUIRE(coord.relayOooSkipCount() == 0);
+}
+
+TEST_CASE("ReceptionCoordinator receiveInputBundle delivers a malformed slot without relaying it", "[Network][ReceptionCoordinator][RelayTap]")
+{
+    TimeConfig cfg;
+    BundleCoordinator coord(cfg);
+
+    const FStandaloneTestHandle wire = live(1);
+    RecordingDeliverySink deliver;
+    RecordingBundleRelaySink relay;
+    const std::uint8_t badSlot = ConnectionSlotKey<FStandaloneTestHandle>::kMaxPlayerSlot + 1;
+
+    coord.receiveInputBundle<BundleSim>(/*id=*/10, wire, badSlot,
+                                        makeBundle({ { 100u, 42 } }), deliver, relay);
+
+    // The A6 gate at the bundle level: the undelayed fallback still runs (no player
+    // input is ever silently dropped), and NOTHING is relayed alongside it.
+    REQUIRE(deliver.calls.size() == 1);
+    REQUIRE(deliver.calls[0].captureTick == 100u);
+    REQUIRE(relay.calls.empty());
+}
+
 #endif // WITH_LOW_LEVEL_TESTS

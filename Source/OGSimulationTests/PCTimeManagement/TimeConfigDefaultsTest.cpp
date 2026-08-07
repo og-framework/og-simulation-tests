@@ -40,6 +40,20 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     REQUIRE(tc.jitterMultiplier == 2.0);
     REQUIRE(tc.predOffsetFloorTicks == 4);
 
+    // --- Outlier RTT rejection (T26b) --------------------------------------
+    // The plausibility bound is `4.0 * smoothedRTT + 0.030 s`, with a 0.5 s
+    // absolute ceiling standing in on the cold-start seed. `rttOutlierConsecutiveLimit`
+    // is the escape hatch: 30 consecutive implausible samples are read as a
+    // GENUINE step change and force a re-seed, which is what keeps the gate a
+    // filter rather than a permanent lock. If any of these five ever changes,
+    // the change must come WITH a focus-swap PIE trace showing what it bought —
+    // they were sized against the ~8 s post-hitch offset transient, not derived.
+    REQUIRE(tc.rttOutlierMultiplier == 4.0);
+    REQUIRE(tc.rttOutlierMarginSeconds == 0.030);
+    REQUIRE(tc.rttOutlierColdStartCeilingSeconds == 0.5);
+    REQUIRE(tc.rttOutlierConsecutiveLimit == 30);
+    REQUIRE(tc.rttOutlierLogWindowSamples == 600);
+
     // --- Drift correction (ClientPredictionClock) --------------------------
     REQUIRE(tc.softDriftThresholdTicks == 3);
     REQUIRE(tc.gradualCorrectionRate == 4);
@@ -64,6 +78,22 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     // 100 Hz interim value was 5; T15 flipped both this assertion and the
     // TimeConfig.h default to 3 in the same atomic change.
     REQUIRE(tc.redundancyDepthTicks == 3);
+
+    // --- Outbound input relay (FRelayedInputRing) --------------------------
+    // Depth 1 is the DEGENERATE default this increment ships: at
+    // relayDelayFloorTicks == 0 a peer's scheduled read nearly always misses and
+    // falls back to last-known input, so a deeper ring would buy bandwidth and
+    // nothing else. The sizing rule (§8.2: depth >= measured replication gap +
+    // margin) cannot be applied until the T9 cadence probe measures the gap — so
+    // if this assertion ever fails, the change must come WITH that measurement.
+    REQUIRE(tc.relayRedundancyDepthTicks == 1);
+
+    // [T11] The floor lever ships OFF. 0 is the degenerate value at which
+    // `max(floor, tier-or-fallback)` is the identity, i.e. at which the whole
+    // relay-delay-spectrum feature reproduces pre-T11 behaviour exactly. Sizing
+    // (§3.3: ~7-8 to cover 80 ms) waits on playtest + the T9 cadence probe — if
+    // this assertion ever fails, the change must come WITH that evidence.
+    REQUIRE(tc.relayDelayFloorTicks == 0);
 
     // --- Test harness mode selector ----------------------------------------
     REQUIRE(tc.harnessMode == TimeConfig::HarnessMode::Production);

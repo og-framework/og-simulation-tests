@@ -34,6 +34,23 @@
 //
 // R-P1: the threshold is always read from TimeConfig, never written as a literal,
 // so a retune of the field moves these expectations with it.
+//
+// [og-netcode-v2-input-relay T8] RE-POINTED, NOT WEAKENED. These cases used to
+// provoke each miss on BOTH insertion paths — `insertCorrectionInput` and
+// `tryInsertingCorrectState` — and count two log lines. T8 retired
+// `insertCorrectionInput` with the server->client correction-INPUT channel, so
+// every case now provokes its miss on the surviving STATE path only and expects
+// one line where it expected two.
+//
+// WHY THAT TESTS THE SAME PROPERTY. The subject here is `isAnomalousMiss`, a
+// single private predicate the two insertion paths SHARED verbatim — each of the
+// two miss branches read `isAnomalousMiss(tick) ? "[Warning]" : "[Verbose]"` from
+// the same method. Nothing about the gate was per-path: not the distance
+// arithmetic, not the no-frontier exemption, not the strict `>` boundary, not the
+// configurable threshold. So exercising it through one caller pins exactly what
+// exercising it through two did; the second call was redundant coverage of a
+// shared predicate, not independent coverage of a second gate. Per-case notes
+// below record what each one now asserts.
 //////////////////////////////////////////////////////////////////////////////
 
 namespace
@@ -98,10 +115,15 @@ namespace
 
 	// Drives the cache to a live prediction frontier at `tick`, then drops the
 	// log lines that produced so a case sees only the miss it provokes.
+	//
+	// [og-netcode-v2-input-relay T16] The `pushPredictionInput(GateInput{ 1 })`
+	// between these two lines is gone with the cache's input column. The FRONTIER
+	// is what these cases need, and the frontier is set by pushPredictionTick
+	// (getPredictionTick is a max over m_tickBuffer); the input write never
+	// participated in isAnomalousMiss's arithmetic. Assertion count unchanged.
 	void seedFrontier(GateCache& cache, LogSink& sink, std::uint32_t tick)
 	{
 		cache.pushPredictionTick(tick);
-		cache.pushPredictionInput(GateInput{ 1 });
 		cache.pushPredictionState(GateState{ 1 });
 		sink.clear();
 	}
@@ -120,12 +142,14 @@ TEST_CASE("Correction miss on a fresh cache with no frontier logs Verbose, not W
 	REQUIRE(cache.getPredictionTick() == 0);
 	REQUIRE(cache.isAnomalousMiss(941u) == false);
 
-	cache.insertCorrectionInput(GateInput{ 7 }, 941u);
+	// [T8] Same miss, one path instead of two. The no-frontier exemption is a
+	// property of isAnomalousMiss (asserted directly above) and of the severity it
+	// selects at the miss site (asserted below); both are intact.
 	cache.tryInsertingCorrectState(GateState{ 7 }, 941u);
 
-	REQUIRE(sink.countMisses() == 2u);
+	REQUIRE(sink.countMisses() == 1u);
 	REQUIRE(sink.sawWarning() == false);
-	REQUIRE(sink.countPrefixed("[Verbose]") == 2u);
+	REQUIRE(sink.countPrefixed("[Verbose]") == 1u);
 }
 
 TEST_CASE("Correction miss within rollbackWindowHardCap logs Verbose",
@@ -140,10 +164,11 @@ TEST_CASE("Correction miss within rollbackWindowHardCap logs Verbose",
 	REQUIRE(cache.isAnomalousMiss(618u) == false);   // ahead by 1
 	REQUIRE(cache.isAnomalousMiss(612u) == false);   // behind by 5
 
-	cache.insertCorrectionInput(GateInput{ 7 }, 618u);
+	// [T8] One path instead of two — both directions of the window are still
+	// asserted, on isAnomalousMiss directly, above.
 	cache.tryInsertingCorrectState(GateState{ 7 }, 618u);
 
-	REQUIRE(sink.countMisses() == 2u);
+	REQUIRE(sink.countMisses() == 1u);
 	REQUIRE(sink.sawWarning() == false);
 	REQUIRE(sink.sawVerbose() == true);
 }
@@ -164,7 +189,11 @@ TEST_CASE("Correction miss at exactly rollbackWindowHardCap is still routine",
 	REQUIRE(cache.isAnomalousMiss(37u + cap) == false);
 	REQUIRE(cache.isAnomalousMiss(37u - cap) == false);
 
-	cache.insertCorrectionInput(GateInput{ 7 }, 37u + cap);
+	// [T8] The provoked miss moves from insertCorrectionInput to the state path.
+	// This case only ever counted ONE line, so the count is unchanged — only which
+	// method emitted it. The boundary itself (strict `>`, so exactly-at-cap stays
+	// routine) is the assertion pair above and is untouched.
+	cache.tryInsertingCorrectState(GateState{ 7 }, 37u + cap);
 
 	REQUIRE(sink.countMisses() == 1u);
 	REQUIRE(sink.sawWarning() == false);
@@ -185,7 +214,12 @@ TEST_CASE("Correction miss beyond rollbackWindowHardCap still logs Warning",
 	REQUIRE(cache.isAnomalousMiss(1000u + beyond) == true);
 	REQUIRE(cache.isAnomalousMiss(1000u - beyond) == true);
 
-	cache.insertCorrectionInput(GateInput{ 7 }, 1000u + beyond);
+	// [T8] BOTH DIRECTIONS ARE PRESERVED — this case's two provocations were an
+	// AHEAD miss and a BEHIND miss, and it would have been a real weakening to drop
+	// one just because it happened to be the input-path call. Both now run through
+	// the state path, so the count and the "two Warnings, no Verbose" assertion are
+	// unchanged.
+	cache.tryInsertingCorrectState(GateState{ 7 }, 1000u + beyond);
 	cache.tryInsertingCorrectState(GateState{ 7 }, 1000u - beyond);
 
 	REQUIRE(sink.countMisses() == 2u);
@@ -205,13 +239,19 @@ TEST_CASE("Miss gating is severity only — insertion behaviour is unchanged",
 
 	const std::uint32_t landedTickBefore = cache.getPredictionTick();
 
+	// [T8] Re-pointed to the state path. The AC this case serves — "no behavioural
+	// change to correction insertion itself; a miss stays a pure no-op regardless
+	// of which severity the gate selected" — is asserted on exactly the same two
+	// observables (the prediction frontier did not move, no correct tick landed)
+	// and still across BOTH severities, which is the part that mattered.
+
 	// Routine miss (Verbose) — nothing written.
-	cache.insertCorrectionInput(GateInput{ 42 }, 501u);
+	cache.tryInsertingCorrectState(GateState{ 42 }, 501u);
 	REQUIRE(cache.getPredictionTick() == landedTickBefore);
 	REQUIRE(cache.getLastCorrectTick() == 0u);
 
 	// Anomalous miss (Warning) — also nothing written.
-	cache.insertCorrectionInput(GateInput{ 42 }, 500u + hardCap() + 5u);
+	cache.tryInsertingCorrectState(GateState{ 42 }, 500u + hardCap() + 5u);
 	REQUIRE(cache.getPredictionTick() == landedTickBefore);
 	REQUIRE(cache.getLastCorrectTick() == 0u);
 

@@ -109,4 +109,71 @@ TEST_CASE("RemoteMoveQueue.AcceptCaptureTickAtBoundary", "[PCTM][RemoteMoveQueue
     REQUIRE(move.input.value == 9);
 }
 
+// ---------------------------------------------------------------------------
+// [og-netcode-v2-input-relay T2] THE UNDERRUN-AMBIGUITY PROOF.
+//
+// SimulationNetSync::collectInputAll's remote branch must record the capture tick
+// of the input the authority applied, and an explicit "no real input" sentinel
+// when the queue underran and the applied input was a SUBSTITUTE. The obvious
+// implementation — dequeue, then check the returned tick — is WRONG, and these
+// two cases are why: `dequeueMove()` on an empty queue returns a value-initialised
+// `Move{}` whose tick is 0, which is byte-identical to what a genuine capture-tick-0
+// input returns. Any underrun test that "passes" by reading a 0 back would equally
+// "pass" on a real tick-0 input and could not see the defect it exists to catch.
+//
+// The only signal that separates the two is `empty()`, sampled BEFORE the dequeue —
+// hence the pre-dequeue gate in collectInputAll. These cases pin the container
+// property that gate depends on, so a future change to dequeueMove's empty-queue
+// return (e.g. to std::optional) fails here, next to the reasoning, rather than
+// silently in the relay's join key.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RemoteMoveQueue.EmptyDequeueIsIndistinguishableFromRealTickZero",
+          "[PCTM][RemoteMoveQueue][InputRelay]")
+{
+    RemoteMoveQueue<TestInput> underrunning;
+    REQUIRE(underrunning.empty());
+
+    // The substituted move an underrun produces.
+    const auto substituted = underrunning.dequeueMove();
+
+    RemoteMoveQueue<TestInput> serving;
+    REQUIRE(serving.queueMove(TestInput{ 0 }, /*captureTick=*/0u,
+                              /*serverAuthorityTick=*/0u, kGuardDisabled)
+            == QueueMoveResult::Enqueued);
+    REQUIRE_FALSE(serving.empty());
+
+    // A REAL tick-0 capture — session start is exactly when this occurs.
+    const auto real = serving.dequeueMove();
+
+    // The returned ticks are equal, so the tick alone cannot classify either one.
+    REQUIRE(substituted.tick == 0u);
+    REQUIRE(real.tick == 0u);
+    REQUIRE(substituted.tick == real.tick);
+}
+
+TEST_CASE("RemoteMoveQueue.EmptyBeforeDequeueIsTheOnlyUnderrunSignal",
+          "[PCTM][RemoteMoveQueue][InputRelay]")
+{
+    RemoteMoveQueue<TestInput> queue;
+
+    // Underrun: empty() is true BEFORE the dequeue. (After it, both cases read
+    // empty — which is the second reason the flag must be sampled first.)
+    REQUIRE(queue.empty());
+    (void)queue.dequeueMove();
+
+    REQUIRE(queue.queueMove(TestInput{ 42 }, /*captureTick=*/0u,
+                            /*serverAuthorityTick=*/0u, kGuardDisabled)
+            == QueueMoveResult::Enqueued);
+
+    // Served: empty() is false BEFORE the dequeue, and true after — so a
+    // post-dequeue check would misreport this real tick-0 input as an underrun.
+    REQUIRE_FALSE(queue.empty());
+    const auto move = queue.dequeueMove();
+    REQUIRE(queue.empty());
+
+    REQUIRE(move.tick == 0u);
+    REQUIRE(move.input.value == 42);
+}
+
 #endif // WITH_LOW_LEVEL_TESTS

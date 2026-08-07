@@ -179,6 +179,14 @@ namespace
 		void setAuthorityGuardContext(TickT, WindowT) {}
 
 		void wipeAllForResync(unsigned int) {}
+
+		// [og-netcode-v2-input-relay T6] MOVED here from MockReconciliation, with
+		// the production method: resim input resolution now reads NetSync-owned
+		// delay lines / relay stores / neutrals, so SimulationManager's resim
+		// branch calls m_netSync. Never invoked on the authority path, but it must
+		// EXIST — onGameSimulation() dispatches to the prediction/resim branches
+		// too, so their bodies compile even though only the authority branch runs.
+		MockResolvedInputs collectResimInputAll(unsigned int) const { return MockResolvedInputs{}; }
 	};
 
 	// Never invoked on the authority path, but wipeAllForResync must EXIST: the
@@ -187,11 +195,6 @@ namespace
 	struct MockReconciliation
 	{
 		void wipeAllForResync(unsigned int) {}
-
-		// Same reason: onGameSimulation() dispatches to the prediction/resim
-		// branches too, so their bodies must compile even though only the
-		// authority branch ever runs here.
-		MockResolvedInputs collectResimInputAll(unsigned int) const { return MockResolvedInputs{}; }
 	};
 
 	using MockSystemsExec = NullSystemsExecutor<SimulatableList<MockSimulatable>, MockStaticData>;
