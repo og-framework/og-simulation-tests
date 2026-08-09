@@ -95,6 +95,27 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     // this assertion ever fails, the change must come WITH that evidence.
     REQUIRE(tc.relayDelayFloorTicks == 0);
 
+    // [T39] The correction-state rotation width. A DECIDED number, not a
+    // placeholder. [T34] LOWERED 2 -> 1 FOR THE PRE-DIET WINDOW, and it goes back
+    // to 2 in the same item-40 change that deletes `kPreDietCharacterCap`.
+    //
+    // The reason is an engine fork, not a byte budget: at K=2 with un-dieted 316 B
+    // states and bare C1's variable-length rings, the SECOND state batch fails
+    // inside Iris's huge-object window (`SplitHugeObject`, > 1,536 bits free) on
+    // roughly a third of frames at four characters, which chunks it and blocks that
+    // character's newer snapshots for ~1 RTT. At K=1 and N <= 4 the residual
+    // failures land below the window => clean Abort => the state ships in packet 2
+    // of the same tick (design_task38_input_first_replication.md §16.2).
+    //
+    // ⚠ THE COST, RECORDED: T39 chose 2 so that two-character sessions kept the
+    // pre-T39 every-frame cadence and the archived two-character baselines stayed
+    // comparable. At K=1 a two-character session corrects at 30 Hz, so that
+    // comparison must now expect exactly half. If this assertion ever fails, the
+    // change must come WITH the packet-budget arithmetic that justifies it — the
+    // round-vs-packet LLT in og-brawler-tests is the fence, and its pre-diet table
+    // is asserted at this same value.
+    REQUIRE(tc.correctionRotationK == 1);
+
     // --- Test harness mode selector ----------------------------------------
     REQUIRE(tc.harnessMode == TimeConfig::HarnessMode::Production);
 

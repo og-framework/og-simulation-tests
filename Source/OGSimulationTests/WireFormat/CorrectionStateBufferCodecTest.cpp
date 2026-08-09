@@ -17,11 +17,20 @@
 // now-independently-cadenced channels.
 //
 // WHY THESE TESTS EXIST. Input is relayed at receipt keyed by CAPTURE tick;
-// state is corrected every frame keyed by the AUTHORITY tick. Without a
-// reference riding the state message, a client resimulating a corrected tick
-// cannot say which relayed input the authority actually fed into it — the whole
-// initiative's correlation would be guesswork off a delay that is only the
-// INTENDED schedule (RelayDelaySpectrumDesign.md §5.3).
+// state is corrected keyed by the AUTHORITY tick. Without a reference riding the
+// state message, a client resimulating a corrected tick cannot say which relayed
+// input the authority actually fed into it — the whole initiative's correlation
+// would be guesswork off a delay that is only the INTENDED schedule
+// (RelayDelaySpectrumDesign.md §5.3).
+//
+// ⚠ [T39] THIS BLOCK USED TO SAY "corrected EVERY FRAME". It is not: T39's
+// write-site rotation means a character's state ships at `tickFrequency * K / N`
+// Hz (`TimeConfig::correctionRotationK`, shipped at 2 — 60 Hz at two characters,
+// 20 Hz at six). NOTHING IN THIS FILE CHANGES AS A RESULT, and that is the point
+// worth recording: these cases pin the codec's LAYOUT and its sentinel, which are
+// cadence-independent by construction. The correction is to the prose only, so a
+// future reader does not take the mirrored premise as a live statement about the
+// channel — see the same correction at the head of CorrectionStateBufferCodec.h.
 //
 // WHAT IS PINNED HERE:
 //   * the ref survives the wire round-trip verbatim, at a FIXED offset, ahead of

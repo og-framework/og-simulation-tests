@@ -450,7 +450,7 @@ TEST_CASE("RelayProbe: the arrival gap is measured in CAPTURE ticks, not local t
     bool          closed      = false;
     for (int i = 0; i < 9; ++i)       // 1 seeding arrival + 8 samples
     {
-        closed = probe.noteArrival(1u, captureTick, summary) || closed;
+        closed = probe.noteArrival(1u, captureTick, /*delivered=*/1u, summary) || closed;
         ++localTick;
         captureTick += 3u;
     }
@@ -486,7 +486,7 @@ TEST_CASE("RelayProbe: the arrival gap is measured in CAPTURE ticks, not local t
     bool closed = false;
     for (int i = 0; i < 7; ++i)
     {
-        closed = probe.noteArrival(2u, captureTick, summary) || closed;
+        closed = probe.noteArrival(2u, captureTick, /*delivered=*/1u, summary) || closed;
         localTick += 4u;
         captureTick += 1u;
     }
@@ -506,57 +506,100 @@ TEST_CASE("RelayProbe: the cadence p99 reports the TAIL a mean would hide",
     RelayArrivalProbe probe(/*windowSamples=*/100u);
     RelayArrivalWindowSummary summary;
 
-    // A KNOWN DISTRIBUTION: 98 gaps of 1 and 2 gaps of 20. The mean is ~1.4 — which
-    // would say "depth 2 is plenty" — while the nearest-rank p99 is 20, which is the
+    // A KNOWN DISTRIBUTION: 98 gaps of 1 and 2 gaps of 16. The mean is ~1.3 — which
+    // would say "depth 2 is plenty" — while the nearest-rank p99 is 16, which is the
     // number `depth >= gap_p99 + margin` has to clear. This is the whole reason the
     // task asks for a percentile rather than an average.
+    //
+    // ⚠ [T34 rework] THE TAIL GAP WAS 20 AND IS NOW 16, and the edit is not
+    // cosmetic: 20 is above kRelayArrivalDiscontinuityTicks, so the guard now
+    // classifies it as an interruption and it never reaches the histogram at all.
+    // 16 is the largest gap that is still a SAMPLE, so this case keeps testing the
+    // percentile — which is what it is about — at the widest tail the probe can
+    // still see. The property is unchanged; only the largest legal tail moved.
     std::uint32_t captureTick = 10u;
-    probe.noteArrival(5u, captureTick, summary);        // seed, not a sample
+    probe.noteArrival(5u, captureTick, /*delivered=*/1u, summary);        // seed, not a sample
 
     bool closed = false;
     for (int i = 0; i < 100; ++i)
     {
         // Put the two long gaps in the middle, so a "last sample wins" bug does not
         // pass by accident.
-        const std::uint32_t gap = (i == 40 || i == 41) ? 20u : 1u;
+        const std::uint32_t gap = (i == 40 || i == 41) ? 16u : 1u;
         captureTick += gap;
-        closed = probe.noteArrival(5u, captureTick, summary) || closed;
+        closed = probe.noteArrival(5u, captureTick, /*delivered=*/1u, summary) || closed;
     }
 
     REQUIRE(closed);
     REQUIRE(summary.samples == 100u);
     REQUIRE(summary.p50 == 1u);
-    REQUIRE(summary.p99 == 20u);
-    REQUIRE(summary.maxGap == 20u);
+    REQUIRE(summary.p99 == 16u);
+    REQUIRE(summary.maxGap == 16u);
+    REQUIRE(summary.discontinuities == 0u);
     REQUIRE_FALSE(summary.p99Saturated);
     REQUIRE(summary.saturatedSamples == 0u);
 }
 
-TEST_CASE("RelayProbe: a gap beyond the tracked range saturates the histogram but not the max",
+// ⚠ [T34 rework] THIS CASE REPLACES "a gap beyond the tracked range saturates the
+// histogram but not the max", WHICH IS NOW UNSATISFIABLE BY CONSTRUCTION — and the
+// replacement is the honest way to record that, because the old case's premise
+// became FALSE rather than merely inconvenient.
+//
+// The histogram's saturating bucket sits at kRelayArrivalMaxTrackedGap = 64. The
+// discontinuity guard fires at 16. 16 < 64, so NO GAP CAN EVER REACH THE OVERFLOW
+// BUCKET: everything large enough to saturate is re-classified before it is
+// sampled. `saturatedSamples` and `p99Saturated` are therefore structurally
+// unreachable from here on.
+//
+// THE FIELDS STAY ANYWAY, and this case pins WHY rather than deleting the
+// question. They are read by every archived T22/T33/T39 window (`saturated=2` is
+// literally how runB's two poisoned windows were spotted), so removing them would
+// break comparability with the logs that motivated the guard. What changes is what
+// an OPERATOR reads: `saturated=` is now permanently 0 and `discont=`/`discontMax=`
+// carry what it used to hint at — badly, since it could not see the 46/47 class at
+// all. The PIE pack must be told that, which is why it is stated here in a test
+// rather than only in a comment.
+TEST_CASE("RelayProbe: the discontinuity guard subsumes the histogram's saturating bucket",
           "[Network][RelayProbe]")
 {
+    // The two constants, and the relation between them that makes the claim true.
+    REQUIRE(kRelayArrivalDiscontinuityTicks < kRelayArrivalMaxTrackedGap);
+
     RelayArrivalProbe probe(/*windowSamples=*/4u);
     RelayArrivalWindowSummary summary;
 
     std::uint32_t captureTick = 1u;
-    probe.noteArrival(1u, captureTick, summary);        // seed
+    probe.noteArrival(1u, captureTick, /*delivered=*/1u, summary);        // seed
 
+    // The old case's exact stimulus — three clean arrivals and one 500-tick jump.
     bool closed = false;
     const std::uint32_t gaps[] = { 1u, 1u, 1u, 500u };
     for (std::uint32_t gap : gaps)
     {
         captureTick += gap;
-        closed = probe.noteArrival(1u, captureTick, summary) || closed;
+        closed = probe.noteArrival(1u, captureTick, /*delivered=*/1u, summary) || closed;
     }
 
-    REQUIRE(closed);
+    // It no longer closes the window: the 500 was not a sample, so only 3 landed.
+    REQUIRE_FALSE(closed);
+    REQUIRE(probe.discontinuities() == 1u);
+    REQUIRE(probe.sampleCount() == 3u);
+
+    captureTick += 1u;
+    REQUIRE(probe.noteArrival(1u, captureTick, /*delivered=*/1u, summary));
+
     REQUIRE(summary.samples == 4u);
-    REQUIRE(summary.saturatedSamples == 1u);
-    REQUIRE(summary.p99 == kRelayArrivalMaxTrackedGap + 1u);
-    REQUIRE(summary.p99Saturated);
-    // THE EXACT NUMBER SURVIVES. A saturated percentile is always accompanied by a
-    // real max, so an operator is never left with only ">= 64".
-    REQUIRE(summary.maxGap == 500u);
+    REQUIRE(summary.saturatedSamples == 0u);            // was 1 before the guard
+    REQUIRE_FALSE(summary.p99Saturated);                // was true before the guard
+    REQUIRE(summary.p99 == 1u);
+    REQUIRE(summary.maxGap == 1u);                      // was 500 before the guard
+
+    // THE EXACT NUMBER STILL SURVIVES — it simply moved fields. An operator is
+    // never left with only ">= 64", and never was; the difference is that the
+    // number is now labelled as the interruption it is instead of being averaged
+    // into a loss rate.
+    REQUIRE(summary.discontinuities == 1u);
+    REQUIRE(summary.maxDiscontinuityGap == 500u);
 }
 
 TEST_CASE("RelayProbe: arrivals that advance no capture tick are not cadence samples",
@@ -565,22 +608,22 @@ TEST_CASE("RelayProbe: arrivals that advance no capture tick are not cadence sam
     RelayArrivalProbe probe(/*windowSamples=*/2u);
     RelayArrivalWindowSummary summary;
 
-    probe.noteArrival(1u, 300u, summary);       // seed
+    probe.noteArrival(1u, 300u, /*delivered=*/1u, summary);       // seed
     // A dA RE-STAMP of an already-resident tick: the ring changed, so OnRep fired,
     // but no new capture tick was delivered. Counting it as a gap of 0 would drag
     // every percentile down and understate the depth requirement.
-    REQUIRE_FALSE(probe.noteArrival(1u, 300u, summary));
-    REQUIRE_FALSE(probe.noteArrival(1u, 300u, summary));
+    REQUIRE_FALSE(probe.noteArrival(1u, 300u, /*delivered=*/1u, summary));
+    REQUIRE_FALSE(probe.noteArrival(1u, 300u, /*delivered=*/1u, summary));
     REQUIRE(probe.sampleCount() == 0u);
     REQUIRE(probe.noAdvance() == 2u);
 
     // A BACKWARDS newest tick is treated the same way rather than producing a
     // nonsense negative gap, and it must not rewind the watermark either.
-    REQUIRE_FALSE(probe.noteArrival(1u, 290u, summary));
+    REQUIRE_FALSE(probe.noteArrival(1u, 290u, /*delivered=*/1u, summary));
     REQUIRE(probe.sampleCount() == 0u);
     REQUIRE(probe.noAdvance() == 3u);
 
-    probe.noteArrival(1u, 302u, summary);       // gap 2 from 300, not 12 from 290
+    probe.noteArrival(1u, 302u, /*delivered=*/1u, summary);       // gap 2 from 300, not 12 from 290
     REQUIRE(probe.sampleCount() == 1u);
     REQUIRE(probe.maxGap() == 2u);
 }
@@ -594,10 +637,10 @@ TEST_CASE("RelayProbe: capture-tick watermarks are per component",
     // TWO SENDERS AT DIFFERENT CAPTURE-TICK OFFSETS — the couch-coop / late-join
     // shape. A single shared watermark would compute an enormous cross-component
     // gap on every alternation.
-    probe.noteArrival(1u, 1000u, summary);
-    probe.noteArrival(2u, 40u, summary);
-    probe.noteArrival(1u, 1001u, summary);
-    probe.noteArrival(2u, 41u, summary);
+    probe.noteArrival(1u, 1000u, /*delivered=*/1u, summary);
+    probe.noteArrival(2u, 40u, /*delivered=*/1u, summary);
+    probe.noteArrival(1u, 1001u, /*delivered=*/1u, summary);
+    probe.noteArrival(2u, 41u, /*delivered=*/1u, summary);
 
     REQUIRE(probe.sampleCount() == 2u);
     REQUIRE(probe.maxGap() == 1u);
@@ -605,8 +648,562 @@ TEST_CASE("RelayProbe: capture-tick watermarks are per component",
     probe.forgetOwner(2u);
     // After the unregister, id 2's next arrival seeds afresh instead of measuring
     // against a watermark that belonged to a character that no longer exists.
-    REQUIRE_FALSE(probe.noteArrival(2u, 9000u, summary));
+    REQUIRE_FALSE(probe.noteArrival(2u, 9000u, /*delivered=*/1u, summary));
     REQUIRE(probe.sampleCount() == 2u);
+}
+
+// ---------------------------------------------------------------------------
+// ⭐ [og-netcode-v2-input-relay T34] THE R = 0 LOSS COUNTER.
+//
+// Bare C1 sends each input exactly once and there is NO send-success signal
+// anywhere in Iris that game code can read (T38 §4.3), so permanent input loss is
+// invisible on the server by construction. The countable end is here: capture ticks
+// are per-character monotonic at ~60/s, so a gap of g means g-1 inputs were
+// produced and never arrived. Steady-state expectation is ~11 per mille — the
+// measured 1.122 % wire loss — and a sustained excess over the server's
+// `[RelayProbe.Budget] lost=` rate is what turns "revisit R = 1" from an opinion
+// into evidence.
+//
+// These cases pin the arithmetic on hand-computed streams, including the two ways
+// it could be silently wrong: counting no-advance arrivals (which would invent loss
+// out of dA re-stamps) and using the sample COUNT as the denominator (which would
+// under-report loss by exactly the factor being measured).
+//
+// ---------------------------------------------------------------------------
+// ⛔ [T34 loss-counter fix] AND THE THIRD WAY, WHICH IS THE ONE THAT ACTUALLY
+// HAPPENED. The numerator was `Sum(gap - 1)`, i.e. ADVANCE OF THE NEWEST WATERMARK
+// MINUS ONE. Under replace-latest that equalled the lost count because one arrival
+// carried exactly one entry. Under flush-on-poll ONE ARRIVAL CARRIES THE WHOLE
+// BURST, so a 2-entry burst advances the watermark by 2 and the old formula charged
+// 1 as lost while both entries had arrived. On `runs/t34_run1_2char_2026-08-09_1938`
+// it read 122 / 129 per mille against a ~11 per mille pass condition — and it was
+// measuring the burst rate: that run's `[RelayFlush] entriesPerRoundX100` was
+// 112-113, and 1 - 1/1.13 = 115 per mille.
+//
+// The numerator is now `Sum(gap - delivered)`, where `delivered` is how many NEW
+// capture ticks the arrival carried. `noteArrival`'s third parameter is REQUIRED
+// and has no default, because a default of 1 is the retired premise.
+//
+// ⚠ WHY EVERY PRE-EXISTING SITE IN THIS FILE PASSES `/*delivered=*/1u`, AND WHY
+// THAT IS NOT A RUBBER STAMP: those cases model the depth-1 / replace-latest shape
+// they were written for — one entry per arrival — which is also the shape every
+// ARCHIVED window in `runs/` was recorded in. At `delivered == 1` the new formula
+// reduces exactly to the old one, so those cases assert IDENTICAL numbers before
+// and after this fix, and the archived counterfactual stays comparable. The BURST
+// cases below are the ones that could not have passed before.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RelayProbe: the loss counter is the sum of gap-1 over expected captures",
+          "[Network][RelayProbe]")
+{
+    RelayArrivalProbe probe(/*windowSamples=*/4u);
+    RelayArrivalWindowSummary summary;
+
+    // Capture ticks 100, 101, 103, 104, 108 — one lost at 102, three lost at
+    // 105/106/107. Gaps are 1, 2, 1, 4 => lost 0+1+0+3 = 4 over an expected span of
+    // 1+2+1+4 = 8. Deliberately NOT a round fraction: 500 per mille is a number a
+    // wrong implementation could also produce by accident.
+    probe.noteArrival(1u, 100u, /*delivered=*/1u, summary);       // seed — contributes nothing
+    REQUIRE_FALSE(probe.noteArrival(1u, 101u, /*delivered=*/1u, summary));
+    REQUIRE_FALSE(probe.noteArrival(1u, 103u, /*delivered=*/1u, summary));
+    REQUIRE_FALSE(probe.noteArrival(1u, 104u, /*delivered=*/1u, summary));
+    REQUIRE(probe.noteArrival(1u, 108u, /*delivered=*/1u, summary));
+
+    REQUIRE(summary.samples == 4u);
+    REQUIRE(summary.lostCaptureTicks == 4u);
+    REQUIRE(summary.expectedCaptureTicks == 8u);
+    REQUIRE(summary.lostCaptureTicksX1000 == 500u);
+
+    // The denominator is the CAPTURE span, not the sample count. Those differ by
+    // exactly the loss, so using `samples` would report 4/4 = 1000 here.
+    REQUIRE(summary.expectedCaptureTicks != summary.samples);
+}
+
+TEST_CASE("RelayProbe: a perfect stream reports zero loss, and the steady-state rate is ~11 per mille",
+          "[Network][RelayProbe]")
+{
+    RelayArrivalProbe probe(/*windowSamples=*/100u);
+    RelayArrivalWindowSummary summary;
+
+    // 101 arrivals, every capture tick present. Nothing lost, and the ratio must be
+    // exactly 0 rather than a rounding artefact.
+    probe.noteArrival(1u, 1000u, /*delivered=*/1u, summary);
+    bool closed = false;
+    for (std::uint32_t i = 1u; i <= 100u; ++i)
+        closed = probe.noteArrival(1u, 1000u + i, /*delivered=*/1u, summary);
+
+    REQUIRE(closed);
+    REQUIRE(summary.samples == 100u);
+    REQUIRE(summary.lostCaptureTicks == 0u);
+    REQUIRE(summary.expectedCaptureTicks == 100u);
+    REQUIRE(summary.lostCaptureTicksX1000 == 0u);
+
+    // And the shipped expectation, driven rather than asserted in a comment: at the
+    // measured 1.122 % wire loss roughly one arrival in 89 carries a gap of 2. Here
+    // that is 88 clean arrivals and 1 doubled one out of 89 samples => 1 lost over
+    // 90 expected => 11 per mille, which is the number a healthy window must show.
+    RelayArrivalProbe steady(/*windowSamples=*/89u);
+    RelayArrivalWindowSummary steadySummary;
+    std::uint32_t tick = 0u;
+    steady.noteArrival(2u, tick, /*delivered=*/1u, steadySummary);
+    bool steadyClosed = false;
+    for (std::uint32_t i = 0u; i < 89u; ++i)
+    {
+        tick += (i == 40u) ? 2u : 1u;           // one dropped capture, mid-window
+        steadyClosed = steady.noteArrival(2u, tick, /*delivered=*/1u, steadySummary);
+    }
+    REQUIRE(steadyClosed);
+    REQUIRE(steadySummary.lostCaptureTicks == 1u);
+    REQUIRE(steadySummary.expectedCaptureTicks == 90u);
+    REQUIRE(steadySummary.lostCaptureTicksX1000 == 11u);
+}
+
+TEST_CASE("RelayProbe: no-advance arrivals invent no loss, and the counter resets with the window",
+          "[Network][RelayProbe]")
+{
+    RelayArrivalProbe probe(/*windowSamples=*/2u);
+    RelayArrivalWindowSummary summary;
+
+    probe.noteArrival(1u, 500u, /*delivered=*/1u, summary);
+    // Three dA re-stamps: the ring changed and OnRep fired, but no capture tick was
+    // delivered. They say nothing about loss and must touch neither term — under
+    // R = 0 an inflated loss counter is an escalation trigger fired on noise.
+    REQUIRE_FALSE(probe.noteArrival(1u, 500u, /*delivered=*/1u, summary));
+    REQUIRE_FALSE(probe.noteArrival(1u, 500u, /*delivered=*/1u, summary));
+    REQUIRE_FALSE(probe.noteArrival(1u, 499u, /*delivered=*/1u, summary));      // backwards: same treatment
+
+    RelayArrivalWindowSummary peek;
+    probe.peekSummary(peek);
+    REQUIRE(peek.noAdvance == 3u);
+    REQUIRE(peek.lostCaptureTicks == 0u);
+    REQUIRE(peek.expectedCaptureTicks == 0u);
+    REQUIRE(peek.lostCaptureTicksX1000 == 0u);   // 0/0 is 0, not a division fault
+
+    // Close a window carrying loss, then confirm the next one starts clean — a
+    // counter that survived the reset would report a monotonically rising rate
+    // forever and every window after the first would be unreadable.
+    REQUIRE_FALSE(probe.noteArrival(1u, 503u, /*delivered=*/1u, summary));       // gap 3 from 500
+    REQUIRE(probe.noteArrival(1u, 504u, /*delivered=*/1u, summary));             // gap 1, closes
+    REQUIRE(summary.lostCaptureTicks == 2u);
+    REQUIRE(summary.expectedCaptureTicks == 4u);
+    REQUIRE(summary.lostCaptureTicksX1000 == 500u);
+
+    probe.peekSummary(peek);
+    REQUIRE(peek.lostCaptureTicks == 0u);
+    REQUIRE(peek.expectedCaptureTicks == 0u);
+
+    // The per-id watermark deliberately survives the reset, so the gap across a
+    // window edge is a real gap and is counted in the NEW window.
+    REQUIRE_FALSE(probe.noteArrival(1u, 507u, /*delivered=*/1u, summary));
+    probe.peekSummary(peek);
+    REQUIRE(peek.lostCaptureTicks == 2u);        // 505, 506
+    REQUIRE(peek.expectedCaptureTicks == 3u);
+}
+
+TEST_CASE("RelayProbe: loss aggregates across remote characters on one shared window",
+          "[Network][RelayProbe]")
+{
+    // The arrival window is shared by every remote character on a client (the game
+    // thread has no per-character clock to window on). Both terms are sums over the
+    // same sample set, so the ratio stays a correct per-mille of expected captures
+    // however many senders contribute and whatever their capture-tick offsets are —
+    // which is what makes ONE line readable at 2, 3 or 4 characters.
+    RelayArrivalProbe probe(/*windowSamples=*/4u);
+    RelayArrivalWindowSummary summary;
+
+    probe.noteArrival(1u, 1000u, /*delivered=*/1u, summary);       // seed A
+    probe.noteArrival(2u, 40u, /*delivered=*/1u, summary);         // seed B, wildly different offset
+
+    REQUIRE_FALSE(probe.noteArrival(1u, 1001u, /*delivered=*/1u, summary));   // gap 1, lost 0
+    REQUIRE_FALSE(probe.noteArrival(2u, 43u, /*delivered=*/1u, summary));     // gap 3, lost 2
+    REQUIRE_FALSE(probe.noteArrival(1u, 1002u, /*delivered=*/1u, summary));   // gap 1, lost 0
+    REQUIRE(probe.noteArrival(2u, 44u, /*delivered=*/1u, summary));           // gap 1, lost 0
+
+    REQUIRE(summary.samples == 4u);
+    REQUIRE(summary.lostCaptureTicks == 2u);
+    REQUIRE(summary.expectedCaptureTicks == 6u);
+    REQUIRE(summary.lostCaptureTicksX1000 == 333u);
+}
+
+// ---------------------------------------------------------------------------
+// ⭐ [T34 loss-counter fix] 5a. THE BURST — the cases the old formula could not
+// pass, and the reduction that keeps the archives comparable.
+//
+// Each of these drives an arrival that carries MORE THAN ONE new capture tick,
+// which is the shape flush-on-poll produces and replace-latest never could. The
+// "before" column is DERIVED in the case from the same gap list — never typed as a
+// constant — so the comparison cannot go stale against a formula change.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RelayProbe: a flushed burst that lost nothing reports zero loss",
+          "[Network][RelayProbe]")
+{
+    RelayArrivalProbe probe(/*windowSamples=*/2u);
+    RelayArrivalWindowSummary summary;
+
+    // TWO FLUSH ROUNDS. The first publishes captures 201-203, the second 204-205.
+    // Nothing was lost: every capture tick the sender produced arrived, just in
+    // bursts rather than one per replication.
+    probe.noteArrival(1u, 200u, /*delivered=*/1u, summary);      // seed
+
+    REQUIRE_FALSE(probe.noteArrival(1u, 203u, /*delivered=*/3u, summary));
+    REQUIRE(probe.noteArrival(1u, 205u, /*delivered=*/2u, summary));
+
+    // ⛔ WHAT THE OLD FORMULA WOULD HAVE SAID, derived here rather than asserted
+    // from memory: Sum(gap - 1) over gaps {3, 2} is 3, against an expected span of
+    // 5 — 600 per mille of "loss" on a stream that lost NOTHING. That is the defect,
+    // in its smallest reproducible form.
+    const std::uint32_t gaps[] = { 3u, 2u };
+    std::uint32_t expectedAll = 0u;
+    for (const std::uint32_t g : gaps)
+        expectedAll += g;
+    const std::uint32_t unguardedLost =
+        expectedAll - static_cast<std::uint32_t>(sizeof(gaps) / sizeof(gaps[0]));
+    REQUIRE(unguardedLost == 3u);
+    REQUIRE((unguardedLost * 1000u) / expectedAll == 600u);
+
+    // ...and what it says now.
+    REQUIRE(summary.samples == 2u);
+    REQUIRE(summary.lostCaptureTicks == 0u);
+    REQUIRE(summary.deliveredCaptureTicks == 5u);
+    REQUIRE(summary.expectedCaptureTicks == 5u);
+    REQUIRE(summary.lostCaptureTicksX1000 == 0u);
+
+    // THE SELF-CHECK the log line carries: every expected tick is either delivered
+    // or lost, and there is no third place for one to go.
+    REQUIRE(summary.lostCaptureTicks + summary.deliveredCaptureTicks
+            == summary.expectedCaptureTicks);
+}
+
+TEST_CASE("RelayProbe: a burst with one capture tick genuinely absent reports exactly one",
+          "[Network][RelayProbe]")
+{
+    RelayArrivalProbe probe(/*windowSamples=*/1u);
+    RelayArrivalWindowSummary summary;
+
+    // The watermark is at 300 and the next flush publishes a round whose newest is
+    // 303 — but it carries only TWO new capture ticks (301 and 303; 302 was lost on
+    // the wire). The gap is 3, two of those three ticks arrived, so exactly one
+    // never did.
+    probe.noteArrival(1u, 300u, /*delivered=*/1u, summary);      // seed
+    REQUIRE(probe.noteArrival(1u, 303u, /*delivered=*/2u, summary));
+
+    REQUIRE(summary.samples == 1u);
+    REQUIRE(summary.lostCaptureTicks == 1u);
+    REQUIRE(summary.deliveredCaptureTicks == 2u);
+    REQUIRE(summary.expectedCaptureTicks == 3u);
+    REQUIRE(summary.lostCaptureTicksX1000 == 333u);
+    REQUIRE(summary.lostCaptureTicks + summary.deliveredCaptureTicks
+            == summary.expectedCaptureTicks);
+
+    // ⭐ THE DISCRIMINATION THE INSTRUMENT EXISTS FOR, and the previous case is the
+    // other half of it: the SAME gap of 3 reports 0 lost when the burst was
+    // complete and 1 lost when it was not. The old formula reported 2 for both,
+    // because it never saw the difference.
+}
+
+TEST_CASE("RelayProbe: at one entry per arrival the counter reduces exactly to gap-1",
+          "[Network][RelayProbe]")
+{
+    // ⭐ THE COMPATIBILITY PROPERTY, and it is why every archived comparison and the
+    // `replaceLatestObservableX1000` counterfactual survive this change. At
+    // `delivered == 1` — the replace-latest shape, and the shape every window in
+    // `runs/` was recorded in — `gap - delivered` IS `gap - 1`, term for term.
+    const std::uint32_t gaps[] = { 1u, 2u, 1u, 4u, 1u, 3u };
+
+    RelayArrivalProbe probe(/*windowSamples=*/6u);
+    RelayArrivalWindowSummary summary;
+
+    std::uint32_t tick = 700u;
+    probe.noteArrival(1u, tick, /*delivered=*/1u, summary);      // seed
+    bool closed = false;
+    for (const std::uint32_t g : gaps)
+    {
+        tick += g;
+        closed = probe.noteArrival(1u, tick, /*delivered=*/1u, summary);
+    }
+    REQUIRE(closed);
+
+    // The old arithmetic, computed here from the same list.
+    std::uint32_t legacyLost     = 0u;
+    std::uint32_t legacyExpected = 0u;
+    for (const std::uint32_t g : gaps)
+    {
+        legacyLost     += (g - 1u);
+        legacyExpected += g;
+    }
+
+    REQUIRE(summary.lostCaptureTicks == legacyLost);
+    REQUIRE(summary.expectedCaptureTicks == legacyExpected);
+    REQUIRE(summary.lostCaptureTicksX1000 == (legacyLost * 1000u) / legacyExpected);
+
+    // And the third term is exactly the sample count, which is what "one entry per
+    // arrival" means.
+    REQUIRE(summary.deliveredCaptureTicks == summary.samples);
+}
+
+TEST_CASE("RelayProbe: a delivered count above the gap cannot report negative loss",
+          "[Network][RelayProbe]")
+{
+    // The clamp. `delivered` is a count of ticks the arrival made newly resident,
+    // and an arrival that ALSO back-fills a hole below the watermark would report
+    // more new ticks than the interval (previousNewest, newest] contains. That is
+    // not reachable under R = 0's monotonic single-publish stream, but nothing in
+    // the type system excludes it, and an unclamped `gap - delivered` on unsigned
+    // arithmetic would wrap to ~4 billion "lost" ticks — the loudest possible
+    // version of the quietest possible bug.
+    RelayArrivalProbe probe(/*windowSamples=*/1u);
+    RelayArrivalWindowSummary summary;
+
+    probe.noteArrival(1u, 900u, /*delivered=*/1u, summary);      // seed
+    REQUIRE(probe.noteArrival(1u, 901u, /*delivered=*/5u, summary));
+
+    REQUIRE(summary.samples == 1u);
+    REQUIRE(summary.expectedCaptureTicks == 1u);
+    REQUIRE(summary.lostCaptureTicks == 0u);
+    REQUIRE(summary.deliveredCaptureTicks == 1u);        // clamped to the gap
+    REQUIRE(summary.lostCaptureTicksX1000 == 0u);
+    REQUIRE(summary.lostCaptureTicks + summary.deliveredCaptureTicks
+            == summary.expectedCaptureTicks);
+}
+
+TEST_CASE("RelayProbe: a discontinuity carrying a burst still contributes to no accumulator",
+          "[Network][RelayProbe]")
+{
+    // ⚠ HOW THE TWO GUARDS COMPOSE, which is the one thing this fix could have got
+    // wrong. A discontinuous arrival may well carry a full flush burst; crediting
+    // its `delivered` while (correctly) not charging its `gap` would let an
+    // INTERRUPTION IMPROVE the reported rate — an instrument that reads healthier
+    // the worse the connection gets. Both terms are discarded, together.
+    RelayArrivalProbe probe(/*windowSamples=*/2u);
+    RelayArrivalWindowSummary summary;
+
+    probe.noteArrival(1u, 100u, /*delivered=*/1u, summary);      // seed
+    REQUIRE_FALSE(probe.noteArrival(1u, 102u, /*delivered=*/2u, summary));   // clean burst
+
+    // 100 capture ticks of nothing, then a full 8-entry burst as the connection
+    // recovers. The gap is 100, far above kRelayArrivalDiscontinuityTicks.
+    std::uint32_t gapOut = 12345u;
+    REQUIRE_FALSE(probe.noteArrival(1u, 202u, /*delivered=*/8u, summary, &gapOut));
+    REQUIRE(gapOut == 0u);
+    REQUIRE(probe.discontinuities() == 1u);
+    REQUIRE(probe.sampleCount() == 1u);
+
+    RelayArrivalWindowSummary peek;
+    probe.peekSummary(peek);
+    REQUIRE(peek.lostCaptureTicks == 0u);
+    REQUIRE(peek.deliveredCaptureTicks == 2u);      // the clean burst only, NOT 10
+    REQUIRE(peek.expectedCaptureTicks == 2u);
+    REQUIRE(peek.maxDiscontinuityGap == 100u);
+
+    // The watermark still advanced across the interruption, so the next arrival
+    // measures from the far side of it and the window closes on real samples.
+    REQUIRE(probe.noteArrival(1u, 203u, /*delivered=*/1u, summary));
+    REQUIRE(summary.samples == 2u);
+    REQUIRE(summary.lostCaptureTicks == 0u);
+    REQUIRE(summary.deliveredCaptureTicks == 3u);
+    REQUIRE(summary.expectedCaptureTicks == 3u);
+    REQUIRE(summary.discontinuities == 1u);
+    REQUIRE(summary.maxDiscontinuityGap == 100u);
+}
+
+// ---------------------------------------------------------------------------
+// [T34 rework] 5b. THE DISCONTINUITY GUARD on the loss counter.
+//
+// `lostCaptureTicksX1000` is item 34's discriminating gate term, so a stall that
+// inflates it 30x is not a cosmetic defect — it is a false Rework, or a false
+// escalation back to R = 1. These three cases pin the guard, the THRESHOLD VALUE
+// (which is forced by the archives, not chosen), and its effect on the real
+// poisoned windows those archives contain.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RelayProbe: a window containing a discontinuity reports it and is not charged for it",
+          "[Network][RelayProbe]")
+{
+    RelayArrivalProbe probe(/*windowSamples=*/4u);
+    RelayArrivalWindowSummary summary;
+
+    probe.noteArrival(1u, 100u, /*delivered=*/1u, summary);                   // seed
+
+    REQUIRE_FALSE(probe.noteArrival(1u, 101u, /*delivered=*/1u, summary));    // gap 1
+    REQUIRE_FALSE(probe.noteArrival(1u, 103u, /*delivered=*/1u, summary));    // gap 2 — one real loss
+
+    // THE INTERRUPTION. 60 capture ticks is a full second of nothing: a stall, a
+    // relevancy pause, a hiccup. Charged in full it would be 59 "lost" inputs
+    // against an expected span of 64, i.e. ~920 per mille on a window whose other
+    // samples are healthy.
+    std::uint32_t gapOut = 12345u;
+    REQUIRE_FALSE(probe.noteArrival(1u, 163u, /*delivered=*/1u, summary, &gapOut));
+    REQUIRE(probe.discontinuities() == 1u);
+
+    // It contributed NO gap to the caller either — the per-event Verbose line
+    // reports what a sample contributed, and this contributed nothing.
+    REQUIRE(gapOut == 0u);
+
+    // It is not a sample: it neither advanced the window nor entered the histogram.
+    REQUIRE(probe.sampleCount() == 2u);
+    REQUIRE(probe.maxGap() == 2u);
+
+    // The watermark DID advance, so the next arrival measures from the far side of
+    // the interruption rather than re-charging it.
+    REQUIRE_FALSE(probe.noteArrival(1u, 164u, /*delivered=*/1u, summary));    // gap 1
+    REQUIRE(probe.noteArrival(1u, 165u, /*delivered=*/1u, summary));          // gap 1, closes
+
+    REQUIRE(summary.samples == 4u);
+    REQUIRE(summary.maxGap == 2u);                          // NOT 60
+    REQUIRE(summary.lostCaptureTicks == 1u);                // only capture tick 102
+    REQUIRE(summary.expectedCaptureTicks == 5u);            // 1+2+1+1
+    REQUIRE(summary.lostCaptureTicksX1000 == 200u);
+
+    // ...and the interruption is REPORTED rather than hidden. Both fields matter:
+    // the count is the discard rule, the magnitude is what it discarded.
+    REQUIRE(summary.discontinuities == 1u);
+    REQUIRE(summary.maxDiscontinuityGap == 60u);
+
+    // Per-window, like ServerFrameProbe's — a cumulative count would mark every
+    // window after the first as interrupted forever.
+    RelayArrivalWindowSummary peek;
+    probe.peekSummary(peek);
+    REQUIRE(peek.discontinuities == 0u);
+    REQUIRE(peek.maxDiscontinuityGap == 0u);
+}
+
+TEST_CASE("RelayProbe: the discontinuity threshold is 16, and both sides of it are pinned",
+          "[Network][RelayProbe]")
+{
+    // ⚠ THE VALUE IS LOAD-BEARING AND IS FORCED BY THE ARCHIVES, not chosen for
+    // taste. The three archived runs' gap distribution is bimodal with an empty
+    // band at 7..17; every real outlier is >= 18 and every healthy sample is <= 6.
+    // A threshold of 20 or 24 — both inside the reviewer's suggested 15..30 range —
+    // would let the 18/20/22 class straight through and fix nothing (the next case
+    // drives exactly that window). Asserting the constant here means a future edit
+    // to it has to come past this comment.
+    REQUIRE(kRelayArrivalDiscontinuityTicks == 16u);
+
+    // EXACTLY AT the threshold is still a sample: the guard triggers on `>`, so 16
+    // is charged in full. This is the boundary a re-implementation slips on.
+    {
+        RelayArrivalProbe probe(/*windowSamples=*/1u);
+        RelayArrivalWindowSummary summary;
+        probe.noteArrival(1u, 1000u, /*delivered=*/1u, summary);
+        REQUIRE(probe.noteArrival(1u, 1016u, /*delivered=*/1u, summary));
+        REQUIRE(summary.samples == 1u);
+        REQUIRE(summary.lostCaptureTicks == 15u);
+        REQUIRE(summary.expectedCaptureTicks == 16u);
+        REQUIRE(summary.discontinuities == 0u);
+    }
+
+    // ONE ABOVE is excluded — and the window then never closes on it, which is the
+    // whole point: a window must close on real samples or its span is a fiction.
+    {
+        RelayArrivalProbe probe(/*windowSamples=*/1u);
+        RelayArrivalWindowSummary summary;
+        probe.noteArrival(1u, 1000u, /*delivered=*/1u, summary);
+        REQUIRE_FALSE(probe.noteArrival(1u, 1017u, /*delivered=*/1u, summary));
+        REQUIRE(probe.discontinuities() == 1u);
+        REQUIRE(probe.sampleCount() == 0u);
+
+        RelayArrivalWindowSummary peek;
+        probe.peekSummary(peek);
+        REQUIRE(peek.lostCaptureTicks == 0u);
+        REQUIRE(peek.expectedCaptureTicks == 0u);
+        REQUIRE(peek.maxDiscontinuityGap == 17u);
+    }
+}
+
+TEST_CASE("RelayProbe: the archived poisoned windows report healthy loss under the guard",
+          "[Network][RelayProbe]")
+{
+    // ⭐ THE VALIDATION THE FIX EXISTS FOR, driven from the REAL archived windows
+    // rather than from invented numbers. Each case below reconstructs a window that
+    // actually appears in `runs/`, computes what the UNGUARDED arithmetic would have
+    // reported from the same gap list, and then asserts what the guarded probe does
+    // report. The unguarded figure is derived here, never typed as a constant.
+
+    struct Window
+    {
+        const char*   name;
+        std::uint32_t healthyOnes;      // gaps of 1
+        std::uint32_t healthyTwos;      // gaps of 2
+        std::uint32_t outlierA;
+        std::uint32_t outlierB;         // 0 => only one outlier
+        std::uint32_t unguardedX1000;   // what the archive line computes to today
+    };
+
+    // `p50=1 p99=20 max=47` and `p50=1 p99=20 max=46` (t39 runA, 3 characters);
+    // `p50=1 p99=65+ max=229 saturated=2` and `max=188` (t39 runB, 2 characters);
+    // `p50=1 p99=3 max=20` and `p50=1 p99=18 max=22` (t33 depth-1 control).
+    //
+    // The t33 18/22 window is the one that rules out a looser threshold: at 20 or
+    // 24 both of its outliers survive and it still reports ~240 per mille.
+    const Window windows[] = {
+        { "t39_runA max=47",  116u, 2u,  20u,  47u, 358u },
+        { "t39_runA max=46",  116u, 2u,  20u,  46u, 354u },
+        { "t39_runB max=229", 116u, 2u,  64u, 229u, 709u },
+        { "t39_runB max=188", 116u, 2u,  64u, 188u, 677u },
+        { "t33 max=20",       117u, 2u,  20u,   0u, 148u },
+        { "t33 max=22",       116u, 2u,  18u,  22u, 250u },
+    };
+
+    for (const Window& w : windows)
+    {
+        INFO(w.name);
+
+        std::vector<std::uint32_t> gaps;
+        gaps.insert(gaps.end(), w.healthyOnes, 1u);
+        gaps.insert(gaps.end(), w.healthyTwos, 2u);
+        gaps.push_back(w.outlierA);
+        if (w.outlierB != 0u)
+            gaps.push_back(w.outlierB);
+
+        // What the pre-guard code computes, derived from the same list.
+        std::uint32_t expectedAll = 0u;
+        for (const std::uint32_t g : gaps)
+            expectedAll += g;
+        const std::uint32_t lostAll = expectedAll - static_cast<std::uint32_t>(gaps.size());
+        REQUIRE((lostAll * 1000u) / expectedAll == w.unguardedX1000);
+
+        // ...which is 13x to 65x the ~11 per mille pass condition, on windows whose
+        // other ~118 samples are perfect. That is the defect.
+        REQUIRE(w.unguardedX1000 > 130u);
+
+        // Now the guarded probe, fed the SAME arrivals. The outliers are excluded,
+        // so the window is short by however many there were and closes on that many
+        // further healthy arrivals — which is exactly what a real run supplies.
+        RelayArrivalProbe probe(/*windowSamples=*/120u);
+        RelayArrivalWindowSummary summary;
+
+        std::uint32_t tick = 5000u;
+        probe.noteArrival(1u, tick, /*delivered=*/1u, summary);           // seed
+        bool closed = false;
+        for (const std::uint32_t g : gaps)
+        {
+            tick += g;
+            closed = probe.noteArrival(1u, tick, /*delivered=*/1u, summary);
+        }
+        REQUIRE_FALSE(closed);                          // short by the outliers
+
+        const std::uint32_t outliers = (w.outlierB != 0u) ? 2u : 1u;
+        REQUIRE(probe.discontinuities() == outliers);
+        for (std::uint32_t i = 0u; i < outliers; ++i)
+        {
+            tick += 1u;
+            closed = probe.noteArrival(1u, tick, /*delivered=*/1u, summary);
+        }
+        REQUIRE(closed);
+
+        REQUIRE(summary.samples == 120u);
+        REQUIRE(summary.discontinuities == outliers);
+        REQUIRE(summary.maxDiscontinuityGap
+                == ((w.outlierB > w.outlierA) ? w.outlierB : w.outlierA));
+
+        // THE HEADLINE: every one of these now reads the same ~16 per mille its
+        // healthy neighbours in the same log read, instead of 145..714.
+        REQUIRE(summary.lostCaptureTicks == w.healthyTwos);
+        REQUIRE(summary.expectedCaptureTicks == 120u + w.healthyTwos);
+        REQUIRE(summary.lostCaptureTicksX1000 <= 20u);
+        REQUIRE(summary.maxGap == 2u);                  // the outlier is gone from `max=` too
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -638,6 +1235,51 @@ TEST_CASE("RelayProbe: the ingest report carries the newest capture tick THIS ri
     REQUIRE(second.newestCaptureTickValid);
     REQUIRE(second.newestCaptureTick == 101u);
     REQUIRE(store.findLatest().captureTick == 102u);
+}
+
+TEST_CASE("RelayProbe: the ingest report counts NEW capture ticks, not entries pushed",
+          "[Network][RelayProbe]")
+{
+    // ⭐ [T34 loss-counter fix] THE PROBE'S NEW INPUT, AND WHY IT IS NOT
+    // `entriesIngested`. The ingest re-consumes the whole ring on every arrival
+    // (there is no diffing), so `entriesIngested` counts already-resident entries
+    // again. Feeding that to the loss counter would credit re-delivery as new
+    // coverage and hide real loss; feeding a constant 1 charges the burst rate as
+    // loss. Only "ticks this arrival made newly resident" is neither.
+    RelayedInputStore<ProbeTestInput> store(gameZero());
+
+    // A three-entry flush round: all three are new.
+    const ProbeTestRing first = makeRing({ 400u, 401u, 402u }, /*dA=*/2u, /*depth=*/3);
+    const RelayedInputIngestReport a =
+        populateRelayedInputStore<ProbeTestInput>(store, first);
+    REQUIRE(a.entriesIngested == 3u);
+    REQUIRE(a.newCaptureTicksIngested == 3u);
+
+    // THE SAME RING AGAIN — the shape a suppressed-but-still-OnRep'd round, or a
+    // re-replication, produces. Three entries are pushed again and NOTHING is new.
+    const RelayedInputIngestReport b =
+        populateRelayedInputStore<ProbeTestInput>(store, first);
+    REQUIRE(b.entriesIngested == 3u);
+    REQUIRE(b.newCaptureTicksIngested == 0u);
+
+    // A PARTIALLY-OVERLAPPING round: 402 is still resident from the first arrival,
+    // 403 and 404 are not. Two new, three pushed — and it is the two that the loss
+    // counter may subtract.
+    const ProbeTestRing overlap = makeRing({ 402u, 403u, 404u }, /*dA=*/2u, /*depth=*/3);
+    const RelayedInputIngestReport c =
+        populateRelayedInputStore<ProbeTestInput>(store, overlap);
+    REQUIRE(c.entriesIngested == 3u);
+    REQUIRE(c.newCaptureTicksIngested == 2u);
+    REQUIRE(c.newestCaptureTick == 404u);
+
+    // A dA RE-STAMP of a resident tick still counts as an entry and as no new
+    // coverage — the store took the fresher stamp, but the receiver learned about
+    // no capture tick it did not already have.
+    const ProbeTestRing restamp = makeRing({ 403u }, /*dA=*/9u, /*depth=*/1);
+    const RelayedInputIngestReport d =
+        populateRelayedInputStore<ProbeTestInput>(store, restamp);
+    REQUIRE(d.entriesIngested == 1u);
+    REQUIRE(d.newCaptureTicksIngested == 0u);
 }
 
 TEST_CASE("RelayProbe: a ring that delivered nothing reports no newest capture tick",
@@ -685,7 +1327,15 @@ TEST_CASE("RelayProbe: the ingest report drives the cadence probe end to end",
             populateRelayedInputStore<ProbeTestInput>(store, ring);
 
         REQUIRE(report.newestCaptureTickValid);
-        closed = probe.noteArrival(11u, report.newestCaptureTick, summary) || closed;
+        // [T34 loss-counter fix] BOTH probe inputs come from the report — the
+        // newest tick AND the delivered count. Typing a literal 1 here would make
+        // the case pass while the shipped call site fed the probe a constant, which
+        // is precisely the defect this fix closes.
+        REQUIRE(report.newCaptureTicksIngested == 1u);      // depth 1: one entry
+        closed = probe.noteArrival(11u,
+                                   report.newestCaptureTick,
+                                   report.newCaptureTicksIngested,
+                                   summary) || closed;
         captureTick += 5u;
     }
 

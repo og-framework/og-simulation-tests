@@ -106,6 +106,21 @@ namespace
             std::memcpy(&value, bytes.data() + off, sizeof(T));
             return value;
         }
+
+        // [T34] The FIFTH concept method, required only by the flush path
+        // (`resetEntries` / `flushStagedInto`). Mirrors FRelayedInputRing's
+        // TArray-backed one, including its shrink-only semantics: a request above
+        // the current size is ignored, because every caller is shrinking and a
+        // silent grow would hand the codec uninitialized bytes. `std::vector::
+        // resize` down keeps capacity, which is the std equivalent of
+        // `EAllowShrinking::No`.
+        void bundleTruncateTo(std::int32_t byteCount)
+        {
+            if (byteCount < 0)
+                byteCount = 0;
+            if (static_cast<std::size_t>(byteCount) < bytes.size())
+                bytes.resize(static_cast<std::size_t>(byteCount));
+        }
     };
 
     struct ReadEntry
@@ -517,6 +532,315 @@ TEST_CASE("RelayRing.WireLengthBoundRejectsOversizePayloads", "[WireFormat][Rela
     // The boundary itself is INCLUSIVE — a payload exactly at the bound is
     // well-formed, and an off-by-one here would silently reject a full-depth ring.
     REQUIRE(relayedInputRing::isAcceptableWireLength(relayedInputRing::kMaxWireBytes));
+}
+
+//////////////////////////////////////////////////////////////////////////////
+// ⭐ og-netcode-v2-input-relay / T34 — FLUSH-ON-POLL (BARE C1, R = 0).
+//
+// The relay tap runs on the RPC receipt path (paced by packet arrival) while Iris
+// polls the replicated ring once per server game-thread frame. Under the retired
+// replace-latest write path a second arrival in one frame overwrote the first in
+// server memory before replication ever compared the property — measured at
+// ~11.6 % of relayed inputs, and indistinguishable from a wire drop at the client.
+// Flush-on-poll STAGES every arrival and publishes the whole burst at the poll.
+//
+// WHAT THESE CASES PIN, in order of how expensive getting it wrong would be:
+//
+//   1. THE CAPACITY RULE. The stage's capacity is `kMaxDepth`, taken as a constant
+//      inside `stageArrival`. If the flush path ever read
+//      `TimeConfig::relayRedundancyDepthTicks` (session value 1) instead, the
+//      second and every later staged entry would supersede the first, the ring
+//      would carry exactly one entry per round, and bare C1 would silently
+//      degenerate into the behaviour it replaces — no compile error, no warning,
+//      and every payload-level test still green. That is T43 finding 1, and
+//      `RelayRing.StagedBurstSurvivesAtTheSessionDefaultDepth` is the case that
+//      makes it impossible to reintroduce quietly: it drives the burst with the
+//      session default sitting right there in the same test.
+//   2. SUPPRESS-CLEAR-ON-EMPTY. Not a bandwidth optimization — the skip-recovery
+//      mechanism (T43 finding 3). An empty flush must leave the destination BYTE-
+//      IDENTICAL so `FProperty::Identical` finds no change, the property is not
+//      dirty, and a round Iris skipped under packet pressure survives the quiet
+//      frames that follow to be retried. Under R = 0 that retry is the only
+//      recovery there is.
+//   3. THE SHRINK, AND THE VERSION BYTE. The transport ships `bundleByteNum()`
+//      bytes, so a ring whose entry count fell without its buffer shrinking would
+//      send stale trailing entries forever; and truncating to 0 rather than to the
+//      header would re-arm `initHeaderIfEmpty`'s laziness and emit a version-0 ring
+//      that the consumer classifies as NeverWritten and silently drops.
+//////////////////////////////////////////////////////////////////////////////
+
+TEST_CASE("RelayRing.ResetEntriesShrinksToTheHeaderAndKeepsTheVersion", "[WireFormat][RelayRing]")
+{
+    RingTestBuffer ring;
+    constexpr std::int32_t depth = 3;
+
+    relayedInputRing::writeLatest<RingTestInput>(ring, 10u, 1u, RingTestInput{ 100 }, depth);
+    relayedInputRing::writeLatest<RingTestInput>(ring, 11u, 1u, RingTestInput{ 101 }, depth);
+    relayedInputRing::writeLatest<RingTestInput>(ring, 12u, 1u, RingTestInput{ 102 }, depth);
+    REQUIRE(relayedInputRing::entryCount(ring) == 3u);
+    const std::size_t highWaterMark = ring.bytes.size();
+    REQUIRE(highWaterMark > relayedInputRing::kHeaderBytes);
+
+    relayedInputRing::resetEntries(ring);
+
+    // The buffer really came back to the header — not just the count byte. This is
+    // the trap: `used = wireBytes.Num()` is what rides the wire.
+    REQUIRE(relayedInputRing::entryCount(ring) == 0u);
+    REQUIRE(ring.bytes.size() == relayedInputRing::kHeaderBytes);
+
+    // ...and the version byte survived, so the ring never reads as never-written.
+    REQUIRE(relayedInputRing::getWireFormatVersion(ring) == relayedInputRing::kWireFormatVersion);
+    REQUIRE(relayedInputRing::getWireFormatVersion(ring) != 0u);
+
+    // Reset is idempotent, and a never-written ring is left alone entirely (it has
+    // no header to preserve, and writing one would cost wire bytes an unwritten
+    // ring is documented not to pay).
+    relayedInputRing::resetEntries(ring);
+    REQUIRE(ring.bytes.size() == relayedInputRing::kHeaderBytes);
+
+    RingTestBuffer virgin;
+    relayedInputRing::resetEntries(virgin);
+    REQUIRE(virgin.bytes.empty());
+    REQUIRE(relayedInputRing::getWireFormatVersion(virgin) == 0u);
+}
+
+TEST_CASE("RelayRing.StagedBurstSurvivesAtTheSessionDefaultDepth", "[WireFormat][RelayRing]")
+{
+    // ⭐ THE CASE T43 FINDING 1 EXISTS FOR. `kSessionDepthKnob` is the value
+    // `TimeConfig::relayRedundancyDepthTicks` ships at and the value
+    // `Config/DefaultEngine.ini` carries; it is declared here, unused by the flush,
+    // precisely so that a future implementer who threads it into the flush path
+    // watches this case go red instead of shipping a silent regression.
+    constexpr std::int32_t kSessionDepthKnob = 1;
+    REQUIRE(kSessionDepthKnob < static_cast<std::int32_t>(relayedInputRing::kMaxDepth));
+
+    RingTestBuffer stage;
+    RingTestBuffer ring;
+
+    // A five-arrival burst inside ONE server frame — above the session knob, below
+    // the stage's own capacity.
+    for (std::uint32_t i = 0; i < 5u; ++i)
+    {
+        const relayedInputRing::StageArrivalOutcome outcome =
+            relayedInputRing::stageArrival<RingTestInput>(
+                stage, 200u + i, 4u, RingTestInput{ static_cast<std::int32_t>(i) });
+        REQUIRE(outcome.accepted);
+        REQUIRE_FALSE(outcome.droppedOldest);
+    }
+    REQUIRE(relayedInputRing::entryCount(stage) == 5u);
+
+    REQUIRE(relayedInputRing::flushStagedInto(ring, stage) == 5u);
+
+    // FIVE resident, not one. One is what a depth-parameterised flush would have
+    // produced, and it is what ~88 % observability looks like.
+    REQUIRE(relayedInputRing::entryCount(ring) == 5u);
+    for (std::uint32_t i = 0; i < 5u; ++i)
+        REQUIRE(hasEntry(ring, 200u + i, 4u, static_cast<std::int32_t>(i)));
+
+    // The stage came back empty, header intact, ready for the next frame.
+    REQUIRE(relayedInputRing::entryCount(stage) == 0u);
+    REQUIRE(stage.bytes.size() == relayedInputRing::kHeaderBytes);
+    REQUIRE(relayedInputRing::getWireFormatVersion(stage) == relayedInputRing::kWireFormatVersion);
+
+    // The published ring is byte-identical to a ring of that residency built the
+    // ordinary way — the wire format did not change, which is why no version bump
+    // is warranted (design_task30_c1_flush_on_poll.md §5.3).
+    RingTestBuffer reference;
+    for (std::uint32_t i = 0; i < 5u; ++i)
+    {
+        relayedInputRing::writeLatest<RingTestInput>(
+            reference, 200u + i, 4u, RingTestInput{ static_cast<std::int32_t>(i) },
+            static_cast<std::int32_t>(relayedInputRing::kMaxDepth));
+    }
+    REQUIRE(ring.bytes == reference.bytes);
+}
+
+TEST_CASE("RelayRing.FlushWithAnEmptyStageLeavesTheRingByteIdentical", "[WireFormat][RelayRing]")
+{
+    // ⭐ SUPPRESS-CLEAR-ON-EMPTY (T43 finding 3). Byte-identical is the whole
+    // assertion: it is what makes `FProperty::Identical` report no change, which is
+    // what keeps the object out of `ObjectsWithDirtyChanges`, which is what lets a
+    // scheduler-skipped round survive the quiet frames and be retried. Under R = 0
+    // there is no other recovery.
+    RingTestBuffer stage;
+    RingTestBuffer ring;
+
+    relayedInputRing::stageArrival<RingTestInput>(stage, 300u, 2u, RingTestInput{ 7 });
+    relayedInputRing::stageArrival<RingTestInput>(stage, 301u, 2u, RingTestInput{ 8 });
+    REQUIRE(relayedInputRing::flushStagedInto(ring, stage) == 2u);
+
+    const std::vector<std::uint8_t> publishedBytes = ring.bytes;
+
+    // Three empty frames in a row. The round stays resident and untouched.
+    for (int frame = 0; frame < 3; ++frame)
+    {
+        REQUIRE(relayedInputRing::flushStagedInto(ring, stage) == 0u);
+        REQUIRE(ring.bytes == publishedBytes);
+    }
+    REQUIRE(relayedInputRing::entryCount(ring) == 2u);
+    REQUIRE(hasEntry(ring, 300u, 2u, 7));
+    REQUIRE(hasEntry(ring, 301u, 2u, 8));
+
+    // An empty flush against a NEVER-WRITTEN ring must also leave it never-written
+    // — not a header-only, version-carrying, 2-byte payload that would replicate
+    // once for nothing.
+    RingTestBuffer virginRing;
+    RingTestBuffer emptyStage;
+    REQUIRE(relayedInputRing::flushStagedInto(virginRing, emptyStage) == 0u);
+    REQUIRE(virginRing.bytes.empty());
+}
+
+TEST_CASE("RelayRing.FlushShrinksTheRingWhenAQuietRoundFollowsABurst", "[WireFormat][RelayRing]")
+{
+    // The other half of the empty-frame story: a NON-empty small round after a big
+    // one must actually shrink the payload. `NetSerialize` ships
+    // `wireBytes.Num()`, so a ring left at its high-water mark would send stale
+    // trailing entries every round and the whole saving would be zero.
+    RingTestBuffer stage;
+    RingTestBuffer ring;
+
+    for (std::uint32_t i = 0; i < relayedInputRing::kMaxDepth; ++i)
+        relayedInputRing::stageArrival<RingTestInput>(stage, 400u + i, 1u, RingTestInput{ 1 });
+    REQUIRE(relayedInputRing::flushStagedInto(ring, stage)
+            == static_cast<std::uint8_t>(relayedInputRing::kMaxDepth));
+
+    const std::size_t burstBytes = ring.bytes.size();
+
+    relayedInputRing::stageArrival<RingTestInput>(stage, 500u, 1u, RingTestInput{ 2 });
+    REQUIRE(relayedInputRing::flushStagedInto(ring, stage) == 1u);
+
+    REQUIRE(relayedInputRing::entryCount(ring) == 1u);
+    REQUIRE(ring.bytes.size() < burstBytes);
+    REQUIRE(hasEntry(ring, 500u, 1u, 2));
+
+    // No trace of the burst survives — not as a resident entry, and not as trailing
+    // bytes past the count.
+    for (std::uint32_t i = 0; i < relayedInputRing::kMaxDepth; ++i)
+        REQUIRE_FALSE(hasCaptureTick(ring, 400u + i));
+
+    const std::size_t stride =
+        sizeof(std::uint32_t) + sizeof(std::uint8_t) + syncSize<RingTestInput>();
+    REQUIRE(ring.bytes.size() == relayedInputRing::kHeaderBytes + stride);
+    REQUIRE(relayedInputRing::isAcceptableWireLength(
+        static_cast<std::uint32_t>(ring.bytes.size())));
+}
+
+TEST_CASE("RelayRing.StageOverflowDropsTheOldestAndReportsIt", "[WireFormat][RelayRing]")
+{
+    // The stage does NOT raise the ring's ceiling — `kMaxDepth` is a hard wire
+    // bound, and a burst longer than it loses its oldest entries exactly as the
+    // ring itself would have. What flush-on-poll adds is that the loss is REPORTED
+    // rather than silent: this is the only input loss the server side of R = 0 can
+    // observe at all, since Iris exposes no send-success signal to game code.
+    RingTestBuffer stage;
+
+    for (std::uint32_t i = 0; i < relayedInputRing::kMaxDepth; ++i)
+    {
+        const relayedInputRing::StageArrivalOutcome outcome =
+            relayedInputRing::stageArrival<RingTestInput>(
+                stage, 600u + i, 1u, RingTestInput{ static_cast<std::int32_t>(i) });
+        REQUIRE(outcome.accepted);
+        REQUIRE_FALSE(outcome.droppedOldest);
+    }
+    REQUIRE(relayedInputRing::entryCount(stage) == relayedInputRing::kMaxDepth);
+
+    // One past capacity: accepted, and the OLDEST is gone.
+    const relayedInputRing::StageArrivalOutcome overflow =
+        relayedInputRing::stageArrival<RingTestInput>(stage, 700u, 1u, RingTestInput{ 99 });
+    REQUIRE(overflow.accepted);
+    REQUIRE(overflow.droppedOldest);
+    REQUIRE(relayedInputRing::entryCount(stage) == relayedInputRing::kMaxDepth);
+    REQUIRE(hasCaptureTick(stage, 700u));
+    REQUIRE_FALSE(hasCaptureTick(stage, 600u));
+
+    // A RE-STAMP of a resident capture tick evicts nothing — it rewrites in place,
+    // so reporting a drop there would inflate the only loss signal this side has.
+    const relayedInputRing::StageArrivalOutcome restamp =
+        relayedInputRing::stageArrival<RingTestInput>(stage, 700u, 9u, RingTestInput{ 99 });
+    REQUIRE(restamp.accepted);
+    REQUIRE_FALSE(restamp.droppedOldest);
+    REQUIRE(hasEntry(stage, 700u, 9u, 99));
+
+    // A REFUSED stale write evicts nothing either, and must not be reported as a
+    // drop: nothing was lost, the write was.
+    const relayedInputRing::StageArrivalOutcome stale =
+        relayedInputRing::stageArrival<RingTestInput>(stage, 1u, 1u, RingTestInput{ -1 });
+    REQUIRE_FALSE(stale.accepted);
+    REQUIRE_FALSE(stale.droppedOldest);
+}
+
+TEST_CASE("RelayRing.FlushIsEquivalentToSequentialWritesAcrossManyRounds", "[WireFormat][RelayRing]")
+{
+    // A session-shaped drive: a steady 1-per-frame stream with occasional 2- and
+    // 3-bursts, over enough rounds to catch a leak in either buffer. Every capture
+    // tick must be published exactly once, the ring must never exceed kMaxDepth,
+    // and neither buffer may grow without bound.
+    RingTestBuffer stage;
+    RingTestBuffer ring;
+
+    std::uint32_t nextTick   = 1000u;
+    std::uint32_t published  = 0u;
+    std::size_t   maxRingBytes = 0u;
+
+    for (std::uint32_t frame = 0; frame < 200u; ++frame)
+    {
+        const std::uint32_t arrivals = (frame % 17u == 0u) ? 3u
+                                     : (frame % 5u == 0u) ? 2u
+                                     : 1u;
+        for (std::uint32_t a = 0; a < arrivals; ++a)
+        {
+            relayedInputRing::stageArrival<RingTestInput>(
+                stage, nextTick, 3u, RingTestInput{ static_cast<std::int32_t>(nextTick) });
+            ++nextTick;
+        }
+
+        const std::uint8_t count = relayedInputRing::flushStagedInto(ring, stage);
+        REQUIRE(count == static_cast<std::uint8_t>(arrivals));
+        published += count;
+
+        REQUIRE(relayedInputRing::entryCount(ring) <= relayedInputRing::kMaxDepth);
+        REQUIRE(stage.bytes.size() == relayedInputRing::kHeaderBytes);
+        maxRingBytes = (ring.bytes.size() > maxRingBytes) ? ring.bytes.size() : maxRingBytes;
+    }
+
+    // Every produced capture tick reached the wire — that is the 88 % -> ~100 %
+    // server-side observability claim, asserted rather than modelled.
+    REQUIRE(published == nextTick - 1000u);
+
+    const std::size_t stride =
+        sizeof(std::uint32_t) + sizeof(std::uint8_t) + syncSize<RingTestInput>();
+    REQUIRE(maxRingBytes == relayedInputRing::kHeaderBytes + 3u * stride);
+    REQUIRE(relayedInputRing::isAcceptableWireLength(static_cast<std::uint32_t>(maxRingBytes)));
+}
+
+TEST_CASE("RelayRing.FlushCarriesCompositeInputsAndTheirStamps", "[WireFormat][RelayRing]")
+{
+    // Production relays a SimulationComposite (simulatableBrawler::PlayerInput), and
+    // the flush is byte-wise and type-erased — it never names an InputType. That is
+    // what lets it run on the ring's UE host actor, which must not know the game's
+    // types. This case is the proof that type-erasure does not corrupt a composite
+    // payload or its dA schedule stamp.
+    using CompositeInput = SimulationComposite<RingTestInput, RingTestPart>;
+
+    RingTestBuffer stage;
+    RingTestBuffer ring;
+
+    relayedInputRing::stageArrival<CompositeInput>(
+        stage, 800u, 6u, CompositeInput{ RingTestInput{ 11 }, RingTestPart{ 2.5f } });
+    relayedInputRing::stageArrival<CompositeInput>(
+        stage, 801u, 7u, CompositeInput{ RingTestInput{ 12 }, RingTestPart{ 3.5f } });
+
+    REQUIRE(relayedInputRing::flushStagedInto(ring, stage) == 2u);
+
+    std::uint8_t   dA = 0;
+    CompositeInput out{};
+    REQUIRE(relayedInputRing::findEntry<CompositeInput>(ring, 801u, dA, out));
+    REQUIRE(dA == 7u);
+    REQUIRE(out.get<RingTestInput>().value == 12);
+    REQUIRE(out.get<RingTestPart>().scale == 3.5f);
+
+    // And the derived application tick still comes from its two operands.
+    REQUIRE(relayedInputRing::applicationTick(801u, dA) == 808u);
 }
 
 #endif // WITH_LOW_LEVEL_TESTS
