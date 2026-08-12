@@ -1,0 +1,382 @@
+// SPDX-License-Identifier: MPL-2.0
+#if WITH_LOW_LEVEL_TESTS
+
+#include <cstdint>
+#include <vector>
+
+#include "catch_amalgamated.hpp"
+#include "OGSimulation/PCTimeManagement/TimeConfig.h"
+#include "OGSimulation/ResimGatePolicy.h"
+#include "OGSimulation/SimulationManager.h"
+
+//////////////////////////////////////////////////////////////////////////////
+// og-netcode-v2-input-relay / item 45: THE RESIM-GATE POLICY KERNEL AND ITS
+// WIRING.
+// (design_task43_resim_gate_fix.md §3 candidate D, §4; the gate's own semantics
+//  are in the sibling `ResimGateSemanticsTest.cpp`.)
+//
+// TWO HALVES, AND NEITHER IS SUFFICIENT ALONE — the `correctionRotation` split,
+// for the same reason:
+//   * THE KERNEL. Two pure predicates in `resimGate::`, swept exhaustively here
+//     because they are the whole of the policy and can be asked every question
+//     without a cache, a storage tuple or a clock.
+//   * THE WIRING. That the manager actually consults them, with the values from
+//     ITS TimeConfig — proven with the duck-typed manager rig the sibling knobs'
+//     suites use. A green kernel with an unwired caller ships the legacy gate on
+//     every setting, which is indistinguishable from success on a default build.
+//
+// WHAT THIS SUITE DELIBERATELY DOES NOT COVER: the ini intake and the
+// `[ResimGate]` proof line, which are UE-side composition-root code
+// (SimulationManagerUImpl) and invisible to a pure-C++ target; the per-character
+// depth-skip sweep inside `checkDivergenceAll`, which needs a real storage and a
+// real simulatable and therefore lives in og-brawler-tests'
+// SimulationReconciliationTest; and the anchor semantics themselves.
+//
+// Tagged `[CorrectionCache][ResimGate]` — the same pair the semantics suite uses,
+// so one isolation command still recovers item 45's whole test contribution.
+//////////////////////////////////////////////////////////////////////////////
+
+namespace
+{
+	// The peers SimulationManager holds by reference. Duck-typed and instantiated
+	// only where used — mirrors the rigs in CorrectionRotationTest.cpp and
+	// RelayRedundancyDepthTest.cpp deliberately, so the four knobs' setter cases
+	// read the same.
+	//
+	// [item 45] `MockReconciliation` now RECORDS what the manager passed it. That is
+	// the only way to see the depth policy's derivation from this side of the
+	// boundary: the manager's job is to turn (policy, rollbackWindowTicks) into the
+	// one number `checkDivergenceAll` obeys, and the number is otherwise invisible
+	// until a real cache is involved.
+	struct MockIntegrationExec {};
+	struct MockNetSync       { void wipeAllForResync(unsigned int) {} };
+
+	struct MockReconciliation
+	{
+		void wipeAllForResync(unsigned int) {}
+
+		// What the manager asked for, in call order.
+		std::vector<std::uint32_t> receivedDepthPolicies;
+		// What we answer with; 0 == "no character needs a resim".
+		std::uint32_t             anchorToReport = 0u;
+		unsigned int              deepSkipsToReport = 0u;
+
+		unsigned int checkDivergenceAll(std::uint32_t maxAnchorDepthTicks,
+		                                unsigned int* outDeepAnchorSkips = nullptr)
+		{
+			receivedDepthPolicies.push_back(maxAnchorDepthTicks);
+			if (outDeepAnchorSkips != nullptr)
+				*outDeepAnchorSkips = deepSkipsToReport;
+			return anchorToReport;
+		}
+
+		unsigned int consumeResimAnchorsAll() { return 0u; }
+
+		TimeConfig::ResimTriggerPolicy lastPolicyPushed = TimeConfig{}.resimTriggerPolicy;
+		unsigned int                   policyPushCount  = 0u;
+		void setResimTriggerPolicy(TimeConfig::ResimTriggerPolicy policy)
+		{
+			lastPolicyPushed = policy;
+			++policyPushCount;
+		}
+	};
+
+	struct MockSystemsExec {};
+	struct MockStorage {};
+	struct MockStaticData {};
+
+	using TestManager = SimulationManager<
+		MockIntegrationExec, MockNetSync, MockReconciliation, MockSystemsExec,
+		MockStorage, MockStaticData>;
+
+	struct ManagerRig
+	{
+		MockIntegrationExec integration{};
+		MockNetSync         netSync{};
+		MockReconciliation  reconciliation{};
+		MockSystemsExec     systemsExec{};
+		MockStorage         storage{};
+		MockStaticData      staticData{};
+
+		// `shouldRunPrediction = false` so the ctor builds a ServerTickClock and no
+		// ClientPredictionClock, which is all `onCheckIsSimilar` needs: it reads no
+		// clock at all. The adapter short-circuits this method on !runsPrediction in
+		// production, so calling it here exercises the path a client takes without
+		// having to drive a real prediction clock.
+		TestManager manager{
+			/*shouldRunPrediction=*/false,
+			/*tickFrequency (fixed dt, seconds)=*/1.0 / 60.0,
+			TestManager::Params{ integration, netSync, reconciliation, systemsExec,
+			                     storage, staticData, nullptr } };
+	};
+
+} // namespace
+
+// ---------------------------------------------------------------------------
+// THE KERNEL — `shouldSetPendingAnchor`, swept over every input combination.
+//
+// FOUR ROWS PER POLICY, and the interesting cell is the one that looks like an
+// omission: `FrontierExact` IGNORES THE VERDICT. The legacy gate never read
+// `predictionWasCorrect` (it is stored and consulted by nothing — item 30), so a
+// verdict test there would make the legacy policy trigger strictly LESS often than
+// the mechanism it exists to reproduce, on the very setting item 45's
+// behaviour-neutral landing rests on.
+// ---------------------------------------------------------------------------
+TEST_CASE("ResimGate.Policy.ShouldSetPendingAnchorIsExhaustive",
+	"[CorrectionCache][ResimGate]")
+{
+	using Policy = TimeConfig::ResimTriggerPolicy;
+
+	// FrontierExact — POSITION only.
+	REQUIRE(resimGate::shouldSetPendingAnchor(Policy::FrontierExact, /*atFrontier=*/true,  /*wasCorrect=*/false));
+	REQUIRE(resimGate::shouldSetPendingAnchor(Policy::FrontierExact, /*atFrontier=*/true,  /*wasCorrect=*/true));
+	REQUIRE_FALSE(resimGate::shouldSetPendingAnchor(Policy::FrontierExact, false, false));
+	REQUIRE_FALSE(resimGate::shouldSetPendingAnchor(Policy::FrontierExact, false, true));
+
+	// OnDisagreement — VERDICT only. Position is irrelevant, which is the whole
+	// repair: a behind-frontier disagreement is what the legacy gate could not see.
+	REQUIRE(resimGate::shouldSetPendingAnchor(Policy::OnDisagreement, /*atFrontier=*/false, /*wasCorrect=*/false));
+	REQUIRE(resimGate::shouldSetPendingAnchor(Policy::OnDisagreement, /*atFrontier=*/true,  /*wasCorrect=*/false));
+	REQUIRE_FALSE(resimGate::shouldSetPendingAnchor(Policy::OnDisagreement, false, true));
+	REQUIRE_FALSE(resimGate::shouldSetPendingAnchor(Policy::OnDisagreement, true,  true));
+
+	// constexpr, so the policy can be folded at compile time where it matters.
+	static_assert(resimGate::shouldSetPendingAnchor(Policy::FrontierExact, true, true));
+	static_assert(!resimGate::shouldSetPendingAnchor(Policy::OnDisagreement, true, true));
+}
+
+// ---------------------------------------------------------------------------
+// THE DEPTH CEILING IS POLICY-SCOPED — the design decision most likely to be
+// mistaken for an oversight, pinned so it reads as intent.
+//
+// It exists to bound the DISAGREEMENT trigger's worst-case depth. Under the legacy
+// policy the trigger rate is already bounded by frontier-exact coincidence (~2
+// events per archived run), so applying it there would bound nothing and would COST
+// behaviour-neutrality: the depth skip would ABANDON an anchor the legacy gate
+// retries (reachable via a long stranded-resim episode, item 42's I5 class).
+//
+// ⛔ AND THERE IS NO SECOND CEILING. A `resimCooldownTicks` trigger-rate limit was
+// built and REMOVED on a user ruling (2026-08-11): deferring action on a correction
+// already known to disagree is the defect item 45 repairs, with a smaller constant.
+// The rate is instead bounded STRUCTURALLY — the gate is consulted only on non-resim
+// frames and the anchor is consumed only on the completion edge, so at most one
+// resim is in flight and at most one more is pending, and mid-replay landings
+// coalesce into a single deeper replay. That bound is asserted by the termination
+// tripwire `ACompletedResimClosesTheGateAndItStaysClosed` in the sibling semantics
+// suite, which is therefore the COST bound as well as the correctness bound.
+// ---------------------------------------------------------------------------
+TEST_CASE("ResimGate.Policy.TheDepthCeilingAppliesOnlyToTheDisagreementTrigger",
+	"[CorrectionCache][ResimGate]")
+{
+	using Policy = TimeConfig::ResimTriggerPolicy;
+
+	REQUIRE_FALSE(resimGate::policyEnforcesDepthCeiling(Policy::FrontierExact));
+	REQUIRE(resimGate::policyEnforcesDepthCeiling(Policy::OnDisagreement));
+
+	// And the SHIPPED default is the one that enforces neither — the single fact
+	// item 45's "lands behaviour-neutral" claim reduces to.
+	REQUIRE(TimeConfig{}.resimTriggerPolicy == Policy::FrontierExact);
+	REQUIRE_FALSE(resimGate::policyEnforcesDepthCeiling(TimeConfig{}.resimTriggerPolicy));
+}
+
+// ---------------------------------------------------------------------------
+// THE DEPTH POLICY — SKIP, NOT CLAMP, and the boundary is INCLUSIVE at exactly
+// `maxDepthTicks`.
+//
+// Inclusive because `rollbackWindowTicks` is documented as the maximum depth the
+// reconciler will resimulate, so a resim of exactly that depth is the deepest
+// PERMITTED one, not the first forbidden one. The `isAnomalousMiss` log gate one
+// header over reads its own bound the same way, and the two being consistent is
+// worth more than either convention on its own.
+// ---------------------------------------------------------------------------
+TEST_CASE("ResimGate.Policy.DepthPolicyAdmitsExactlyTheWindowAndSkipsBeyondIt",
+	"[CorrectionCache][ResimGate]")
+{
+	// A neutral local, NOT named after the TimeConfig field: the R-P1
+	// configurability lint flags a non-member lvalue named for a config field and
+	// assigned its magic value, and a fixture is exactly the false positive it
+	// cannot distinguish. The value is read from TimeConfig so the case tracks a
+	// retune.
+	const std::uint32_t kWindow = static_cast<std::uint32_t>(TimeConfig{}.rollbackWindowTicks);
+
+	// 0 == NO POLICY. This is the shipped configuration's value and it must admit
+	// everything, however deep.
+	REQUIRE(resimGate::isAnchorWithinDepthPolicy(1u, 100000u, 0u));
+
+	// Depth 1 .. kWindow are admitted; kWindow + 1 is not.
+	REQUIRE(resimGate::isAnchorWithinDepthPolicy(999u, 1000u, kWindow));
+	REQUIRE(resimGate::isAnchorWithinDepthPolicy(1000u - kWindow, 1000u, kWindow));
+	REQUIRE_FALSE(resimGate::isAnchorWithinDepthPolicy(1000u - kWindow - 1u, 1000u, kWindow));
+	REQUIRE_FALSE(resimGate::isAnchorWithinDepthPolicy(900u, 1000u, kWindow));
+
+	// Depth 0 (anchor == frontier) and an anchor AHEAD of the frontier are both
+	// admitted rather than treated as infinitely deep. Neither can be produced by a
+	// landing — a correction above the frontier has no slot and is discarded before
+	// it reaches the anchor — and the gate's own `anchor != frontier` clause already
+	// handles equality, so an unsigned underflow here would turn a structurally
+	// impossible value into a silent drop.
+	REQUIRE(resimGate::isAnchorWithinDepthPolicy(1000u, 1000u, kWindow));
+	REQUIRE(resimGate::isAnchorWithinDepthPolicy(1001u, 1000u, kWindow));
+
+	static_assert(resimGate::isAnchorWithinDepthPolicy(50u, 1000u, 0u));
+}
+
+// ---------------------------------------------------------------------------
+// THE WIRING, 1 of 2 — THE SETTER DOOR, and its second effect.
+//
+// ONE door, not two: the sibling `setResimCooldownTicks` was removed with the
+// cooldown itself (ruling above).
+//
+// The setter half of the four-step config path (ini intake -> parse/validate ->
+// setter -> proof line); the intake and the proof line are UE-side.
+// `setResimTriggerPolicy` must ALSO fan the value out to the caches, which is what
+// makes it the only legal door: a caller writing TimeConfig directly would leave
+// every cache on the compiled default while the proof line reported the override.
+// ---------------------------------------------------------------------------
+TEST_CASE("ResimGate.Policy.TheManagerSetterIsTheOneWritableDoor",
+	"[CorrectionCache][ResimGate]")
+{
+	ManagerRig rig;
+
+	// The compiled default, read from the same source of truth rather than typed;
+	// the defaults gate in TimeConfigDefaultsTest owns the value itself.
+	REQUIRE(rig.manager.getTimeConfig().resimTriggerPolicy == TimeConfig{}.resimTriggerPolicy);
+
+	rig.manager.setResimTriggerPolicy(TimeConfig::ResimTriggerPolicy::OnDisagreement);
+	REQUIRE(rig.manager.getTimeConfig().resimTriggerPolicy
+	        == TimeConfig::ResimTriggerPolicy::OnDisagreement);
+	// THE SECOND EFFECT: it reached reconciliation, which is what reaches the caches.
+	REQUIRE(rig.reconciliation.policyPushCount == 1u);
+	REQUIRE(rig.reconciliation.lastPolicyPushed == TimeConfig::ResimTriggerPolicy::OnDisagreement);
+
+	rig.manager.setResimTriggerPolicy(TimeConfig::ResimTriggerPolicy::FrontierExact);
+	REQUIRE(rig.reconciliation.policyPushCount == 2u);
+	REQUIRE(rig.reconciliation.lastPolicyPushed == TimeConfig::ResimTriggerPolicy::FrontierExact);
+}
+
+// ---------------------------------------------------------------------------
+// THE WIRING, 2 of 2 — THE DEPTH POLICY IS DERIVED FROM THE LIVE CONFIG AND HANDED
+// DOWN PER CALL.
+//
+// Read live rather than cached, for the reason the `[T39]` note on
+// `sendCorrectionAll` gives about `correctionRotationK`: a value captured once
+// would make an ini-driven setting silently ineffective. What the mock records is
+// the ONE number reconciliation obeys, so this case pins both halves of the
+// derivation — off under the legacy policy, `rollbackWindowTicks` under the
+// designed one.
+// ---------------------------------------------------------------------------
+TEST_CASE("ResimGate.Policy.ManagerDerivesTheDepthPolicyFromPolicyAndWindow",
+	"[CorrectionCache][ResimGate]")
+{
+	ManagerRig rig;
+	rig.reconciliation.anchorToReport = 0u;   // no trigger; only the argument matters
+
+	// Legacy default: NO depth policy, so the fold is byte-for-byte the
+	// pre-item-45 one.
+	rig.manager.onCheckIsSimilar();
+	REQUIRE(rig.reconciliation.receivedDepthPolicies.size() == 1u);
+	REQUIRE(rig.reconciliation.receivedDepthPolicies.back() == 0u);
+
+	// The designed trigger: the window becomes the ceiling.
+	rig.manager.setResimTriggerPolicy(TimeConfig::ResimTriggerPolicy::OnDisagreement);
+	rig.manager.onCheckIsSimilar();
+	REQUIRE(rig.reconciliation.receivedDepthPolicies.back()
+	        == static_cast<std::uint32_t>(TimeConfig{}.rollbackWindowTicks));
+
+	// And back — the derivation is a function of the live value, not a latch.
+	rig.manager.setResimTriggerPolicy(TimeConfig::ResimTriggerPolicy::FrontierExact);
+	rig.manager.onCheckIsSimilar();
+	REQUIRE(rig.reconciliation.receivedDepthPolicies.back() == 0u);
+}
+
+// ---------------------------------------------------------------------------
+// [og-netcode-v2-input-relay item 47] THE REPLAY WRITE RULE, SWEPT AS A PURE
+// PREDICATE — one bit decides, four parameters only label.
+//
+// The wiring through a live cache lifecycle is proven case-by-population in
+// `ResimGateSemanticsTest.cpp`'s `[ReplayProtect]` block. What belongs HERE is
+// the same thing this file already does for the other three predicates: the
+// exhaustive sweep, in the STL-only kernel where it can be swept at all.
+//
+// ⭐ THE PROPERTY THIS CASE EXISTS FOR, and it is the one a future reader is most
+// likely to break: **`Written` depends on `slotContainsCorrectTick` and NOTHING
+// ELSE.** That is what keeps the per-slot landing stamps OBSERVATIONAL — they are
+// game-thread-written and physics-thread-read, riding the cache's pre-existing
+// state-buffer race, and the whole safety argument for leaving them as plain
+// `uint32`s is that a torn stamp can mislabel a COUNTER and can never mis-decide
+// a WRITE. The first section below sweeps the other four parameters across their
+// extremes with the bit clear and asserts `Written` every time; if that ever goes
+// red, the plain stamps have become load-bearing and need the atomic treatment
+// the anchor gets.
+// ---------------------------------------------------------------------------
+TEST_CASE("ResimGate.Policy.TheReplayWriteRuleIsOneBitWideAndTheRestIsLabelling",
+	"[CorrectionCache][ResimGate][ReplayProtect]")
+{
+	using Outcome = resimGate::ResimSlotWriteOutcome;
+
+	SECTION("bit CLEAR ⇒ Written, whatever the other four parameters say")
+	{
+		const std::uint32_t values[] = { 0u, 1u, 105u, 4294967295u };
+		for (std::uint32_t slotSeq : values)
+			for (std::uint32_t preparedSeq : values)
+				for (std::uint32_t slotTick : values)
+					for (std::uint32_t anchorTick : values)
+						REQUIRE(resimGate::classifyResimSlotWrite(
+							/*contains=*/false, slotSeq, preparedSeq, slotTick, anchorTick)
+							== Outcome::Written);
+	}
+
+	SECTION("bit SET ⇒ never Written; the two clauses OR into FRESH")
+	{
+		// Truth table over the two clauses. `seqFresh` is slotSeq > preparedSeq;
+		// `tickFresh` is slotTick >= capturedAnchor.
+		//
+		//   seq  tick | expected
+		//    F    F   | ProtectedStale     <- the ONLY stale cell
+		//    F    T   | ProtectedFresh     <- population (b) / (c): the tick clause
+		//    T    F   | ProtectedFresh     <- population (a) below the anchor: the seq clause
+		//    T    T   | ProtectedFresh
+		REQUIRE(resimGate::classifyResimSlotWrite(true, /*slotSeq=*/3u, /*prepared=*/7u,
+			/*slotTick=*/104u, /*anchor=*/110u) == Outcome::ProtectedStale);
+		REQUIRE(resimGate::classifyResimSlotWrite(true, 3u, 7u, 110u, 110u) == Outcome::ProtectedFresh);
+		REQUIRE(resimGate::classifyResimSlotWrite(true, 9u, 7u, 104u, 110u) == Outcome::ProtectedFresh);
+		REQUIRE(resimGate::classifyResimSlotWrite(true, 9u, 7u, 110u, 110u) == Outcome::ProtectedFresh);
+	}
+
+	SECTION("the two clause BOUNDARIES, which are deliberately different")
+	{
+		// SEQUENCE is STRICT: a slot stamped at exactly the prepared value landed
+		// BEFORE this resim was prepared, not during it. Equality is stale.
+		REQUIRE(resimGate::classifyResimSlotWrite(true, 7u, 7u, 0u, 1u) == Outcome::ProtectedStale);
+		REQUIRE(resimGate::classifyResimSlotWrite(true, 8u, 7u, 0u, 1u) == Outcome::ProtectedFresh);
+
+		// TICK is INCLUSIVE: the slot AT the captured anchor is the tick this resim
+		// was asked to act on, so it is fresh. (In a single-character resim that
+		// slot is the restore SOURCE and never reaches this function at all; under
+		// the multi-character min fold it very much does — see the two-cache case.)
+		REQUIRE(resimGate::classifyResimSlotWrite(true, 0u, 0u, 109u, 110u) == Outcome::ProtectedStale);
+		REQUIRE(resimGate::classifyResimSlotWrite(true, 0u, 0u, 110u, 110u) == Outcome::ProtectedFresh);
+	}
+
+	SECTION("a resim prepared with NO anchor classifies everything FRESH")
+	{
+		// `capturedAnchorTick == 0` is "this resim consumed nothing" — an
+		// engine-side rewind we did not ask for (the same sentinel
+		// `consumeResimAnchor` rejects up front). The tick clause is then
+		// vacuously true. DELIBERATE OVER-PROTECTION in the safe direction, and it
+		// is also what keeps the single-character structural zero honest: with no
+		// anchor there is no `tick < anchor` for anything to fall into.
+		REQUIRE(resimGate::classifyResimSlotWrite(true, 0u, 0u, 0u, 0u) == Outcome::ProtectedFresh);
+		REQUIRE(resimGate::classifyResimSlotWrite(true, 0u, 5u, 1u, 0u) == Outcome::ProtectedFresh);
+	}
+
+	// constexpr, like its three neighbours — the classifier is usable in a
+	// static_assert, which is the cheapest possible regression net on the one-bit
+	// property above.
+	static_assert(resimGate::classifyResimSlotWrite(false, 9u, 0u, 0u, 999u)
+		== resimGate::ResimSlotWriteOutcome::Written);
+	static_assert(resimGate::classifyResimSlotWrite(true, 0u, 0u, 0u, 999u)
+		== resimGate::ResimSlotWriteOutcome::ProtectedStale);
+}
+
+#endif // WITH_LOW_LEVEL_TESTS

@@ -116,6 +116,27 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     // is asserted at this same value.
     REQUIRE(tc.correctionRotationK == 1);
 
+    // --- The resim gate (item 45) ------------------------------------------
+    // ⛔ THE POLICY DEFAULT IS THE WHOLE OF ITEM 45's LANDING CONTRACT. The item
+    // replaced the level-triggered resim gate with an edge-triggered one and shipped
+    // it DEFAULTED TO REPRODUCE THE OLD OBSERVABLE BEHAVIOUR, so that nothing
+    // changes by default and the mechanism can be validated separately from the
+    // policy. Flipping this to `OnDisagreement` is backlog item 46 and is
+    // HARD-BLOCKED on item 30 (a non-degenerate verdict): with today's
+    // always-false verdict, "disagrees" is EVERY landing, which is the modelled
+    // 3-6x sustained physics-cost storm of design §4.
+    //
+    // If this assertion ever fails, the change is item 46 and must come WITH the
+    // pre-flip cost preview that item requires — not as a tidy-up.
+    REQUIRE(tc.resimTriggerPolicy == TimeConfig::ResimTriggerPolicy::FrontierExact);
+
+    // ⛔ AND THERE IS DELIBERATELY NO `resimCooldownTicks` ASSERTION, because there is
+    // no such field. A trigger-rate ceiling was built and REMOVED on a user ruling
+    // (2026-08-11): it defers acting on a correction already known to disagree, which
+    // is the defect item 45 repairs. The throttle is structural instead — at most one
+    // resim in flight and one pending. Backlog items 45/46 and design §4 still name
+    // the knob; the ruling block on `TimeConfig::resimTriggerPolicy` is the authority.
+
     // --- Test harness mode selector ----------------------------------------
     REQUIRE(tc.harnessMode == TimeConfig::HarnessMode::Production);
 

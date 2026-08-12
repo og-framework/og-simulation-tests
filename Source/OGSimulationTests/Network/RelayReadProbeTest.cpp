@@ -1060,7 +1060,7 @@ TEST_CASE("RelayProbe: a window containing a discontinuity reports it and is not
     REQUIRE(summary.discontinuities == 1u);
     REQUIRE(summary.maxDiscontinuityGap == 60u);
 
-    // Per-window, like ServerFrameProbe's — a cumulative count would mark every
+    // Per-window, like FrameHealthProbe's — a cumulative count would mark every
     // window after the first as interrupted forever.
     RelayArrivalWindowSummary peek;
     probe.peekSummary(peek);
@@ -1369,7 +1369,7 @@ TEST_CASE("RelayProbe: the ingest report drives the cadence probe end to end",
 //      depth-1 arrivals through the REAL codec and the REAL ingest, then asserts the
 //      hole BETWEEN them classifies as in-span.
 //
-//   3. THE RATIO IS HOOK-INDEPENDENT. ServerFrameProbe is fed a GLOBAL frame counter
+//   3. THE RATIO IS HOOK-INDEPENDENT. FrameHealthProbe is fed a GLOBAL frame counter
 //      precisely so that a hook firing twice per frame, or skipping frames, still
 //      yields the right ticks-per-frame. Two cases drive exactly those cadences and
 //      assert the aggregate is unchanged while the cadence counters report the
@@ -1794,14 +1794,17 @@ TEST_CASE("RelayDelta: an empty histogram reports nothing rather than zero sampl
 }
 
 // ---------------------------------------------------------------------------
-// 12. PROBE A — server sim ticks per game-thread frame.
+// 12. PROBE A — sim ticks per game-thread frame (FrameHealthProbe). Role-neutral
+//     math, unchanged by the T49 rename from ServerFrameProbe / role extension to
+//     the client — these cases exercise the kernel directly and do not care which
+//     role's call site feeds it.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("ServerFrameProbe: a once-per-frame hook reports the ratio directly",
-          "[Network][ServerFrameProbe]")
+TEST_CASE("FrameHealthProbe: a once-per-frame hook reports the ratio directly",
+          "[Network][FrameHealthProbe]")
 {
-    ServerFrameProbe probe(/*windowSamples=*/10u);
-    ServerFrameWindowSummary summary;
+    FrameHealthProbe probe(/*windowSamples=*/10u);
+    FrameHealthWindowSummary summary;
 
     // 60 Hz sim on a 30 fps server: one frame, two sim ticks, every time.
     bool closed = false;
@@ -1827,11 +1830,11 @@ TEST_CASE("ServerFrameProbe: a once-per-frame hook reports the ratio directly",
     REQUIRE(summary.meanFrameMicros == 33333u);
 }
 
-TEST_CASE("ServerFrameProbe: a hook firing TWICE per frame still reports the right ratio",
-          "[Network][ServerFrameProbe]")
+TEST_CASE("FrameHealthProbe: a hook firing TWICE per frame still reports the right ratio",
+          "[Network][FrameHealthProbe]")
 {
-    ServerFrameProbe probe(/*windowSamples=*/20u);
-    ServerFrameWindowSummary summary;
+    FrameHealthProbe probe(/*windowSamples=*/20u);
+    FrameHealthWindowSummary summary;
 
     // THE HOOK-INDEPENDENCE PROPERTY, and the reason the metric is defined against a
     // GLOBAL frame counter rather than an invocation count. This hook fires once per
@@ -1860,11 +1863,11 @@ TEST_CASE("ServerFrameProbe: a hook firing TWICE per frame still reports the rig
     REQUIRE(summary.sameFrameSamples > 0u);
 }
 
-TEST_CASE("ServerFrameProbe: a hook that SKIPS frames still reports the right ratio",
-          "[Network][ServerFrameProbe]")
+TEST_CASE("FrameHealthProbe: a hook that SKIPS frames still reports the right ratio",
+          "[Network][FrameHealthProbe]")
 {
-    ServerFrameProbe probe(/*windowSamples=*/10u);
-    ServerFrameWindowSummary summary;
+    FrameHealthProbe probe(/*windowSamples=*/10u);
+    FrameHealthWindowSummary summary;
 
     // The mirror of the case above: this hook fires every THIRD frame, and three
     // frames advance three sim ticks. The true ratio is 1.
@@ -1889,18 +1892,18 @@ TEST_CASE("ServerFrameProbe: a hook that SKIPS frames still reports the right ra
     REQUIRE(summary.p50 == 0u);
 }
 
-TEST_CASE("ServerFrameProbe: SUB-STEPPING and FRAME SHORTFALL give the same ratio and are still told apart",
-          "[Network][ServerFrameProbe]")
+TEST_CASE("FrameHealthProbe: SUB-STEPPING and FRAME SHORTFALL give the same ratio and are still told apart",
+          "[Network][FrameHealthProbe]")
 {
     // TWO DIFFERENT DEFECTS, ONE IDENTICAL RATIO. Chaos running two fixed sub-steps
     // inside a healthy 60 fps frame, and a 30 fps frame running one step that covers
     // two ticks, both read as "two sim ticks per frame". They need different fixes,
     // so a probe that reported only the ratio would send the reader the wrong way
     // half the time.
-    ServerFrameProbe substepping(/*windowSamples=*/5u);
-    ServerFrameWindowSummary substepSummary;
-    ServerFrameProbe shortfall(/*windowSamples=*/5u);
-    ServerFrameWindowSummary shortfallSummary;
+    FrameHealthProbe substepping(/*windowSamples=*/5u);
+    FrameHealthWindowSummary substepSummary;
+    FrameHealthProbe shortfall(/*windowSamples=*/5u);
+    FrameHealthWindowSummary shortfallSummary;
 
     std::uint64_t frame = 1u;
     std::uint32_t tick  = 0u;
@@ -1931,11 +1934,11 @@ TEST_CASE("ServerFrameProbe: SUB-STEPPING and FRAME SHORTFALL give the same rati
     REQUIRE(shortfallSummary.maxNumSteps == 1u);
 }
 
-TEST_CASE("ServerFrameProbe: the p99 reports the hitch a mean would hide",
-          "[Network][ServerFrameProbe]")
+TEST_CASE("FrameHealthProbe: the p99 reports the hitch a mean would hide",
+          "[Network][FrameHealthProbe]")
 {
-    ServerFrameProbe probe(/*windowSamples=*/100u);
-    ServerFrameWindowSummary summary;
+    FrameHealthProbe probe(/*windowSamples=*/100u);
+    FrameHealthWindowSummary summary;
 
     // 98 healthy frames and two 12-tick hitches placed mid-sequence, not at the
     // edges. The mean is near 1.2 and the depth rule cares about the 12.
@@ -1957,11 +1960,11 @@ TEST_CASE("ServerFrameProbe: the p99 reports the hitch a mean would hide",
     REQUIRE_FALSE(summary.p99 == 1u);
 }
 
-TEST_CASE("ServerFrameProbe: a discontinuity is re-seeded, counted, and never sampled",
-          "[Network][ServerFrameProbe]")
+TEST_CASE("FrameHealthProbe: a discontinuity is re-seeded, counted, and never sampled",
+          "[Network][FrameHealthProbe]")
 {
-    ServerFrameProbe probe(/*windowSamples=*/6u);
-    ServerFrameWindowSummary summary;
+    FrameHealthProbe probe(/*windowSamples=*/6u);
+    FrameHealthWindowSummary summary;
 
     std::uint64_t frame = 100u;
     std::uint32_t tick  = 1000u;
@@ -1994,8 +1997,8 @@ TEST_CASE("ServerFrameProbe: a discontinuity is re-seeded, counted, and never sa
     REQUIRE(summary.p50 == 1u);
 
     // A BACKWARDS tick is the same situation and takes the same route.
-    ServerFrameProbe backwards(/*windowSamples=*/4u);
-    ServerFrameWindowSummary backwardsSummary;
+    FrameHealthProbe backwards(/*windowSamples=*/4u);
+    FrameHealthWindowSummary backwardsSummary;
     backwards.noteFrame(10u, 900u, 1u, 0u, backwardsSummary);
     backwards.noteFrame(11u, 400u, 1u, 0u, backwardsSummary);
     REQUIRE(backwards.discontinuities() == 1u);
