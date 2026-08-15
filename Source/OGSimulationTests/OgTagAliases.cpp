@@ -31,7 +31,16 @@
 // and run by default. The UE-coupled buffer-NetSerialize tests ([WireFormat]
 // [Buffers]) are deferred to a future engine-coupled LLT target (see Task 12
 // impl notes / docs/low-level-tests.md "Future: testing UE-coupled code").
+// Note on [Network]: Stage 3 per-connection netcode surface (og-netcode-v2 tasks
+// 2/4/5/10) — the NetConfig concept plus the engine-agnostic ConnectionTierTable
+// / ServerInputDelayQueue templates, all exercised over the engine-free
+// FStandaloneTestHandle rather than the UE connection handle.
+// Note on [Reconciliation]: Stage 3 client-prediction / server-reconciliation
+// surface (og-netcode-v2 task 8) — currently the engine-agnostic desync
+// diagnostic sink boundary ([Reconciliation][Desync]). The sink has no
+// production consumer until the Stage 4 hash-broadcast hookup, so this test
+// file is the only thing compiling that header.
 CATCH_REGISTER_TAG_ALIAS("[@og]",
-    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Determinism][Production],[SimulatableList],[StorageView],[SystemsExecutor]")
+    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Network],[Reconciliation],[Determinism][Production],[SimulatableList],[StorageView],[SystemsExecutor],[CorrectionCache]")
 
 #endif // WITH_LOW_LEVEL_TESTS

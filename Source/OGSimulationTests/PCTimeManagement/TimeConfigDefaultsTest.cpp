@@ -40,6 +40,20 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     REQUIRE(tc.jitterMultiplier == 2.0);
     REQUIRE(tc.predOffsetFloorTicks == 4);
 
+    // --- Outlier RTT rejection (T26b) --------------------------------------
+    // The plausibility bound is `4.0 * smoothedRTT + 0.030 s`, with a 0.5 s
+    // absolute ceiling standing in on the cold-start seed. `rttOutlierConsecutiveLimit`
+    // is the escape hatch: 30 consecutive implausible samples are read as a
+    // GENUINE step change and force a re-seed, which is what keeps the gate a
+    // filter rather than a permanent lock. If any of these five ever changes,
+    // the change must come WITH a focus-swap PIE trace showing what it bought —
+    // they were sized against the ~8 s post-hitch offset transient, not derived.
+    REQUIRE(tc.rttOutlierMultiplier == 4.0);
+    REQUIRE(tc.rttOutlierMarginSeconds == 0.030);
+    REQUIRE(tc.rttOutlierColdStartCeilingSeconds == 0.5);
+    REQUIRE(tc.rttOutlierConsecutiveLimit == 30);
+    REQUIRE(tc.rttOutlierLogWindowSamples == 600);
+
     // --- Drift correction (ClientPredictionClock) --------------------------
     REQUIRE(tc.softDriftThresholdTicks == 3);
     REQUIRE(tc.gradualCorrectionRate == 4);
@@ -65,26 +79,116 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     // TimeConfig.h default to 3 in the same atomic change.
     REQUIRE(tc.redundancyDepthTicks == 3);
 
+    // --- Outbound input relay (FRelayedInputRing) --------------------------
+    // Depth 1 is the DEGENERATE default this increment ships: at
+    // relayDelayFloorTicks == 0 a peer's scheduled read nearly always misses and
+    // falls back to last-known input, so a deeper ring would buy bandwidth and
+    // nothing else. The sizing rule (§8.2: depth >= measured replication gap +
+    // margin) cannot be applied until the T9 cadence probe measures the gap — so
+    // if this assertion ever fails, the change must come WITH that measurement.
+    REQUIRE(tc.relayRedundancyDepthTicks == 1);
+
+    // [T11] The floor lever ships OFF. 0 is the degenerate value at which
+    // `max(floor, tier-or-fallback)` is the identity, i.e. at which the whole
+    // relay-delay-spectrum feature reproduces pre-T11 behaviour exactly. Sizing
+    // (§3.3: ~7-8 to cover 80 ms) waits on playtest + the T9 cadence probe — if
+    // this assertion ever fails, the change must come WITH that evidence.
+    REQUIRE(tc.relayDelayFloorTicks == 0);
+
+    // [T39] The correction-state rotation width. A DECIDED number, not a
+    // placeholder. [T34] LOWERED 2 -> 1 FOR THE PRE-DIET WINDOW, and it goes back
+    // to 2 in the same item-40 change that deletes `kPreDietCharacterCap`.
+    //
+    // The reason is an engine fork, not a byte budget: at K=2 with un-dieted 316 B
+    // states and bare C1's variable-length rings, the SECOND state batch fails
+    // inside Iris's huge-object window (`SplitHugeObject`, > 1,536 bits free) on
+    // roughly a third of frames at four characters, which chunks it and blocks that
+    // character's newer snapshots for ~1 RTT. At K=1 and N <= 4 the residual
+    // failures land below the window => clean Abort => the state ships in packet 2
+    // of the same tick (design_task38_input_first_replication.md §16.2).
+    //
+    // ⚠ THE COST, RECORDED: T39 chose 2 so that two-character sessions kept the
+    // pre-T39 every-frame cadence and the archived two-character baselines stayed
+    // comparable. At K=1 a two-character session corrects at 30 Hz, so that
+    // comparison must now expect exactly half. If this assertion ever fails, the
+    // change must come WITH the packet-budget arithmetic that justifies it — the
+    // round-vs-packet LLT in og-brawler-tests is the fence, and its pre-diet table
+    // is asserted at this same value.
+    REQUIRE(tc.correctionRotationK == 1);
+
+    // --- The resim gate (item 45) ------------------------------------------
+    // ⛔ THE POLICY DEFAULT IS THE WHOLE OF ITEM 45's LANDING CONTRACT. The item
+    // replaced the level-triggered resim gate with an edge-triggered one and shipped
+    // it DEFAULTED TO REPRODUCE THE OLD OBSERVABLE BEHAVIOUR, so that nothing
+    // changes by default and the mechanism can be validated separately from the
+    // policy. Flipping this to `OnDisagreement` is backlog item 46 and is
+    // HARD-BLOCKED on item 30 (a non-degenerate verdict): with today's
+    // always-false verdict, "disagrees" is EVERY landing, which is the modelled
+    // 3-6x sustained physics-cost storm of design §4.
+    //
+    // If this assertion ever fails, the change is item 46 and must come WITH the
+    // pre-flip cost preview that item requires — not as a tidy-up.
+    REQUIRE(tc.resimTriggerPolicy == TimeConfig::ResimTriggerPolicy::FrontierExact);
+
+    // ⛔ AND THERE IS DELIBERATELY NO `resimCooldownTicks` ASSERTION, because there is
+    // no such field. A trigger-rate ceiling was built and REMOVED on a user ruling
+    // (2026-08-11): it defers acting on a correction already known to disagree, which
+    // is the defect item 45 repairs. The throttle is structural instead — at most one
+    // resim in flight and one pending. Backlog items 45/46 and design §4 still name
+    // the knob; the ruling block on `TimeConfig::resimTriggerPolicy` is the authority.
+
     // --- Test harness mode selector ----------------------------------------
     REQUIRE(tc.harnessMode == TimeConfig::HarnessMode::Production);
+
+    // --- C.2 tiered input delay (Stage 5) ----------------------------------
+    REQUIRE(tc.forcedInputLatencyTicks == 2);
+
+    REQUIRE(tc.rttTierBoundariesMs[0] == 30);
+    REQUIRE(tc.rttTierBoundariesMs[1] == 80);
+    REQUIRE(tc.rttTierBoundariesMs[2] == 150);
+    REQUIRE(tc.rttTierBoundariesMs[3] == 999);
+
+    REQUIRE(tc.rttTierInputDelays[0] == 1);
+    REQUIRE(tc.rttTierInputDelays[1] == 2);
+    REQUIRE(tc.rttTierInputDelays[2] == 3);
+    REQUIRE(tc.rttTierInputDelays[3] == 4);
+
+    REQUIRE(tc.rttTierRollbackCeilings[0] == 6);
+    REQUIRE(tc.rttTierRollbackCeilings[1] == 9);
+    REQUIRE(tc.rttTierRollbackCeilings[2] == 12);
+    REQUIRE(tc.rttTierRollbackCeilings[3] == 20);
+
+    REQUIRE(tc.tierHysteresisMs == 10);
+    REQUIRE(tc.tierMinDwellTicks == 60);
+
+    // `muteEchoOnDegradedTier` has NO consumer this initiative (optional task
+    // T15 owns the behaviour). The default is asserted anyway so that if T15
+    // flips it, the flip is a deliberate, visible change rather than a silent
+    // drift.
+    REQUIRE(tc.muteEchoOnDegradedTier == true);
+    REQUIRE(tc.lanZeroDelayOverride == false);
+
+    // --- Stage 4 observability (fields only, no consumer yet) --------------
+    REQUIRE(tc.sn1BroadcastPolicy == TimeConfig::Sn1BroadcastPolicy::RttTiered);
+    REQUIRE(tc.sn1IdleBroadcastIntervalTicks == 6);
+    REQUIRE(tc.hashBroadcastPolicy == TimeConfig::HashBroadcastPolicy::EveryTick);
+    REQUIRE(tc.hashBroadcastIntervalTicks == 1);
+    REQUIRE(tc.hashMismatchTickThreshold == 5);
+    REQUIRE(tc.hashMismatchReaction == TimeConfig::HashMismatchReaction::LogOnly);
+    REQUIRE(tc.sparseSaveMode == false);
+    REQUIRE(tc.recordSkipEvents == true);
+    REQUIRE(tc.recordStallEvents == true);
+    REQUIRE(tc.recordSubstitutionEvents == true);
+    REQUIRE(tc.recordRedundancyHits == false);
+    REQUIRE(tc.aggregateSiblingInputBundles == false);
+    REQUIRE(tc.hashLogRingCapacity == 600);
 }
 
-// ---------------------------------------------------------------------------
-// R-D3 ordering sanity — failsafe backstop must fire strictly later than the
-// soft cap. Carries the extra [Determinism] tag so it can be filtered apart
-// from the default-drift gate (it still carries [PCTM] so the [@og] alias and
-// `oglltest simulation` default filter pick it up).
-// ---------------------------------------------------------------------------
-TEST_CASE("PCTM.TimeConfig.HardResyncOrderingInvariant", "[PCTM][TimeConfig][Determinism]")
-{
-    TimeConfig tc;
-
-    // `hardResyncThresholdTicks` is uint32_t; `rollbackWindowHardCap` is int32_t.
-    // Cast the int32 side explicitly to uint32_t so the strict-inequality
-    // comparison does not emit -Wsign-compare on the Clang/GCC standalone CMake
-    // build path (T1 reviewer forward-looking requirement). Both defaults are
-    // small positive values, so the cast is value-preserving.
-    REQUIRE(tc.hardResyncThresholdTicks > static_cast<uint32_t>(tc.rollbackWindowHardCap));
-}
+// NOTE: the R-D3 HardResync ordering invariant that previously lived here has
+// MOVED to the sibling TimeConfigOrderingTest.cpp (D3.10 completion), which is
+// the dedicated home for TimeConfig ordering/relational invariants. The test
+// name, tags and assertion are preserved verbatim there — this is a relocation,
+// not a removal, and the file was split so the ordering invariants sit together
+// rather than being buried in the default-drift gate.
 
 #endif // WITH_LOW_LEVEL_TESTS

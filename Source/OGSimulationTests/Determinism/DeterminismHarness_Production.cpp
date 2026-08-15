@@ -101,8 +101,15 @@ TEST_CASE("Determinism.Cache.SaveLoadRoundTrip", "[Determinism][Production]")
 TEST_CASE("Determinism.Cache.AdvanceFrameMatchesManualIntegrate", "[Determinism][Production]")
 {
     // 30 ticks via advance_frame must yield the same final-state checksum as 30
-    // manual pushPredictionTick + pushPredictionInput + pushPredictionState calls
-    // using the same integrate functor.
+    // manual pushPredictionTick + pushPredictionState calls using the same
+    // integrate functor.
+    //
+    // [og-netcode-v2-input-relay T16] The manual mirror below dropped its
+    // pushPredictionInput call when the cache's input column was retired, and so
+    // did advance_frame — the two sequences still mirror each other exactly. The
+    // input is still passed to the INTEGRATE FUNCTOR on both paths, which is the
+    // only thing the checksum could ever have seen it through: the checksum
+    // serializes STATE. Assertion count unchanged.
     const std::vector<TestInput> grid = fixedGrid(30);
     const Cache::IntegrateFn integrate = accumulateIntegrate();
 
@@ -119,7 +126,6 @@ TEST_CASE("Determinism.Cache.AdvanceFrameMatchesManualIntegrate", "[Determinism]
         const TestState prev = manual.getState(prevIndex);
         const TestState next = integrate(tick, prev, in);
         manual.pushPredictionTick(tick);
-        manual.pushPredictionInput(in);
         manual.pushPredictionState(next);
         ++tick;
     }
