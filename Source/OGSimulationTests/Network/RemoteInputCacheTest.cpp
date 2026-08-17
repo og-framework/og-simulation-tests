@@ -3,8 +3,8 @@
 
 #include "catch_amalgamated.hpp"
 
-#include "OGSimulation/Network/ClientInputDelayLine.h"   // the has-clear() contrast
-#include "OGSimulation/Network/RelayedInputStore.h"
+#include "OGSimulation/Network/LocalInputCache.h"   // the has-clear() contrast
+#include "OGSimulation/Network/RemoteInputCache.h"
 #include "OGSimulation/RelayedInputRingCodec.h"
 #include "OGSimulation/SimulationFieldDescriptors.h"
 
@@ -14,8 +14,8 @@
 #include <vector>
 
 //////////////////////////////////////////////////////////////////////////////
-// og-netcode-v2-input-relay / T5: RelayedInputStore — the CLIENT-side read cache
-// of relayed inputs, and populateRelayedInputStore, the one ingest that carries
+// og-netcode-v2-input-relay / T5: RemoteInputCache — the CLIENT-side read cache
+// of relayed inputs, and populateRemoteInputCache, the one ingest that carries
 // the wire-version fence.
 //
 // WHAT THESE TESTS EXIST TO PIN, in order of how easy each is to break silently:
@@ -29,7 +29,7 @@
 //      one; the same case is the gate any future memo must pass.
 //
 //   2. THE MISS IS VISIBLE. `find` is pure hit/miss and never invents a neutral —
-//      that is the whole behavioural difference from ClientInputDelayLine::at(),
+//      that is the whole behavioural difference from LocalInputCache::at(),
 //      and T7's ladder and T6's resolution table both depend on seeing the miss.
 //
 //   3. THE INJECTED ZERO IS NOT `InputT{}`. The test input below deliberately has
@@ -129,10 +129,10 @@ namespace
 // 1. THE LOOKUP CONTRACT — hit/miss, last-wins, eviction.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("RelayedInputStore: find is pure hit/miss and never invents a neutral",
-          "[Network][RelayedInputStore]")
+TEST_CASE("RemoteInputCache: find is pure hit/miss and never invents a neutral",
+          "[Network][RemoteInputCache]")
 {
-    RelayedInputStore<StoreTestInput> store(gameZeroInput());
+    RemoteInputCache<StoreTestInput> store(gameZeroInput());
 
     std::uint8_t   outDA = 0xEEu;
     StoreTestInput outInput = taggedInput(-999);
@@ -158,10 +158,10 @@ TEST_CASE("RelayedInputStore: find is pure hit/miss and never invents a neutral"
     REQUIRE(outDA == 4u);           // still untouched by the miss
 }
 
-TEST_CASE("RelayedInputStore: push is LAST-WINS, including a re-stamp with a fresher dA",
-          "[Network][RelayedInputStore]")
+TEST_CASE("RemoteInputCache: push is LAST-WINS, including a re-stamp with a fresher dA",
+          "[Network][RemoteInputCache]")
 {
-    RelayedInputStore<StoreTestInput> store(gameZeroInput());
+    RemoteInputCache<StoreTestInput> store(gameZeroInput());
 
     REQUIRE(store.push(20u, 2u, taggedInput(100)));
     REQUIRE(store.push(20u, 7u, taggedInput(101)));   // same tick, fresher stamp
@@ -179,12 +179,12 @@ TEST_CASE("RelayedInputStore: push is LAST-WINS, including a re-stamp with a fre
     REQUIRE(store.findLatest().dA == 7u);
 }
 
-TEST_CASE("RelayedInputStore: an entry is evicted by the tick that shares its slot",
-          "[Network][RelayedInputStore]")
+TEST_CASE("RemoteInputCache: an entry is evicted by the tick that shares its slot",
+          "[Network][RemoteInputCache]")
 {
-    RelayedInputStore<StoreTestInput> store(gameZeroInput());
+    RemoteInputCache<StoreTestInput> store(gameZeroInput());
     const std::uint32_t cap = static_cast<std::uint32_t>(store.capacity());
-    REQUIRE(cap == static_cast<std::uint32_t>(kRelayedInputStoreCapacityTicks));
+    REQUIRE(cap == static_cast<std::uint32_t>(kRemoteInputCacheCapacityTicks));
 
     REQUIRE(store.push(5u, 1u, taggedInput(5)));
     REQUIRE(store.has(5u));
@@ -203,10 +203,10 @@ TEST_CASE("RelayedInputStore: an entry is evicted by the tick that shares its sl
 // 2. "LATEST" IS DERIVED — the randomized-equivalence case.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("RelayedInputStore: findLatest is a DERIVATION over the slots, not a scalar",
-          "[Network][RelayedInputStore]")
+TEST_CASE("RemoteInputCache: findLatest is a DERIVATION over the slots, not a scalar",
+          "[Network][RemoteInputCache]")
 {
-    RelayedInputStore<StoreTestInput> store(gameZeroInput());
+    RemoteInputCache<StoreTestInput> store(gameZeroInput());
     const std::uint32_t cap = static_cast<std::uint32_t>(store.capacity());
 
     // Nothing has arrived: the T7 rung-0 condition, and the contract that forbids
@@ -282,15 +282,15 @@ TEST_CASE("RelayedInputStore: findLatest is a DERIVATION over the slots, not a s
 // 3. FALLBACK — argument-less, and the injected zero is NOT InputT{}.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("RelayedInputStore: fallback answers the INJECTED game zero before anything arrives",
-          "[Network][RelayedInputStore]")
+TEST_CASE("RemoteInputCache: fallback answers the INJECTED game zero before anything arrives",
+          "[Network][RemoteInputCache]")
 {
     // ANTI-VACUITY GUARD. If these two ever became equal the whole case below
     // would pass without testing anything — which is precisely how the
     // (0,0,1)-vs-(0,0,0) forward-vector trap hides.
     REQUIRE_FALSE(gameZeroInput() == StoreTestInput{});
 
-    RelayedInputStore<StoreTestInput> store(gameZeroInput());
+    RemoteInputCache<StoreTestInput> store(gameZeroInput());
 
     REQUIRE_FALSE(store.findLatest().valid);
     REQUIRE(store.fallback() == gameZeroInput());
@@ -310,12 +310,12 @@ TEST_CASE("RelayedInputStore: fallback answers the INJECTED game zero before any
     REQUIRE(store.fallback().tag == 77);
 }
 
-TEST_CASE("RelayedInputStore: a re-injected neutral reaches an already-constructed store",
-          "[Network][RelayedInputStore]")
+TEST_CASE("RemoteInputCache: a re-injected neutral reaches an already-constructed store",
+          "[Network][RemoteInputCache]")
 {
     // The composition root injects the game zero without ordering itself before
     // every registration, so a store built with the default must be correctable.
-    RelayedInputStore<StoreTestInput> store;
+    RemoteInputCache<StoreTestInput> store;
     REQUIRE(store.fallback() == StoreTestInput{});
 
     store.setNeutralInput(gameZeroInput());
@@ -327,10 +327,10 @@ TEST_CASE("RelayedInputStore: a re-injected neutral reaches an already-construct
 // 4. THE SENTINEL IS NEVER A KEY.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("RelayedInputStore: kNoInputCaptureTick is rejected as a key",
-          "[Network][RelayedInputStore]")
+TEST_CASE("RemoteInputCache: kNoInputCaptureTick is rejected as a key",
+          "[Network][RemoteInputCache]")
 {
-    RelayedInputStore<StoreTestInput> store(gameZeroInput());
+    RemoteInputCache<StoreTestInput> store(gameZeroInput());
 
     // push REFUSES it and changes nothing. Defensive: the relay path only carries
     // real capture ticks, but T6 resolves a sentinel REF to the game zero and must
@@ -371,14 +371,14 @@ namespace
     }
 }
 
-TEST_CASE("RelayedInputStore: populate consumes a matching-version ring",
-          "[Network][RelayedInputStore]")
+TEST_CASE("RemoteInputCache: populate consumes a matching-version ring",
+          "[Network][RemoteInputCache]")
 {
-    RelayedInputStore<StoreTestInput> store(gameZeroInput());
+    RemoteInputCache<StoreTestInput> store(gameZeroInput());
     const StoreTestRing ring = makeRing({ 100u, 101u, 102u }, 3);
 
     const RelayedInputIngestReport report =
-        populateRelayedInputStore<StoreTestInput>(store, ring);
+        populateRemoteInputCache<StoreTestInput>(store, ring);
 
     REQUIRE(report.outcome == RelayedInputIngestOutcome::Consumed);
     REQUIRE(report.versionOnWire == relayedInputRing::kWireFormatVersion);
@@ -393,21 +393,21 @@ TEST_CASE("RelayedInputStore: populate consumes a matching-version ring",
     REQUIRE(store.findLatest().captureTick == 102u);
 }
 
-TEST_CASE("RelayedInputStore: populate re-consumes the whole ring idempotently",
-          "[Network][RelayedInputStore]")
+TEST_CASE("RemoteInputCache: populate re-consumes the whole ring idempotently",
+          "[Network][RemoteInputCache]")
 {
     // NO DIFFING: every arrival re-pushes every resident entry. That is what keeps
     // the same code correct unchanged when relay depth rises above 1 (§8.2).
-    RelayedInputStore<StoreTestInput> store(gameZeroInput());
+    RemoteInputCache<StoreTestInput> store(gameZeroInput());
     StoreTestRing ring = makeRing({ 200u, 201u }, 3);
 
-    REQUIRE(populateRelayedInputStore<StoreTestInput>(store, ring).entriesIngested == 2u);
-    REQUIRE(populateRelayedInputStore<StoreTestInput>(store, ring).entriesIngested == 2u);
+    REQUIRE(populateRemoteInputCache<StoreTestInput>(store, ring).entriesIngested == 2u);
+    REQUIRE(populateRemoteInputCache<StoreTestInput>(store, ring).entriesIngested == 2u);
     REQUIRE(store.residentCount() == 2u);
 
     // A re-stamp on the wire lands as a re-stamp in the store.
     relayedInputRing::writeLatest<StoreTestInput>(ring, 201u, 30u, taggedInput(-201), 3);
-    REQUIRE(populateRelayedInputStore<StoreTestInput>(store, ring).outcome
+    REQUIRE(populateRemoteInputCache<StoreTestInput>(store, ring).outcome
             == RelayedInputIngestOutcome::Consumed);
 
     std::uint8_t   dA = 0u;
@@ -418,18 +418,18 @@ TEST_CASE("RelayedInputStore: populate re-consumes the whole ring idempotently",
     REQUIRE(store.residentCount() == 2u);
 }
 
-TEST_CASE("RelayedInputStore: a never-written ring is a SILENT no-op",
-          "[Network][RelayedInputStore]")
+TEST_CASE("RemoteInputCache: a never-written ring is a SILENT no-op",
+          "[Network][RemoteInputCache]")
 {
     // Version 0 means "the codec never wrote its header", i.e. this property has
     // never been replicated. It must not be reported as a mismatch and must not be
     // logged — every client sees this state for every character before the first
     // relay write.
-    RelayedInputStore<StoreTestInput> store(gameZeroInput());
+    RemoteInputCache<StoreTestInput> store(gameZeroInput());
     const StoreTestRing emptyRing;
 
     const RelayedInputIngestReport report =
-        populateRelayedInputStore<StoreTestInput>(store, emptyRing);
+        populateRemoteInputCache<StoreTestInput>(store, emptyRing);
 
     REQUIRE(report.outcome == RelayedInputIngestOutcome::NeverWritten);
     REQUIRE(report.versionOnWire == 0u);
@@ -441,10 +441,10 @@ TEST_CASE("RelayedInputStore: a never-written ring is a SILENT no-op",
     REQUIRE(store.shouldLogVersionMismatchOnce());
 }
 
-TEST_CASE("RelayedInputStore: a version mismatch drops the WHOLE ring",
-          "[Network][RelayedInputStore]")
+TEST_CASE("RemoteInputCache: a version mismatch drops the WHOLE ring",
+          "[Network][RemoteInputCache]")
 {
-    RelayedInputStore<StoreTestInput> store(gameZeroInput());
+    RemoteInputCache<StoreTestInput> store(gameZeroInput());
 
     // Start from a ring that is valid in every respect...
     StoreTestRing ring = makeRing({ 300u, 301u, 302u }, 3);
@@ -458,7 +458,7 @@ TEST_CASE("RelayedInputStore: a version mismatch drops the WHOLE ring",
         static_cast<std::uint8_t>(relayedInputRing::kWireFormatVersion + 1u);
 
     const RelayedInputIngestReport report =
-        populateRelayedInputStore<StoreTestInput>(store, ring);
+        populateRemoteInputCache<StoreTestInput>(store, ring);
 
     REQUIRE(report.outcome == RelayedInputIngestOutcome::VersionMismatch);
     REQUIRE(report.versionOnWire == relayedInputRing::kWireFormatVersion + 1u);
@@ -471,12 +471,12 @@ TEST_CASE("RelayedInputStore: a version mismatch drops the WHOLE ring",
     REQUIRE_FALSE(store.findLatest().valid);
 }
 
-TEST_CASE("RelayedInputStore: the mismatch log gate opens exactly once per store",
-          "[Network][RelayedInputStore]")
+TEST_CASE("RemoteInputCache: the mismatch log gate opens exactly once per store",
+          "[Network][RemoteInputCache]")
 {
     // An incompatible peer re-replicates its ring forever; an ungated warning would
     // fire on every single replication.
-    RelayedInputStore<StoreTestInput> store(gameZeroInput());
+    RemoteInputCache<StoreTestInput> store(gameZeroInput());
 
     REQUIRE(store.shouldLogVersionMismatchOnce());
     REQUIRE_FALSE(store.shouldLogVersionMismatchOnce());
@@ -495,24 +495,24 @@ TEST_CASE("RelayedInputStore: the mismatch log gate opens exactly once per store
 
 // Declared at file scope (a concept cannot be declared inside a function body, and
 // the detection must be DEPENDENT — MSVC 14.38 treats a non-dependent
-// `requires(RelayedInputStore<X>& s) { s.clear(); }` as a hard error rather than
+// `requires(RemoteInputCache<X>& s) { s.clear(); }` as a hard error rather than
 // as an unsatisfied requirement).
 template <typename T>
 concept HasClearMethod = requires(T& t) { t.clear(); };
 
-// ClientInputDelayLine deliberately HAS clear(), because wipeAllForResync must call
+// LocalInputCache deliberately HAS clear(), because wipeAllForResync must call
 // it; this type deliberately does NOT, because relayed entries are sender-domain
 // capture ticks that a LOCAL resync does not invalidate.
-static_assert(HasClearMethod<ClientInputDelayLine<StoreTestInput>>,
+static_assert(HasClearMethod<LocalInputCache<StoreTestInput>>,
     "sanity: the detection must actually detect a clear() where one exists");
-static_assert(!HasClearMethod<RelayedInputStore<StoreTestInput>>,
-    "RelayedInputStore must NOT grow a clear() - a resync must not be able to "
+static_assert(!HasClearMethod<RemoteInputCache<StoreTestInput>>,
+    "RemoteInputCache must NOT grow a clear() - a resync must not be able to "
     "sweep sender-domain capture ticks (T5 naming ruling, reason 3)");
 
-TEST_CASE("RelayedInputStore: the store has no wipe surface to be swept by a resync",
-          "[Network][RelayedInputStore]")
+TEST_CASE("RemoteInputCache: the store has no wipe surface to be swept by a resync",
+          "[Network][RemoteInputCache]")
 {
-    RelayedInputStore<StoreTestInput> store(gameZeroInput());
+    RemoteInputCache<StoreTestInput> store(gameZeroInput());
     REQUIRE(store.push(400u, 5u, taggedInput(400)));
     REQUIRE(store.has(400u));
 }

@@ -248,16 +248,16 @@ TEST_CASE("Miss gating is severity only — insertion behaviour is unchanged",
 	// Routine miss (Verbose) — nothing written.
 	cache.tryInsertingCorrectState(GateState{ 42 }, 501u);
 	REQUIRE(cache.getPredictionTick() == landedTickBefore);
-	REQUIRE(cache.getLastCorrectTick() == 0u);
+	REQUIRE(cache.getDiagnostics().lastCorrectTick() == 0u);
 
 	// Anomalous miss (Warning) — also nothing written.
 	cache.tryInsertingCorrectState(GateState{ 42 }, 500u + hardCap() + 5u);
 	REQUIRE(cache.getPredictionTick() == landedTickBefore);
-	REQUIRE(cache.getLastCorrectTick() == 0u);
+	REQUIRE(cache.getDiagnostics().lastCorrectTick() == 0u);
 
 	// A correction that DOES hit the window still lands, unchanged.
 	cache.tryInsertingCorrectState(GateState{ 99 }, 500u);
-	REQUIRE(cache.getLastCorrectTick() == 500u);
+	REQUIRE(cache.getDiagnostics().lastCorrectTick() == 500u);
 
 	const std::uint32_t cacheIndex = cache.getCacheIndex(500u);
 	REQUIRE(cacheIndex != GateCache::InvalidCacheIndex);

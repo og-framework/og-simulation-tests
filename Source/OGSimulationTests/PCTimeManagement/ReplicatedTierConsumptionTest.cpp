@@ -23,7 +23,9 @@
 // Everything engine-free about that is here:
 //
 //   1. The C2 REPLACES formula on the client side — effective delay is
-//      `rttTierInputDelays[tier]`, NOT `forcedInputLatencyTicks + tier delay`.
+//      `rttTierInputDelays[tier]`, NOT the pre-tier fallback
+//      (`rttTierInputDelays[kMaxConnectionTierIndex]`, since item 62 / RN-12)
+//      plus the tier delay.
 //   2. The pre-arrival fallback, and specifically that it is keyed on ARRIVAL
 //      rather than on the tier VALUE (tier 0 and "nothing yet" must not be
 //      conflated — the replicated property defaults to 0).
@@ -63,14 +65,21 @@ namespace
     }
 }
 
-TEST_CASE("ReplicatedTierConsumer: pre-arrival falls back to forcedInputLatencyTicks",
+TEST_CASE("ReplicatedTierConsumer: pre-arrival falls back to the worst tier (item 62 / RN-12)",
           "[PCTM][ReplicatedTier]")
 {
+    // RETIRED (item 62 / RN-12, 2026-08-16): the dedicated no-tier-baseline
+    // field this used to pin is gone. The pre-tier fallback is now
+    // `rttTierInputDelays[kMaxConnectionTierIndex]` — the WORST tier, chosen
+    // over the best tier or a bare floor because under-estimating in the join
+    // window schedules inputs too early and they are MISSED (item 41's
+    // `aboveNewest` population), while over-estimating only costs a couple of
+    // extra ticks of lag in a window the player is not yet in combat.
     const TimeConfig cfg;
     ReplicatedTierConsumer consumer(cfg);
 
     REQUIRE_FALSE(consumer.hasReceivedTier());
-    REQUIRE(consumer.effectiveInputDelayTicks() == cfg.forcedInputLatencyTicks);
+    REQUIRE(consumer.effectiveInputDelayTicks() == cfg.rttTierInputDelays[kMaxConnectionTierIndex]);
 
     // The un-escalated configured window, not a tier ceiling: the tier can only
     // ever RAISE the soft ceiling, so "no tier" must mean "not raised".
@@ -92,7 +101,7 @@ TEST_CASE("ReplicatedTierConsumer: tier 0 arrival is distinguishable from no arr
     // this case fail loudly rather than pass vacuously if the defaults ever
     // converge.
     const TimeConfig cfg;
-    REQUIRE(cfg.forcedInputLatencyTicks != cfg.rttTierInputDelays[0]);
+    REQUIRE(cfg.rttTierInputDelays[kMaxConnectionTierIndex] != cfg.rttTierInputDelays[0]);
     REQUIRE_FALSE(cfg.lanZeroDelayOverride);
 
     ReplicatedTierConsumer consumer(cfg);
@@ -125,7 +134,7 @@ TEST_CASE("ReplicatedTierConsumer: delay tracks rttTierInputDelays and REPLACES 
         // server-side suites carry, restated on the client half so the two
         // cannot drift into disagreeing about the semantics.
         REQUIRE(consumer.effectiveInputDelayTicks()
-                != cfg.forcedInputLatencyTicks + cfg.rttTierInputDelays[tier]);
+                != cfg.rttTierInputDelays[kMaxConnectionTierIndex] + cfg.rttTierInputDelays[tier]);
 
         REQUIRE(consumer.effectiveRollbackCeiling() == cfg.rttTierRollbackCeilings[tier]);
     }
@@ -178,7 +187,7 @@ TEST_CASE("ReplicatedTierConsumer: reset returns to the pre-arrival state",
 
     REQUIRE_FALSE(consumer.hasReceivedTier());
     REQUIRE(consumer.currentTierIndex() == 0);
-    REQUIRE(consumer.effectiveInputDelayTicks() == cfg.forcedInputLatencyTicks);
+    REQUIRE(consumer.effectiveInputDelayTicks() == cfg.rttTierInputDelays[kMaxConnectionTierIndex]);
 }
 
 TEST_CASE("Shared lookups: server table and client consumer agree for every tier",

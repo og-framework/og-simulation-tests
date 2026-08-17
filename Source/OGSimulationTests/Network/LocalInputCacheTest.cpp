@@ -6,7 +6,7 @@
 #include <string>
 
 #include "catch_amalgamated.hpp"
-#include "OGSimulation/Network/ClientInputDelayLine.h"
+#include "OGSimulation/Network/LocalInputCache.h"
 #include "OGSimulation/Network/ReplicatedTierConsumer.h"
 #include "OGSimulation/PCTimeManagement/TimeConfig.h"
 
@@ -58,10 +58,10 @@ namespace
         return TaggedInput{ 0, "NEUTRAL" };
     }
 
-    using Line = ClientInputDelayLine<TaggedInput>;
+    using Line = LocalInputCache<TaggedInput>;
 }
 
-TEST_CASE("ClientInputDelayLine: at() returns the capture taken at that tick",
+TEST_CASE("LocalInputCache: at() returns the capture taken at that tick",
           "[Network][ClientInputDelay]")
 {
     Line line(neutralInput());
@@ -80,7 +80,7 @@ TEST_CASE("ClientInputDelayLine: at() returns the capture taken at that tick",
 
 // PART 4, directly. The pre-session window is not an error state — it is reached
 // on every session start, and after every hard resync.
-TEST_CASE("ClientInputDelayLine: never-captured ticks read as the neutral input",
+TEST_CASE("LocalInputCache: never-captured ticks read as the neutral input",
           "[Network][ClientInputDelay]")
 {
     Line line(neutralInput());
@@ -108,7 +108,7 @@ TEST_CASE("ClientInputDelayLine: never-captured ticks read as the neutral input"
 // The ring is indexed modulo capacity, so an evicted tick lands on a slot that
 // now holds a DIFFERENT tick's capture. Reporting that neighbour would be a
 // silent wrong-input bug; the stored-tick validation is what prevents it.
-TEST_CASE("ClientInputDelayLine: an evicted tick reads neutral, not its ring neighbour",
+TEST_CASE("LocalInputCache: an evicted tick reads neutral, not its ring neighbour",
           "[Network][ClientInputDelay]")
 {
     constexpr std::size_t kCapacity = 8u;
@@ -126,7 +126,7 @@ TEST_CASE("ClientInputDelayLine: an evicted tick reads neutral, not its ring nei
     REQUIRE_FALSE(line.at(0) == captureAt(8));
 }
 
-TEST_CASE("ClientInputDelayLine: capacity comfortably exceeds the worst tier delay",
+TEST_CASE("LocalInputCache: capacity comfortably exceeds the worst tier delay",
           "[Network][ClientInputDelay]")
 {
     const TimeConfig cfg;
@@ -153,7 +153,7 @@ TEST_CASE("ClientInputDelayLine: capacity comfortably exceeds the worst tier del
 
 // The delay line is keyed to the pre-resync prediction clock. Surviving captures
 // would be read at ticks that no longer mean what they meant.
-TEST_CASE("ClientInputDelayLine: clear() re-enters the neutral window and keeps the neutral",
+TEST_CASE("LocalInputCache: clear() re-enters the neutral window and keeps the neutral",
           "[Network][ClientInputDelay]")
 {
     Line line(neutralInput());
@@ -175,7 +175,7 @@ TEST_CASE("ClientInputDelayLine: clear() re-enters the neutral window and keeps 
     REQUIRE(line.getNeutralInput() == neutralInput());
 }
 
-TEST_CASE("ClientInputDelayLine: the neutral is injected, not value-initialised",
+TEST_CASE("LocalInputCache: the neutral is injected, not value-initialised",
           "[Network][ClientInputDelay]")
 {
     // The defaulted line answers InputT{} — which for the real PlayerInput would
@@ -190,7 +190,7 @@ TEST_CASE("ClientInputDelayLine: the neutral is injected, not value-initialised"
     REQUIRE(defaulted.at(3) == neutralInput());
 }
 
-TEST_CASE("ClientInputDelayLine: last capture wins for a repeated tick",
+TEST_CASE("LocalInputCache: last capture wins for a repeated tick",
           "[Network][ClientInputDelay]")
 {
     // Unlike the server's first-wins enqueue (which guards against a redundancy

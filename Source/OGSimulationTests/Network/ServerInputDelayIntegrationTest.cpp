@@ -248,10 +248,10 @@ TEST_CASE("DelayIsAppliedExactlyOnce", "[Network][InputDelayIntegration]")
     // would pass the "arrives at the right time" assertion above and fail here.
     REQUIRE(got.captureTick != static_cast<std::uint32_t>(kCaptureTick + delay));
 
-    // And the delay is NOT additive over the baseline. Stated as an explicit
+    // And the delay is NOT additive over the fallback. Stated as an explicit
     // inequality because the additive reading is the plausible misimplementation
     // (C2 locks REPLACES, not ADDS).
-    REQUIRE(delay != cfg.forcedInputLatencyTicks + cfg.rttTierInputDelays[2]);
+    REQUIRE(delay != cfg.rttTierInputDelays[kMaxConnectionTierIndex] + cfg.rttTierInputDelays[2]);
 }
 
 // Cadence must not drift. Over a long run the sim consumes exactly as many
@@ -363,7 +363,7 @@ TEST_CASE("UnknownConnectionUsesBaselineAndStillDelivers", "[Network][InputDelay
     REQUIRE(tierTable.hasEntry(unknown) == false);
 
     const std::int32_t delay = server.queue().effectiveDelay(unknown);
-    REQUIRE(delay == cfg.forcedInputLatencyTicks);
+    REQUIRE(delay == cfg.rttTierInputDelays[kMaxConnectionTierIndex]);
 
     constexpr std::int32_t kCaptureTick = 250;
     server.queue().enqueue<MockSimA>(slot0(unknown), kCaptureTick, /*value=*/99);

@@ -616,7 +616,7 @@ TEST_CASE("CorrectionCache.ResimGate.RepeatedFrontierExactLandingsCoalesceIntoOn
 
 	// NO policy call: this case is about the compiled default, and saying so is the
 	// point of it.
-	REQUIRE(cache.getResimTriggerPolicy() == TimeConfig::ResimTriggerPolicy::FrontierExact);
+	REQUIRE(cache.getDiagnostics().resimTriggerPolicy() == TimeConfig::ResimTriggerPolicy::FrontierExact);
 
 	// First frontier-exact landing: anchors 103, gate shut (anchor == frontier)...
 	landCorrection(cache, 103u);
@@ -753,7 +753,7 @@ TEST_CASE("CorrectionCache.ResimGate.AMidReplayLandingSurvivesTheResimAndRetrigg
 
 	// prepareResimAll captures 105 and the replay starts.
 	prepareResimulation(cache);
-	REQUIRE(cache.getCapturedResimAnchorTick() == 105u);
+	REQUIRE(cache.getDiagnostics().capturedResimAnchorTick() == 105u);
 	replayResimulationFrom(cache, 105u);
 
 	// GAME THREAD, mid-replay: authority disagrees about a NEWER tick.
@@ -891,14 +891,14 @@ TEST_CASE("CorrectionCache.ResimGate.WipeCacheClearsAllGateState",
 	prepareResimulation(cache);
 	REQUIRE(cache.needsResimulation());
 	REQUIRE(cache.getPendingResimAnchorTick() == 103u);
-	REQUIRE(cache.getCapturedResimAnchorTick() == 103u);
+	REQUIRE(cache.getDiagnostics().capturedResimAnchorTick() == 103u);
 
 	cache.wipeCache(900u);
 
 	REQUIRE(cache.getPredictionTick() == 900u);
-	REQUIRE(cache.getLastCorrectTick() == 0u);
+	REQUIRE(cache.getDiagnostics().lastCorrectTick() == 0u);
 	REQUIRE(cache.getPendingResimAnchorTick() == 0u);
-	REQUIRE(cache.getCapturedResimAnchorTick() == 0u);
+	REQUIRE(cache.getDiagnostics().capturedResimAnchorTick() == 0u);
 	REQUIRE_FALSE(cache.needsResimulation());
 
 	// No stale anchor can be resurrected by the next push either.
@@ -984,8 +984,8 @@ TEST_CASE("CorrectionCache.ResimGate.ReplayNeverClobbersAFreshCorrection_TheHoll
 	// `prepareResimAll`: captures the anchor for the consume CAS AND the
 	// landing-sequence baseline for the classifier, in one instant.
 	prepareResimulation(cache);
-	REQUIRE(cache.getCapturedResimAnchorTick() == 105u);
-	const std::uint32_t preparedSeq = cache.getCapturedLandingSeq();
+	REQUIRE(cache.getDiagnostics().capturedResimAnchorTick() == 105u);
+	const std::uint32_t preparedSeq = cache.getDiagnostics().capturedLandingSeqNr();
 
 	// The replay runs 106..108. It gets as far as 106 — uncorrected, so written.
 	REQUIRE(replayTick(cache, 106u) == resimGate::ResimSlotWriteOutcome::Written);
@@ -993,7 +993,7 @@ TEST_CASE("CorrectionCache.ResimGate.ReplayNeverClobbersAFreshCorrection_TheHoll
 	// GAME THREAD, MID-REPLAY: authority disagrees about 107, which the replay
 	// cursor has not reached yet. THIS is the tick the defect used to eat.
 	landCorrection(cache, 107u);
-	REQUIRE(cache.getSlotLandingSeq(cache.getCacheIndex(107u)) > preparedSeq);
+	REQUIRE(cache.getDiagnostics().slotLandingSeqNr(cache.getCacheIndex(107u)) > preparedSeq);
 	REQUIRE(cache.getPendingResimAnchorTick() == 107u);
 
 	// The replay reaches 107 and is REFUSED. Fresh by the SEQUENCE clause (it
@@ -1020,7 +1020,7 @@ TEST_CASE("CorrectionCache.ResimGate.ReplayNeverClobbersAFreshCorrection_TheHoll
 	// ⭐⭐ THE TRIGGER IS NO LONGER HOLLOW. `prepareResimAll` restores live state
 	// from the anchor slot; that slot now holds what the authority said.
 	prepareResimulation(cache);
-	REQUIRE(cache.getCapturedResimAnchorTick() == 107u);
+	REQUIRE(cache.getDiagnostics().capturedResimAnchorTick() == 107u);
 	REQUIRE(cache.getState(cache.getCacheIndex(107u)).value == kAuthorityValue);
 
 	replayResimulationFrom(cache, 107u);
@@ -1037,7 +1037,7 @@ TEST_CASE("CorrectionCache.ResimGate.ReplayNeverClobbersAFreshCorrection_TheHoll
 // character's deeper anchor drags this cache's replay span below its own anchor,
 // so a landing inside that span can sit below the captured value. The tick clause
 // (`slotTick >= capturedAnchorTick`) reads FALSE there; only
-// `slotLandingSeq > preparedLandingSeq` catches it.
+// `slotLandingSeqNr > preparedLandingSeqNr` catches it.
 //
 // ⚠ THE FAILING TWIN IS THE SECOND SECTION: the SAME slot, the SAME tick, the
 // SAME span — corrected BEFORE the prepare instead of after. It classifies
@@ -1067,7 +1067,7 @@ TEST_CASE("CorrectionCache.ResimGate.AMidReplayLandingBelowTheCapturedAnchorIsFr
 		REQUIRE(cache.getPendingResimAnchorTick() == kOwnAnchorTick);
 
 		prepareResimulation(cache);
-		REQUIRE(cache.getCapturedResimAnchorTick() == kOwnAnchorTick);
+		REQUIRE(cache.getDiagnostics().capturedResimAnchorTick() == kOwnAnchorTick);
 
 		// The replay runs from the SHARED min, not from this cache's anchor.
 		REQUIRE(replayTick(cache, 106u) == resimGate::ResimSlotWriteOutcome::Written);
@@ -1076,9 +1076,9 @@ TEST_CASE("CorrectionCache.ResimGate.AMidReplayLandingBelowTheCapturedAnchorIsFr
 		// anchor either (CAS-MAX, item 45) — 107 < 110.
 		landCorrection(cache, kLandingTick);
 		REQUIRE(cache.getPendingResimAnchorTick() == kOwnAnchorTick);
-		REQUIRE(cache.getSlotLandingSeq(cache.getCacheIndex(kLandingTick))
-		        > cache.getCapturedLandingSeq());
-		REQUIRE(kLandingTick < cache.getCapturedResimAnchorTick());   // tick clause is FALSE here
+		REQUIRE(cache.getDiagnostics().slotLandingSeqNr(cache.getCacheIndex(kLandingTick))
+		        > cache.getDiagnostics().capturedLandingSeqNr());
+		REQUIRE(kLandingTick < cache.getDiagnostics().capturedResimAnchorTick());   // tick clause is FALSE here
 
 		REQUIRE(replayTick(cache, kLandingTick) == resimGate::ResimSlotWriteOutcome::ProtectedFresh);
 		REQUIRE(cache.getState(cache.getCacheIndex(kLandingTick)).value == kAuthorityValue);
@@ -1100,8 +1100,8 @@ TEST_CASE("CorrectionCache.ResimGate.AMidReplayLandingBelowTheCapturedAnchorIsFr
 		REQUIRE(cache.getPendingResimAnchorTick() == kOwnAnchorTick);
 
 		prepareResimulation(cache);
-		REQUIRE(cache.getSlotLandingSeq(cache.getCacheIndex(kLandingTick))
-		        <= cache.getCapturedLandingSeq());
+		REQUIRE(cache.getDiagnostics().slotLandingSeqNr(cache.getCacheIndex(kLandingTick))
+		        <= cache.getDiagnostics().capturedLandingSeqNr());
 
 		REQUIRE(replayTick(cache, 106u) == resimGate::ResimSlotWriteOutcome::Written);
 		REQUIRE(replayTick(cache, kLandingTick) == resimGate::ResimSlotWriteOutcome::ProtectedStale);
@@ -1168,14 +1168,14 @@ TEST_CASE("CorrectionCache.ResimGate.TheMinFoldProtectsTheNewerAnchoredCharacter
 
 	prepareResimulation(cacheA);
 	prepareResimulation(cacheB);
-	REQUIRE(cacheA.getCapturedResimAnchorTick() == sharedRestoreTick);   // A IS the min
-	REQUIRE(cacheB.getCapturedResimAnchorTick() == 110u);                // B is not
+	REQUIRE(cacheA.getDiagnostics().capturedResimAnchorTick() == sharedRestoreTick);   // A IS the min
+	REQUIRE(cacheB.getDiagnostics().capturedResimAnchorTick() == 110u);                // B is not
 
 	SECTION("B's slot at its own anchor is FRESH — caught by the TICK clause only")
 	{
 		// It landed BEFORE the prepare, so the sequence clause reads stale...
-		REQUIRE(cacheB.getSlotLandingSeq(cacheB.getCacheIndex(110u))
-		        <= cacheB.getCapturedLandingSeq());
+		REQUIRE(cacheB.getDiagnostics().slotLandingSeqNr(cacheB.getCacheIndex(110u))
+		        <= cacheB.getDiagnostics().capturedLandingSeqNr());
 		// ...and the tick clause is what rescues it: 110 >= 110.
 		REQUIRE(replayTick(cacheB, 110u) == resimGate::ResimSlotWriteOutcome::ProtectedFresh);
 		REQUIRE(cacheB.getState(cacheB.getCacheIndex(110u)).value == kAuthorityValue);
@@ -1269,7 +1269,7 @@ TEST_CASE("CorrectionCache.ResimGate.ASingleCharacterReplayProducesNoStaleClassi
 	REQUIRE(cache.getPendingResimAnchorTick() == 106u);
 
 	prepareResimulation(cache);
-	REQUIRE(cache.getCapturedResimAnchorTick() == 106u);
+	REQUIRE(cache.getDiagnostics().capturedResimAnchorTick() == 106u);
 
 	std::uint32_t fresh = 0u;
 	std::uint32_t stale = 0u;
@@ -1328,7 +1328,7 @@ TEST_CASE("CorrectionCache.ResimGate.AnAgreeingLandingAboveTheAnchorIsProtectedA
 	REQUIRE(replayTick(cache, 106u) == resimGate::ResimSlotWriteOutcome::Written);
 	// FRESH by the TICK clause (107 >= 105); the sequence clause reads stale,
 	// because it landed before the prepare.
-	REQUIRE(cache.getSlotLandingSeq(cache.getCacheIndex(107u)) <= cache.getCapturedLandingSeq());
+	REQUIRE(cache.getDiagnostics().slotLandingSeqNr(cache.getCacheIndex(107u)) <= cache.getDiagnostics().capturedLandingSeqNr());
 	REQUIRE(replayTick(cache, 107u) == resimGate::ResimSlotWriteOutcome::ProtectedFresh);
 	REQUIRE(replayTick(cache, 108u) == resimGate::ResimSlotWriteOutcome::Written);
 
@@ -1521,7 +1521,7 @@ namespace
 	{
 		const std::uint32_t idx = cache.getCacheIndex(tick);
 		REQUIRE(idx != GateCache::InvalidCacheIndex);
-		return cache.getDiagnosticStateProvenance(idx);
+		return cache.getDiagnostics().stateProvenance(idx);
 	}
 
 	// The provenance map over a TICK RANGE, as the alphabet the shipped
@@ -1539,7 +1539,7 @@ namespace
 			const std::uint32_t idx = cache.getCacheIndex(tick);
 			run.push_back(idx == GateCache::InvalidCacheIndex
 				? '!'
-				: slotStateProvenanceChar(cache.getDiagnosticStateProvenance(idx)));
+				: slotStateProvenanceChar(cache.getDiagnostics().stateProvenance(idx)));
 		}
 		return run;
 	}
@@ -1552,7 +1552,7 @@ namespace
 	{
 		std::uint32_t count = 0u;
 		for (std::uint32_t slot = 0u; slot < static_cast<std::uint32_t>(GateCache::StateBufferSize); ++slot)
-			if (cache.getDiagnosticStateProvenance(slot) == value)
+			if (cache.getDiagnostics().stateProvenance(slot) == value)
 				++count;
 		return count;
 	}
@@ -1571,7 +1571,7 @@ namespace
 	// how the ⛔ "provenance never enters the determinism comparison" prohibition
 	// becomes a test rather than a comment.
 	//
-	// ⛔ `getDiagnosticStateProvenance` IS THE ONE THING NOT IN HERE, and its
+	// ⛔ `getDiagnostics().stateProvenance` IS THE ONE THING NOT IN HERE, and its
 	// absence is the point: the scribbled run and the clean run differ in exactly
 	// that column and in nothing else, so an equal trace means no production path
 	// can see it. Do not "complete" this function by adding it.
@@ -1585,13 +1585,13 @@ namespace
 	void recordProductionOutputs(const GateCache& cache, ProductionTrace& trace)
 	{
 		trace.values.push_back(cache.getPredictionTick());
-		trace.values.push_back(cache.getLastCorrectTick());
+		trace.values.push_back(cache.getDiagnostics().lastCorrectTick());
 		trace.values.push_back(cache.getPendingResimAnchorTick());
 		trace.values.push_back(cache.needsResimulation() ? 1u : 0u);
-		trace.values.push_back(cache.getCapturedResimAnchorTick());
-		trace.values.push_back(cache.getCapturedLandingSeq());
-		trace.values.push_back(cache.getLandingSeq());
-		trace.values.push_back(static_cast<std::uint32_t>(cache.getResimTriggerPolicy()));
+		trace.values.push_back(cache.getDiagnostics().capturedResimAnchorTick());
+		trace.values.push_back(cache.getDiagnostics().capturedLandingSeqNr());
+		trace.values.push_back(cache.getDiagnostics().landingSeqNr());
+		trace.values.push_back(static_cast<std::uint32_t>(cache.getDiagnostics().resimTriggerPolicy()));
 		// ⛔ THE CHECKSUM PROHIBITION, MACHINE-CHECKED. If provenance ever leaks
 		// into `compute_checksum`, two peers that agree on state and disagree on
 		// lineage would hash differently — and this line goes red.
@@ -1601,7 +1601,7 @@ namespace
 		{
 			trace.values.push_back(cache.containsCorrectTick(slot) ? 1u : 0u);
 			trace.values.push_back(cache.getAppliedCaptureTick(slot));
-			trace.values.push_back(cache.getSlotLandingSeq(slot));
+			trace.values.push_back(cache.getDiagnostics().slotLandingSeqNr(slot));
 			trace.values.push_back(static_cast<std::uint32_t>(cache.getState(slot).value));
 		}
 
@@ -1631,7 +1631,7 @@ namespace
 	// ⛔⛔ THE THREE SEEDS ARE INDEPENDENT, AND THAT IS A CORRECTION MADE BY A
 	// MUTATION RUN — DO NOT COLLAPSE THEM BACK INTO ONE. The first draft took a
 	// single seed and derived the other two from it (`seed+3`, `seed+7`). A
-	// planted leak — `getLastCorrectTick` skipping any corrected slot whose
+	// planted leak — `getDiagnostics().lastCorrectTick` skipping any corrected slot whose
 	// provenance read `Replayed` — SURVIVED that version green. The reason is
 	// arithmetic, not luck: the generator writes `(seed + slot) % 6`, so ONE seed
 	// gives each slot exactly ONE of the six values, and the newest corrected
@@ -1659,7 +1659,7 @@ namespace
 		// ── SCRIBBLE POINT 1: THE GATE IS OPEN AND UNCONSUMED. ──────────────
 		REQUIRE(cache.needsResimulation());
 		if (seedGateOpen != 0u)
-			cache.scribbleDiagnosticStateProvenanceForFenceTest(seedGateOpen);
+			cache.editDiagnostics().scribbleStateProvenanceForFenceTest(seedGateOpen);
 		recordProductionOutputs(cache, trace);
 
 		prepareResimulation(cache);
@@ -1675,7 +1675,7 @@ namespace
 					landCorrection(cache, extraLandingTick);
 				// ── SCRIBBLE POINT 2: MID-PREPARE, cursor inside the span. ──
 				if (seedMidPrepare != 0u)
-					cache.scribbleDiagnosticStateProvenanceForFenceTest(seedMidPrepare);
+					cache.editDiagnostics().scribbleStateProvenanceForFenceTest(seedMidPrepare);
 			}
 			recordProductionOutputs(cache, trace);
 		}
@@ -1685,7 +1685,7 @@ namespace
 
 		// ── SCRIBBLE POINT 3: POST-CONSUME. ─────────────────────────────────
 		if (seedPostConsume != 0u)
-			cache.scribbleDiagnosticStateProvenanceForFenceTest(seedPostConsume);
+			cache.editDiagnostics().scribbleStateProvenanceForFenceTest(seedPostConsume);
 
 		// And the lifecycle CONTINUES past the scribble, because "the column is
 		// invisible" has to hold for everything that happens AFTER it is poisoned,
@@ -1840,10 +1840,10 @@ TEST_CASE("CorrectionCache.ResimGate.ADisagreeingLandingAdoptsAuthorityAndAnAgre
 	// are protected. The ENUM is what separates them.
 	REQUIRE(cache.containsCorrectTick(adopted));
 	REQUIRE(cache.containsCorrectTick(certified));
-	REQUIRE(isAuthorityGradeProvenance(cache.getDiagnosticStateProvenance(adopted)));
-	REQUIRE(isAuthorityGradeProvenance(cache.getDiagnosticStateProvenance(certified)));
-	REQUIRE(cache.getDiagnosticStateProvenance(adopted)
-	        != cache.getDiagnosticStateProvenance(certified));
+	REQUIRE(isAuthorityGradeProvenance(cache.getDiagnostics().stateProvenance(adopted)));
+	REQUIRE(isAuthorityGradeProvenance(cache.getDiagnostics().stateProvenance(certified)));
+	REQUIRE(cache.getDiagnostics().stateProvenance(adopted)
+	        != cache.getDiagnostics().stateProvenance(certified));
 }
 
 // ---------------------------------------------------------------------------
@@ -2042,7 +2042,7 @@ TEST_CASE("CorrectionCache.ResimGate.WipeAndRingRecycleBothRetireTheProvenanceCo
 	SECTION("a ring recycle retires the old lineage at the same instant as the bit")
 	{
 		const std::uint32_t recycledIndex = cache.getCacheIndex(102u);
-		REQUIRE(cache.getDiagnosticStateProvenance(recycledIndex)
+		REQUIRE(cache.getDiagnostics().stateProvenance(recycledIndex)
 		        == SlotStateProvenance::AuthorityAdopted);
 		REQUIRE(cache.containsCorrectTick(recycledIndex));
 
@@ -2052,7 +2052,7 @@ TEST_CASE("CorrectionCache.ResimGate.WipeAndRingRecycleBothRetireTheProvenanceCo
 
 		// ⭐ `Predicted`, not `Empty`: `pushPredictionTick` allocates a PREDICTION
 		// slot and production always follows it with `pushPredictionState`.
-		REQUIRE(cache.getDiagnosticStateProvenance(recycledIndex)
+		REQUIRE(cache.getDiagnostics().stateProvenance(recycledIndex)
 		        == SlotStateProvenance::Predicted);
 		// The twin: the correction BIT retired at the same instant, so the column
 		// and the bit cannot disagree about whether a correction survived a lap.
@@ -2084,7 +2084,7 @@ TEST_CASE("CorrectionCache.ResimGate.WipeAndRingRecycleBothRetireTheProvenanceCo
 // STICKY. `isAuthorityGradeProvenance(ReplayedOverCorrection)` is false (pinned
 // by the alphabet case), so a LATER replay over the same still-uncorrected slot
 // restamps it `Replayed` and the alarm is erased. That window is closed in
-// practice by WHERE the dump fires: `[ResimProbe.SlotMap]` is emitted at
+// practice by WHERE the log fires: `[ResimProbe.SlotMap]` is emitted at
 // `[Resim.Finish]`, i.e. at the end of the very resim that stamped the `X`, and
 // no second resim can run before it. Stickiness was rejected because it would
 // make the column describe HISTORY rather than the CURRENT lineage of the state
@@ -2128,28 +2128,28 @@ TEST_CASE("CorrectionCache.ResimGate.ReplayedOverCorrectionIsUnreachableButTheAl
 		const std::uint32_t seed = 96u
 			+ static_cast<std::uint32_t>(SlotStateProvenance::AuthorityAdopted)
 			- forgedIndex;
-		cache.scribbleDiagnosticStateProvenanceForFenceTest(seed);
+		cache.editDiagnostics().scribbleStateProvenanceForFenceTest(seed);
 
 		// The forged state: the column claims authority lineage, the BIT — which
 		// is what protect-all actually reads — says the slot is unprotected.
-		REQUIRE(cache.getDiagnosticStateProvenance(forgedIndex)
+		REQUIRE(cache.getDiagnostics().stateProvenance(forgedIndex)
 		        == SlotStateProvenance::AuthorityAdopted);
 
 		// ⭐ THE TWIN, in the same scribbled cache and the same replay sweep: the
 		// forgery left this slot NON-authority-grade, so the alarm must NOT fire
 		// on it. Without this, section B would only prove the write site stamps
 		// something — not that it discriminates.
-		REQUIRE_FALSE(isAuthorityGradeProvenance(cache.getDiagnosticStateProvenance(twinIndex)));
+		REQUIRE_FALSE(isAuthorityGradeProvenance(cache.getDiagnostics().stateProvenance(twinIndex)));
 		REQUIRE(replayTick(cache, 106u) == resimGate::ResimSlotWriteOutcome::Written);
-		REQUIRE(cache.getDiagnosticStateProvenance(twinIndex) == SlotStateProvenance::Replayed);
+		REQUIRE(cache.getDiagnostics().stateProvenance(twinIndex) == SlotStateProvenance::Replayed);
 
 		// And the alarm slot, replayed in the same ascending sweep: allowed
 		// through by the bit, exactly as in shipped code...
 		REQUIRE(replayTick(cache, 108u) == resimGate::ResimSlotWriteOutcome::Written);
 		// ...and the second, independent question fires the alarm.
-		REQUIRE(cache.getDiagnosticStateProvenance(forgedIndex)
+		REQUIRE(cache.getDiagnostics().stateProvenance(forgedIndex)
 		        == SlotStateProvenance::ReplayedOverCorrection);
-		REQUIRE(slotStateProvenanceChar(cache.getDiagnosticStateProvenance(forgedIndex)) == 'X');
+		REQUIRE(slotStateProvenanceChar(cache.getDiagnostics().stateProvenance(forgedIndex)) == 'X');
 	}
 }
 
@@ -2176,13 +2176,13 @@ TEST_CASE("CorrectionCache.ResimGate.ReplayedOverCorrectionIsUnreachableButTheAl
 // every replay write outcome, and the DETERMINISM CHECKSUM.
 //
 // Every trace must be byte-identical to the clean one.
-// `getDiagnosticStateProvenance` is the one thing deliberately absent from the
+// `getDiagnostics().stateProvenance` is the one thing deliberately absent from the
 // trace — that is the only column the runs differ in, so equality means nothing
 // else can see it.
 //
 // ⛔⛔ THE 6^3 SWEEP IS NOT THOROUGHNESS THEATRE — A MUTATION RUN PROVED A SINGLE
 // SEED INSUFFICIENT. The first version scribbled one seed (deriving the other
-// two points from it) and a planted leak SURVIVED IT GREEN: `getLastCorrectTick`
+// two points from it) and a planted leak SURVIVED IT GREEN: `getDiagnostics().lastCorrectTick`
 // was made to skip any corrected slot whose provenance read `Replayed`, and the
 // case did not notice. The generator writes `(seed + slot) % 6`, so one seed
 // gives each slot exactly ONE of six values, and the newest corrected slot never

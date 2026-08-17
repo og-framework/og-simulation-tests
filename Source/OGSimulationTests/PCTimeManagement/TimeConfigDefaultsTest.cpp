@@ -80,13 +80,14 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     REQUIRE(tc.redundancyDepthTicks == 3);
 
     // --- Outbound input relay (FRelayedInputRing) --------------------------
-    // Depth 1 is the DEGENERATE default this increment ships: at
-    // relayDelayFloorTicks == 0 a peer's scheduled read nearly always misses and
-    // falls back to last-known input, so a deeper ring would buy bandwidth and
-    // nothing else. The sizing rule (§8.2: depth >= measured replication gap +
-    // margin) cannot be applied until the T9 cadence probe measures the gap — so
-    // if this assertion ever fails, the change must come WITH that measurement.
-    REQUIRE(tc.relayRedundancyDepthTicks == 1);
+    // ⛔ THERE IS DELIBERATELY NO relay-ring retention-depth ASSERTION here,
+    // because there is no such field any more (og-netcode-v2-input-relay item
+    // 63 / RN-13, 2026-08-16: retired — its old identifier is on record in
+    // RN-13, ReviewNotes.md). Item 34's bare-C1 flush-on-poll write path had
+    // already made the field inert; its stage capacity is the compile-time
+    // constant `relayedInputRing::kMaxDepth`, pinned (and machine-fenced
+    // against ever becoming configurable again) by
+    // `Network/RelayRedundancyDepthTest.cpp`.
 
     // [T11] The floor lever ships OFF. 0 is the degenerate value at which
     // `max(floor, tier-or-fallback)` is the identity, i.e. at which the whole
@@ -141,7 +142,13 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     REQUIRE(tc.harnessMode == TimeConfig::HarnessMode::Production);
 
     // --- C.2 tiered input delay (Stage 5) ----------------------------------
-    REQUIRE(tc.forcedInputLatencyTicks == 2);
+    // ⛔ THERE IS DELIBERATELY NO dedicated no-tier-baseline field ASSERTION
+    // here, because there is no such field any more (og-netcode-v2-input-relay
+    // item 62 / RN-12, 2026-08-16: retired — its old identifier is on record in
+    // RN-12, ReviewNotes.md). The no-tier fallback is now
+    // `rttTierInputDelays[kMaxConnectionTierIndex]` — pinned by the array
+    // assertion below, and by name in RelayDelayFloorTest / ServerInputDelayQueueTest
+    // / ReplicatedTierConsumptionTest.
 
     REQUIRE(tc.rttTierBoundariesMs[0] == 30);
     REQUIRE(tc.rttTierBoundariesMs[1] == 80);

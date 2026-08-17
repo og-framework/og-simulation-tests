@@ -547,12 +547,14 @@ TEST_CASE("RelayRing.WireLengthBoundRejectsOversizePayloads", "[WireFormat][Rela
 // WHAT THESE CASES PIN, in order of how expensive getting it wrong would be:
 //
 //   1. THE CAPACITY RULE. The stage's capacity is `kMaxDepth`, taken as a constant
-//      inside `stageArrival`. If the flush path ever read
-//      `TimeConfig::relayRedundancyDepthTicks` (session value 1) instead, the
-//      second and every later staged entry would supersede the first, the ring
-//      would carry exactly one entry per round, and bare C1 would silently
-//      degenerate into the behaviour it replaces — no compile error, no warning,
-//      and every payload-level test still green. That is T43 finding 1, and
+//      inside `stageArrival`. If the flush path ever read a session-configurable
+//      depth instead (og-netcode-v2-input-relay item 63 / RN-13 retired the field
+//      that used to tempt this — its old identifier is on record in RN-13,
+//      ReviewNotes.md — at a session value of 1), the second and every later
+//      staged entry would supersede the first, the ring would carry exactly one
+//      entry per round, and bare C1 would silently degenerate into the behaviour
+//      it replaces — no compile error, no warning, and every payload-level test
+//      still green. That is T43 finding 1, and
 //      `RelayRing.StagedBurstSurvivesAtTheSessionDefaultDepth` is the case that
 //      makes it impossible to reintroduce quietly: it drives the burst with the
 //      session default sitting right there in the same test.
@@ -606,11 +608,12 @@ TEST_CASE("RelayRing.ResetEntriesShrinksToTheHeaderAndKeepsTheVersion", "[WireFo
 
 TEST_CASE("RelayRing.StagedBurstSurvivesAtTheSessionDefaultDepth", "[WireFormat][RelayRing]")
 {
-    // ⭐ THE CASE T43 FINDING 1 EXISTS FOR. `kSessionDepthKnob` is the value
-    // `TimeConfig::relayRedundancyDepthTicks` ships at and the value
-    // `Config/DefaultEngine.ini` carries; it is declared here, unused by the flush,
-    // precisely so that a future implementer who threads it into the flush path
-    // watches this case go red instead of shipping a silent regression.
+    // ⭐ THE CASE T43 FINDING 1 EXISTS FOR. `kSessionDepthKnob` is the value the
+    // now-retired relay-ring retention-depth field shipped at (item 63 / RN-13,
+    // 2026-08-16 — its old identifier is on record in RN-13, ReviewNotes.md); it
+    // is declared here, unused by the flush, precisely so that a future
+    // implementer who threads a configurable depth into the flush path watches
+    // this case go red instead of shipping a silent regression.
     constexpr std::int32_t kSessionDepthKnob = 1;
     REQUIRE(kSessionDepthKnob < static_cast<std::int32_t>(relayedInputRing::kMaxDepth));
 

@@ -271,8 +271,9 @@ TEST_CASE("ReceptionCoordinator drain delivers the original capture tick", "[Net
 
     const FStandaloneTestHandle wire = live(1);
 
-    // No tier sample => effectiveDelay falls back to forcedInputLatencyTicks.
-    const std::int32_t delay = cfg.forcedInputLatencyTicks;
+    // No tier sample => effectiveDelay falls back to the worst tier
+    // (rttTierInputDelays[kMaxConnectionTierIndex], item 62 / RN-12).
+    const std::int32_t delay = cfg.rttTierInputDelays[kMaxConnectionTierIndex];
     const std::int32_t captureTick = 100;
 
     REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, captureTick, 42).parked);
@@ -297,7 +298,7 @@ TEST_CASE("ReceptionCoordinator drain drops the claim when the owner reports dea
     TestCoordinator coord(cfg);
 
     const FStandaloneTestHandle wire = live(1);
-    const std::int32_t delay = cfg.forcedInputLatencyTicks;
+    const std::int32_t delay = cfg.rttTierInputDelays[kMaxConnectionTierIndex];
 
     REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 42).parked);
     REQUIRE(coord.claimCount() == 1);
@@ -551,7 +552,7 @@ TEST_CASE("ReceptionCoordinator receiveInputBundle parks valid slots without del
     // And BOTH parked inputs ARE delivered by the drain, each at captureTick +
     // delay, with the ORIGINAL capture tick — through the drain's own callback (the
     // UE side routes that callback through the SAME deliverRemoteInput sink method).
-    const std::int32_t delay = cfg.forcedInputLatencyTicks;
+    const std::int32_t delay = cfg.rttTierInputDelays[kMaxConnectionTierIndex];
     std::vector<std::uint32_t> drainTicks;
     auto drainDeliver = [&](unsigned int, std::uint32_t tick, const BundleInput&) -> bool
     {
@@ -645,13 +646,14 @@ TEST_CASE("ReceptionCoordinator logs [InputDrop] when a parked input is stranded
 
     const FStandaloneTestHandle wire = live(1);
 
-    // Park at the fallback delay: no tier entry yet => forcedInputLatencyTicks (2),
-    // so its release tick is captureTick + 2 == 102.
+    // Park at the fallback delay: no tier entry yet => the worst-tier fallback
+    // (rttTierInputDelays[kMaxConnectionTierIndex], item 62 / RN-12) == 4, so its
+    // release tick is captureTick + 4 == 104.
     REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 42).parked);
 
     // Bump the tier: a single low-RTT sample creates a tier-0 entry, so
-    // effectiveDelay drops 2 -> 1 and the parked input's release tick shifts
-    // 102 -> 101. The exact-match dequeue (T25 KEEPS this; T26 is the fix) now only
+    // effectiveDelay drops 4 -> 1 and the parked input's release tick shifts
+    // 104 -> 101. The exact-match dequeue (T25 KEEPS this; T26 is the fix) now only
     // fires at tick 101 — the classic strand.
     RecordingTierSink sink;
     coord.noteRttSample(wire, /*ownerId=*/10, /*serverTick=*/0, /*rttMs=*/10.0, sink);
@@ -675,14 +677,14 @@ TEST_CASE("ReceptionCoordinator logs [InputGap] on a hole in delivered ticks", "
     coord.setLogger([&logged](const char* m) { logged.emplace_back(m); });
 
     const FStandaloneTestHandle wire = live(1);
-    const std::int32_t delay = cfg.forcedInputLatencyTicks;   // 2, no tier entry
+    const std::int32_t delay = cfg.rttTierInputDelays[kMaxConnectionTierIndex];   // 4, no tier entry
 
     // Park tick 100 and tick 103 — ticks 101 and 102 are missing (dropped on the
     // wire before they ever reached the server).
     REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 1).parked);
     REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/103, 2).parked);
 
-    // Drain across the release ticks of both (102 and 105 at delay 2).
+    // Drain across the release ticks of both (104 and 107 at delay 4).
     RecordingDeliver deliver;
     coord.releaseDelayedInputs<MockSimA>(100 + delay, /*numSteps=*/4, std::ref(deliver));
 
@@ -703,7 +705,7 @@ TEST_CASE("ReceptionCoordinator logs no gap or drop on clean contiguous delivery
     coord.setLogger([&logged](const char* m) { logged.emplace_back(m); });
 
     const FStandaloneTestHandle wire = live(1);
-    const std::int32_t delay = cfg.forcedInputLatencyTicks;   // 2
+    const std::int32_t delay = cfg.rttTierInputDelays[kMaxConnectionTierIndex];   // 4
 
     // Three contiguous capture ticks, all parked, all releasable in order.
     for (std::int32_t t = 100; t <= 102; ++t)
@@ -712,7 +714,7 @@ TEST_CASE("ReceptionCoordinator logs no gap or drop on clean contiguous delivery
     }
 
     RecordingDeliver deliver;
-    coord.releaseDelayedInputs<MockSimA>(100 + delay, /*numSteps=*/3, std::ref(deliver));  // ticks 102,103,104
+    coord.releaseDelayedInputs<MockSimA>(100 + delay, /*numSteps=*/3, std::ref(deliver));  // ticks 104,105,106
 
     REQUIRE(deliver.calls.size() == 3);
     REQUIRE_FALSE(hasLineContaining(logged, "[InputGap]"));    // contiguous — no hole
@@ -728,15 +730,15 @@ TEST_CASE("ReceptionCoordinator logs [DelayShift] when a wire's effective delay 
 
     const FStandaloneTestHandle wire = live(1);
 
-    // First drain establishes the wire's baseline delay (forced = 2). A first
-    // observation logs no shift.
+    // First drain establishes the wire's fallback delay (the worst tier, 4). A
+    // first observation logs no shift.
     REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 1).parked);
     RecordingDeliver deliver;
-    coord.releaseDelayedInputs<MockSimA>(102, /*numSteps=*/1, std::ref(deliver));
+    coord.releaseDelayedInputs<MockSimA>(104, /*numSteps=*/1, std::ref(deliver));
     REQUIRE(deliver.calls.size() == 1);
     REQUIRE_FALSE(hasLineContaining(logged, "[DelayShift]"));
 
-    // A low-RTT sample creates a tier-0 entry => effectiveDelay 2 -> 1. Park + drain
+    // A low-RTT sample creates a tier-0 entry => effectiveDelay 4 -> 1. Park + drain
     // again; the wire's delay differs from the memo, so [DelayShift] fires.
     RecordingTierSink sink;
     coord.noteRttSample(wire, /*ownerId=*/10, /*serverTick=*/0, /*rttMs=*/10.0, sink);
@@ -762,21 +764,21 @@ TEST_CASE("ReceptionCoordinator drain releases an overdue input with its true ca
     TestCoordinator coord(cfg);
 
     const FStandaloneTestHandle wire = live(1);
-    const std::int32_t delay = cfg.forcedInputLatencyTicks;     // 2, no tier entry
+    const std::int32_t delay = cfg.rttTierInputDelays[kMaxConnectionTierIndex];     // 4, no tier entry
     const std::int32_t captureTick = 100;
     REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, captureTick, 42).parked);
 
     RecordingDeliver deliver;
 
-    // Skip the exact due tick (102). Drain several ticks late but WITHIN the
+    // Skip the exact due tick (104). Drain several ticks late but WITHIN the
     // rollback window (staleBefore = 107 - 20 = 87 <= 100). The input is delivered
     // late instead of stranded, and the delivered captureTick is the TRUE stored
-    // tick (F1) — NOT the reconstructed simTick - delay (== 105).
+    // tick (F1) — NOT the reconstructed simTick - delay (== 103).
     coord.releaseDelayedInputs<MockSimA>(/*firstUpcomingSimTick=*/107, /*numSteps=*/1, std::ref(deliver));
 
     REQUIRE(deliver.calls.size() == 1);
     REQUIRE(deliver.calls[0].captureTick == static_cast<std::uint32_t>(captureTick));  // 100 (F1)
-    REQUIRE(deliver.calls[0].captureTick != static_cast<std::uint32_t>(107 - delay));  // not 105
+    REQUIRE(deliver.calls[0].captureTick != static_cast<std::uint32_t>(107 - delay));  // not 103
     REQUIRE(deliver.calls[0].value == 42);
 }
 
@@ -787,11 +789,11 @@ TEST_CASE("ReceptionCoordinator drain still delivers after a delay decrease", "[
 
     const FStandaloneTestHandle wire = live(1);
 
-    // Park at the fallback delay (forced = 2): exact due tick would be 102.
+    // Park at the fallback delay (the worst tier, 4): exact due tick would be 104.
     REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 42).parked);
 
-    // A low-RTT sample creates a tier-0 entry => effectiveDelay drops 2 -> 1, so
-    // the exact due tick shifts 102 -> 101. Under the old exact-match a drain at
+    // A low-RTT sample creates a tier-0 entry => effectiveDelay drops 4 -> 1, so
+    // the exact due tick shifts 104 -> 101. Under the old exact-match a drain at
     // 102 would MISS the shifted tick and strand the input; due-or-overdue delivers
     // it late (101 <= 102, in window).
     RecordingTierSink sink;
@@ -1104,7 +1106,7 @@ TEST_CASE("ReceptionCoordinator leaves in-domain receipt untouched and fails ope
     REQUIRE(coord.outOfDomainRejectCount() == 0);
 
     RecordingDeliver deliver;
-    coord.releaseDelayedInputs<MockSimA>(serverTick + 3 + cfg.forcedInputLatencyTicks,
+    coord.releaseDelayedInputs<MockSimA>(serverTick + 3 + cfg.rttTierInputDelays[kMaxConnectionTierIndex],
                                          /*numSteps=*/1, std::ref(deliver));
     REQUIRE(deliver.calls.size() == 1);
     REQUIRE(deliver.calls[0].captureTick == static_cast<std::uint32_t>(serverTick + 3));
@@ -1222,7 +1224,7 @@ TEST_CASE("ReceptionCoordinator relays each newer capture tick once, stamped at 
     // no-tier fallback. Read it from the queue rather than hardcoding it — the
     // stamp must be whatever the release schedule is actually using.
     const std::int32_t expectedDA = coord.delayQueue().effectiveDelay(wire);
-    REQUIRE(expectedDA == cfg.forcedInputLatencyTicks);
+    REQUIRE(expectedDA == cfg.rttTierInputDelays[kMaxConnectionTierIndex]);
 
     const ReceiveRemoteInputResult a =
         coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 42, relay);
@@ -1282,7 +1284,7 @@ TEST_CASE("ReceptionCoordinator applies but does not relay an out-of-order-older
 
     const FStandaloneTestHandle wire = live(1);
     RecordingRelaySink relay;
-    const std::int32_t delay = cfg.forcedInputLatencyTicks;
+    const std::int32_t delay = cfg.rttTierInputDelays[kMaxConnectionTierIndex];
 
     coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 1, relay);
     coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/103, 2, relay);
