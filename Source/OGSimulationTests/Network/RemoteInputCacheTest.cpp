@@ -436,9 +436,13 @@ TEST_CASE("RemoteInputCache: a never-written ring is a SILENT no-op",
     REQUIRE(report.entriesIngested == 0u);
     REQUIRE(store.residentCount() == 0u);
 
-    // The log gate is untouched by a version-0 ring, so the FIRST genuine mismatch
-    // still gets its one line.
-    REQUIRE(store.shouldLogVersionMismatchOnce());
+    // [og-netcode-v2-input-relay task 79] The log-once gate this test used to
+    // exercise here too (`store.shouldLogVersionMismatchOnce()`) no longer
+    // lives on this store — it moved to `NetSyncTelemetry`, id-keyed, and is
+    // no longer coupled to `populateRemoteInputCache` at all (the caller only
+    // ever consults it when `report.outcome == VersionMismatch`, so "does a
+    // version-0 ring touch the gate" is no longer an answerable question on
+    // this class). See NetSyncTelemetryTest.cpp for the new gate's coverage.
 }
 
 TEST_CASE("RemoteInputCache: a version mismatch drops the WHOLE ring",
@@ -471,17 +475,14 @@ TEST_CASE("RemoteInputCache: a version mismatch drops the WHOLE ring",
     REQUIRE_FALSE(store.findLatest().valid);
 }
 
-TEST_CASE("RemoteInputCache: the mismatch log gate opens exactly once per store",
-          "[Network][RemoteInputCache]")
-{
-    // An incompatible peer re-replicates its ring forever; an ungated warning would
-    // fire on every single replication.
-    RemoteInputCache<StoreTestInput> store(gameZeroInput());
-
-    REQUIRE(store.shouldLogVersionMismatchOnce());
-    REQUIRE_FALSE(store.shouldLogVersionMismatchOnce());
-    REQUIRE_FALSE(store.shouldLogVersionMismatchOnce());
-}
+// [og-netcode-v2-input-relay task 79] "RemoteInputCache: the mismatch log gate
+// opens exactly once per store" USED TO BE HERE. The gate it exercised
+// (`shouldLogVersionMismatchOnce`) is retired from this class — see the
+// comment on its old declaration site above. Its coverage (open-once, then
+// closed) moved to NetSyncTelemetryTest.cpp against
+// `NetSyncTelemetry::shouldLogVersionMismatchOnce`, plus one assertion proving
+// the id-keyed gate did not exist as a question before: a second id opens its
+// OWN gate independently of the first.
 
 // ---------------------------------------------------------------------------
 // 6. RESYNC SURVIVAL, at the container level.
