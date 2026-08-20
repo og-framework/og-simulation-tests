@@ -65,11 +65,14 @@ namespace
 		void integrateAll(const SimulationTimeStep&, int) {}
 		void firstResimStepAll(int32_t) {}
 	};
+	// [item 87] `collectInputAll` (RENAMED `prepareSimulationStep` at item 90)
+	// / `collectResimInputAll` / `wipeAllForResync` LEFT MockNetSync for
+	// MockInputResolution below — they moved off the real `SimulationNetSync`
+	// onto the resolution peer at item 87, and
+	// the manager now reads them off `InputResolutionT`, not `NetSyncT`. What
+	// remains here is NetSync's own shrunk tick surface.
 	struct MockNetSync
 	{
-		void wipeAllForResync(unsigned int) {}
-		int  collectInputAll(const SimulationTimeStep&) { return 0; }
-		int  collectResimInputAll(unsigned int) { return 0; }
 		// [item 71] Not called by anything this file's cases reach at runtime —
 		// `onGameSimulationAuthority()` is the `!m_runsPrediction` branch of
 		// `onGameSimulation`, never taken once `shouldRunPrediction=true`. But a
@@ -77,6 +80,23 @@ namespace
 		// compile once the enclosing template member function is instantiated at
 		// all, so this is needed to build even though it is never invoked.
 		void setAuthorityGuardContext(unsigned int, int32_t) {}
+	};
+
+	// [item 87] The resolution peer's mock — `prepareSimulationStep`
+	// (RENAMED from `collectInputAll` at item 90) /
+	// `collectResimInputAll` / `wipeAllForResync`, matching
+	// `SimulationInputResolutionTickConcept`. All three are reachable the
+	// same way MockNetSync's methods used to be: `onGameSimulation()`
+	// dispatches to the prediction/resim branches too, so their bodies must
+	// compile even though only the authority branch runs in this file
+	// (`shouldRunPrediction=false` everywhere but the one case below that
+	// flips it); `wipeAllForResync` is reachable from the ctor's own
+	// resync-callback lambda, compiled regardless of the runtime branch.
+	struct MockInputResolution
+	{
+		void wipeAllForResync(unsigned int) {}
+		int  prepareSimulationStep(const SimulationTimeStep&) { return 0; }
+		int  collectResimInputAll(unsigned int) { return 0; }
 	};
 
 	struct MockReconciliation
@@ -156,13 +176,14 @@ namespace
 	struct MockStaticData {};
 
 	using TestManager = SimulationManager<
-		MockIntegrationExec, MockNetSync, MockReconciliation, MockSystemsExec,
+		MockIntegrationExec, MockNetSync, MockInputResolution, MockReconciliation, MockSystemsExec,
 		MockStorage, MockStaticData>;
 
 	struct ManagerRig
 	{
 		MockIntegrationExec integration{};
 		MockNetSync         netSync{};
+		MockInputResolution inputResolution{};
 		MockReconciliation  reconciliation{};
 		MockSystemsExec     systemsExec{};
 		MockStorage         storage{};
@@ -186,7 +207,7 @@ namespace
 			: manager{
 				shouldRunPrediction,
 				/*tickFrequency (fixed dt, seconds)=*/1.0 / 60.0,
-				TestManager::Params{ integration, netSync, reconciliation, systemsExec,
+				TestManager::Params{ integration, netSync, inputResolution, reconciliation, systemsExec,
 				                     storage, staticData, nullptr } }
 		{}
 
@@ -472,7 +493,7 @@ TEST_CASE("ResimGate.Policy.TheReplayWriteRuleIsOneBitWideAndTheRestIsLabelling"
 //
 // ⚠ WHY THIS DOES NOT NEED SimulatableOwnerTraits, UNLIKE ITS FOUR SIBLINGS.
 // `SimulationNetSync`'s four probe accessors (task 59, same backlog item) are
-// fed from deep inside `collectInputAll` / `collectResimInputAll` /
+// fed from deep inside `prepareSimulationStep` / `collectResimInputAll` /
 // `registerPredictionOwner`, which are variadic over a simulatable pack — a
 // mock cannot drive them, so THEIR proof lives in og-brawler-tests against
 // concrete owners. `m_resimGateProbe`'s feeders — `onCheckIsSimilar`,

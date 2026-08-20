@@ -112,7 +112,7 @@ TEST_CASE("RemoteMoveQueue.AcceptCaptureTickAtBoundary", "[PCTM][RemoteMoveQueue
 // ---------------------------------------------------------------------------
 // [og-netcode-v2-input-relay T2] THE UNDERRUN-AMBIGUITY PROOF.
 //
-// SimulationNetSync::collectInputAll's remote branch must record the capture tick
+// SimulationInputResolution::prepareSimulationStep's remote branch must record the capture tick
 // of the input the authority applied, and an explicit "no real input" sentinel
 // when the queue underran and the applied input was a SUBSTITUTE. The obvious
 // implementation — dequeue, then check the returned tick — is WRONG, and these
@@ -122,7 +122,7 @@ TEST_CASE("RemoteMoveQueue.AcceptCaptureTickAtBoundary", "[PCTM][RemoteMoveQueue
 // "pass" on a real tick-0 input and could not see the defect it exists to catch.
 //
 // The only signal that separates the two is `empty()`, sampled BEFORE the dequeue —
-// hence the pre-dequeue gate in collectInputAll. These cases pin the container
+// hence the pre-dequeue gate in prepareSimulationStep. These cases pin the container
 // property that gate depends on, so a future change to dequeueMove's empty-queue
 // return (e.g. to std::optional) fails here, next to the reasoning, rather than
 // silently in the relay's join key.

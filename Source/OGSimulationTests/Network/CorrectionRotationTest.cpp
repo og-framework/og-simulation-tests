@@ -77,21 +77,27 @@ namespace
     // only where used, so an authority manager needs only what the ctor touches —
     // mirrors the rig in RelayRedundancyDepthTest.cpp, deliberately, so the two
     // sibling knobs' setter cases read the same.
+    //
+    // [item 87] `wipeAllForResync` LEFT MockNetSync for MockInputResolution —
+    // it moved off the real `SimulationNetSync` onto the resolution peer at
+    // the same item, and the manager's ctor now calls it there instead.
     struct MockIntegrationExec {};
-    struct MockNetSync       { void wipeAllForResync(unsigned int) {} };
+    struct MockNetSync {};
+    struct MockInputResolution { void wipeAllForResync(unsigned int) {} };
     struct MockReconciliation{ void wipeAllForResync(unsigned int) {} };
     struct MockSystemsExec {};
     struct MockStorage {};
     struct MockStaticData {};
 
     using TestManager = SimulationManager<
-        MockIntegrationExec, MockNetSync, MockReconciliation, MockSystemsExec,
+        MockIntegrationExec, MockNetSync, MockInputResolution, MockReconciliation, MockSystemsExec,
         MockStorage, MockStaticData>;
 
     struct ManagerRig
     {
         MockIntegrationExec integration{};
         MockNetSync         netSync{};
+        MockInputResolution inputResolution{};
         MockReconciliation  reconciliation{};
         MockSystemsExec     systemsExec{};
         MockStorage         storage{};
@@ -100,7 +106,7 @@ namespace
         TestManager manager{
             /*shouldRunPrediction=*/false,
             /*tickFrequency (fixed dt, seconds)=*/1.0 / 60.0,
-            TestManager::Params{ integration, netSync, reconciliation, systemsExec,
+            TestManager::Params{ integration, netSync, inputResolution, reconciliation, systemsExec,
                                  storage, staticData, nullptr } };
     };
 }

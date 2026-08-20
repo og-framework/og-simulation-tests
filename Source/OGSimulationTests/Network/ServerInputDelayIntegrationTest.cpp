@@ -25,12 +25,12 @@
 //
 //     RPC arrival  -> ServerInputDelayQueue::enqueue          (game thread)
 //     pre-step     -> tryDequeueForTick -> RemoteMoveQueue    (game thread)
-//     authority    -> collectInputAll pops RemoteMoveQueue    (physics thread)
+//     authority    -> prepareSimulationStep pops RemoteMoveQueue    (physics thread)
 //
 // WHAT THIS PINS THAT THE UNIT SUITE DOES NOT. The delay must be applied EXACTLY
 // ONCE across that whole chain. The queue alone cannot prove that, because the
 // second half of the chain is where a second offset would be introduced — and
-// the production consumer (SimulationNetSync::collectInputAll, authority branch)
+// the production consumer (SimulationInputResolution::prepareSimulationStep, authority branch)
 // pops RemoteMoveQueue in ARRIVAL ORDER without ever comparing the stored
 // captureTick to the tick being simulated. `ServerHarness` below reproduces that
 // exact contract, so a change that made the server start matching on captureTick
@@ -80,7 +80,7 @@ namespace
     // The server, reduced to the two hops that matter and nothing else.
     //
     // Mirrors ASimulationManagerUImpl::releaseDelayedInputsForStep +
-    // SimulationNetSync::collectInputAll. Under the T26 due-or-overdue release the
+    // SimulationInputResolution::prepareSimulationStep. Under the T26 due-or-overdue release the
     // delivered captureTick is the entry's STORED tick, surfaced by
     // tryDequeueForTick's out-param (F1) — NOT reconstructed as `simTick - delay`,
     // which would name a future input's tick on an overdue release. This harness

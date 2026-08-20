@@ -114,7 +114,7 @@ namespace
 	constexpr std::int32_t kAuthorityValue   = 4242;
 	constexpr std::int32_t kResimulatedValue = 7777;
 
-	// One predicted tick, exactly as collectInputAll + postPredictionAll produce
+	// One predicted tick, exactly as prepareSimulationStep + postPredictionAll produce
 	// it on the client.
 	void predictTick(GateCache& cache, std::uint32_t tick, std::int32_t value)
 	{
