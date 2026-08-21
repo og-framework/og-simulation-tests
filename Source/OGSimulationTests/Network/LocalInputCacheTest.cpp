@@ -15,7 +15,7 @@
 // og-netcode-v2-arch-latency; D5.2 client half).
 //
 // This covers the CONTAINER and the offset rule in isolation. The end-to-end
-// wiring — the real SimulationInputResolution::prepareSimulationStep provider branch, with the
+// wiring — the real SimulationInputResolution::collectInputAll provider branch, with the
 // real SimulatableBrawler — is covered in og-brawler-tests
 // (SimulationNetSyncTest.cpp, [SimulationNetSync][ClientInputDelay]), because
 // that is the suite that links a concrete simulatable. The split is the same one
@@ -205,7 +205,7 @@ TEST_CASE("LocalInputCache: last capture wins for a repeated tick",
 }
 
 // ---------------------------------------------------------------------------
-// resolveDelayedInput — THE offset rule. Production (prepareSimulationStep) and the
+// resolveDelayedInput — THE offset rule. Production (collectInputAll) and the
 // og-brawler-tests integration cases both call this same function, so these
 // assertions constrain the shipped expression rather than a paraphrase of it.
 // ---------------------------------------------------------------------------

@@ -65,10 +65,10 @@ namespace
 		void integrateAll(const SimulationTimeStep&, int) {}
 		void firstResimStepAll(int32_t) {}
 	};
-	// [item 87] `collectInputAll` (RENAMED `prepareSimulationStep` at item 90)
-	// / `collectResimInputAll` / `wipeAllForResync` LEFT MockNetSync for
-	// MockInputResolution below — they moved off the real `SimulationNetSync`
-	// onto the resolution peer at item 87, and
+	// [item 87] `collectInputAll` (RENAMED `prepareSimulationStep` at item 90,
+	// RENAMED BACK at item 94) / `collectResimInputAll` / `wipeAllForResync`
+	// LEFT MockNetSync for MockInputResolution below — they moved off the
+	// real `SimulationNetSync` onto the resolution peer at item 87, and
 	// the manager now reads them off `InputResolutionT`, not `NetSyncT`. What
 	// remains here is NetSync's own shrunk tick surface.
 	struct MockNetSync
@@ -82,8 +82,9 @@ namespace
 		void setAuthorityGuardContext(unsigned int, int32_t) {}
 	};
 
-	// [item 87] The resolution peer's mock — `prepareSimulationStep`
-	// (RENAMED from `collectInputAll` at item 90) /
+	// [item 87] The resolution peer's mock — `collectInputAll`
+	// (RENAMED `prepareSimulationStep` at item 90, RENAMED BACK at item 94
+	// once frontier allocation left the method entirely) /
 	// `collectResimInputAll` / `wipeAllForResync`, matching
 	// `SimulationInputResolutionTickConcept`. All three are reachable the
 	// same way MockNetSync's methods used to be: `onGameSimulation()`
@@ -95,7 +96,7 @@ namespace
 	struct MockInputResolution
 	{
 		void wipeAllForResync(unsigned int) {}
-		int  prepareSimulationStep(const SimulationTimeStep&) { return 0; }
+		int  collectInputAll(const SimulationTimeStep&) { return 0; }
 		int  collectResimInputAll(unsigned int) { return 0; }
 	};
 
@@ -145,6 +146,11 @@ namespace
 		// prepare/apply/post-sweep trio and the diagnostics view its
 		// `logSlotProvenanceAll()` call reads — all no-ops here since none of
 		// them feed anything this file asserts on.
+		// [item 94] `allocateFrontierSlotsAll` is a NEW concept member —
+		// `onGameSimulationPrediction`'s body calls it unconditionally now
+		// (before firePreIntegrate), so it must exist here too, no-op like its
+		// siblings.
+		void allocateFrontierSlotsAll(const SimulationTimeStep&) {}
 		void prepareResimAll(std::uint32_t) {}
 		void applyResimAll() {}
 		void postPredictionAll(const SimulationTimeStep&) {}
@@ -493,7 +499,7 @@ TEST_CASE("ResimGate.Policy.TheReplayWriteRuleIsOneBitWideAndTheRestIsLabelling"
 //
 // ⚠ WHY THIS DOES NOT NEED SimulatableOwnerTraits, UNLIKE ITS FOUR SIBLINGS.
 // `SimulationNetSync`'s four probe accessors (task 59, same backlog item) are
-// fed from deep inside `prepareSimulationStep` / `collectResimInputAll` /
+// fed from deep inside `collectInputAll` / `collectResimInputAll` /
 // `registerPredictionOwner`, which are variadic over a simulatable pack — a
 // mock cannot drive them, so THEIR proof lives in og-brawler-tests against
 // concrete owners. `m_resimGateProbe`'s feeders — `onCheckIsSimilar`,

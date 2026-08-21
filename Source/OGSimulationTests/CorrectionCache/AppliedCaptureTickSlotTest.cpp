@@ -41,11 +41,13 @@ namespace
 
 	using RefCache = StateCorrectionCache<RefState, RefInput>;
 
-	// One predicted tick, exactly as prepareSimulationStep + postPredictionAll produce it.
+	// One predicted tick, exactly as `SimulationReconciliation::
+	// allocateFrontierSlotsAll` (item 94, was resolution's sweep 2 through
+	// item 93) + postPredictionAll produce it.
 	//
 	// [og-netcode-v2-input-relay T16] The `pushPredictionInput(RefInput{ value })`
 	// between these two lines is gone with the cache's input column — as is the
-	// call in prepareSimulationStep this helper mirrors. Nothing below asserted on it:
+	// call in the frontier-allocating sweep this helper mirrors. Nothing below asserted on it:
 	// every assertion in this file reads the applied-capture-tick REF, which is
 	// what the column's retirement leaves the slot carrying. Assertion count
 	// unchanged.

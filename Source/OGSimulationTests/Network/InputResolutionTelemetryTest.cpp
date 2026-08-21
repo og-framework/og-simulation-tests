@@ -27,7 +27,7 @@
 // only a live object could show). Their behaviour-preservation evidence is,
 // and always was, the og-brawler-tests wiring block (task 59's standard —
 // `SimulationNetSyncTest.cpp`'s `relayReadProbe()` cases, which drive the
-// REAL `prepareSimulationStep` against the shipped branches) plus
+// REAL `collectInputAll` against the shipped branches) plus
 // `RelayReadProbeTest.cpp`'s own unit coverage of the probe's arithmetic,
 // including its `forgetOwner` erasure — neither of which this split touches.
 // So the count this item conserves is 1 case / 4 assertions total, held

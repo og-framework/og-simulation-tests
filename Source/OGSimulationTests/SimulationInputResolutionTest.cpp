@@ -31,15 +31,19 @@
 // a scratch mock simulatable only. og-simulation core must verify standalone;
 // this file references no brawler / UE / owner types at all.
 //
-// FRONTIER-PAIR DISCIPLINE (item 84's detector). Every call this file makes
-// to `resolution.prepareSimulationStep` (named `collectInputAll` before item
-// 90's rename) on a step that allocates a frontier slot is followed by
-// `reconciliation.postPredictionAll` for the SAME step, mirroring
-// what `SimulationManager` always does within one manager tick — exactly the
-// pairing item 84's fixture repair (SimulationNetSyncTest.cpp, og-brawler-
-// tests) had to add for the same reason. Skipping this would abort the
-// process on the NEXT allocation (`OG_CHECK` in CorrectionCache.h), not
-// silently misbehave.
+// FRONTIER-PAIR DISCIPLINE (item 84's detector). [item 94] `resolution.
+// collectInputAll` (named `prepareSimulationStep` between item 90 and item
+// 94) NO LONGER ALLOCATES — frontier allocation moved to
+// `reconciliation.allocateFrontierSlotsAll`. Every call this file makes to
+// `collectInputAll` on a step that should allocate a frontier slot is
+// followed by `reconciliation.allocateFrontierSlotsAll` for the SAME step,
+// which is in turn followed by `reconciliation.postPredictionAll` — mirroring
+// what `SimulationManager::onGameSimulationPrediction` always does within one
+// manager tick (collect -> allocate -> ... -> capture), exactly the pairing
+// item 84's fixture repair (SimulationNetSyncTest.cpp, og-brawler-tests) had
+// to add for the same reason. Skipping the allocate call before capture would
+// abort the process on the NEXT allocation (`OG_CHECK` in CorrectionCache.h),
+// not silently misbehave.
 //////////////////////////////////////////////////////////////////////////////
 
 namespace
@@ -136,7 +140,7 @@ namespace
         MockResolution     resolution{ storage, reconciliation };
     };
 
-    // A no-op input provider — prepareSimulationStep's local-provider branch
+    // A no-op input provider — collectInputAll's local-provider branch
     // only needs SOME callable of the right shape; most cases here care about
     // the registration/resolution plumbing, not the provider's own arithmetic.
     MockInput constantProvider(std::int32_t value, const SimulationTimeStep&,
@@ -214,14 +218,14 @@ namespace
 // ---------------------------------------------------------------------------
 // Registration lifecycle + local-prediction collect (provider branch).
 // ---------------------------------------------------------------------------
-TEST_CASE("SimulationInputResolution.LocalCharacterPrepareSimulationStepRunsTheProviderAndPushesTheFrontierPair",
+TEST_CASE("SimulationInputResolution.LocalCharacterCollectInputAllRunsTheProviderThenReconciliationAllocatesTheFrontierPair",
     "[InputResolution]")
 {
     ResolutionRig rig;
-    // prepareSimulationStep/collectResimInputAll/postPredictionAll all iterate
-    // m_storage.forEachSimulatable — the id must be present in STORAGE, not
-    // just registered on the resolution/reconciliation peers, or none of the
-    // per-character bodies this file exercises ever run for it.
+    // collectInputAll/collectResimInputAll/allocateFrontierSlotsAll/postPredictionAll
+    // all iterate m_storage.forEachSimulatable — the id must be present in
+    // STORAGE, not just registered on the resolution/reconciliation peers, or
+    // none of the per-character bodies this file exercises ever run for it.
     rig.storage.add<MockSimulatable>(kLocalId, MockSimulatable{});
     rig.reconciliation.createCacheFor<MockSimulatable>(kLocalId);
     rig.resolution.registerLocalCharacter<MockSimulatable>(kLocalId,
@@ -232,7 +236,12 @@ TEST_CASE("SimulationInputResolution.LocalCharacterPrepareSimulationStepRunsTheP
     REQUIRE(rig.resolution.isLocallyControlled<MockSimulatable>(kLocalId));
 
     const auto step = normalStep(10u);
-    const MockResolvedInputs inputs = rig.resolution.prepareSimulationStep(step);
+    const MockResolvedInputs inputs = rig.resolution.collectInputAll(step);
+    // [item 94] collectInputAll no longer opens the frontier pair itself —
+    // allocation is a separate call on reconciliation now, mirroring
+    // SimulationManager::onGameSimulationPrediction's collect -> allocate
+    // sequence.
+    rig.reconciliation.allocateFrontierSlotsAll(step);
     // Complete the frontier pair — see the file banner.
     rig.reconciliation.postPredictionAll(step);
 
@@ -251,7 +260,7 @@ TEST_CASE("SimulationInputResolution.LocalCharacterPrepareSimulationStepRunsTheP
 // Remote (proxy) prediction collect — resolves via the scheduled-read ladder
 // against a pre-populated relay store.
 // ---------------------------------------------------------------------------
-TEST_CASE("SimulationInputResolution.RemoteCharacterPrepareSimulationStepResolvesFromTheRelayStore",
+TEST_CASE("SimulationInputResolution.RemoteCharacterCollectInputAllResolvesFromTheRelayStore",
     "[InputResolution]")
 {
     ResolutionRig rig;
@@ -267,7 +276,8 @@ TEST_CASE("SimulationInputResolution.RemoteCharacterPrepareSimulationStepResolve
     REQUIRE(store->push(5u, /*dA=*/0u, MockInput{ 42 }));
 
     const auto step = normalStep(5u);
-    const MockResolvedInputs inputs = rig.resolution.prepareSimulationStep(step);
+    const MockResolvedInputs inputs = rig.resolution.collectInputAll(step);
+    rig.reconciliation.allocateFrontierSlotsAll(step);
     rig.reconciliation.postPredictionAll(step);
 
     REQUIRE(hasInputFor(inputs, kRemoteId));
@@ -278,7 +288,7 @@ TEST_CASE("SimulationInputResolution.RemoteCharacterPrepareSimulationStepResolve
 // Authority remote-move queue: queueRemoteMove door, non-underrun consumption,
 // and the join-key accessor.
 // ---------------------------------------------------------------------------
-TEST_CASE("SimulationInputResolution.QueueRemoteMoveThenPrepareSimulationStepConsumesItAndRecordsTheJoinKey",
+TEST_CASE("SimulationInputResolution.QueueRemoteMoveThenCollectInputAllConsumesItAndRecordsTheJoinKey",
     "[InputResolution]")
 {
     ResolutionRig rig;
@@ -294,10 +304,12 @@ TEST_CASE("SimulationInputResolution.QueueRemoteMoveThenPrepareSimulationStepCon
 
     // The authority path never allocates a correction cache (design §A.2) —
     // NO createCacheFor call here, matching production's server-overload
-    // registerSimulatable exactly. prepareSimulationStep's remote-move branch
-    // does not touch reconciliation at all, so no pair to complete.
+    // registerSimulatable exactly. collectInputAll's remote-move branch
+    // does not touch reconciliation at all, and [item 94]
+    // `onGameSimulationAuthority` never calls `allocateFrontierSlotsAll`
+    // either — no pair to complete.
     const auto step = normalStep(9u);
-    const MockResolvedInputs inputs = rig.resolution.prepareSimulationStep(step);
+    const MockResolvedInputs inputs = rig.resolution.collectInputAll(step);
 
     REQUIRE(hasInputFor(inputs, kAuthId));
     REQUIRE(inputFor(inputs, kAuthId).value == 11);
@@ -313,7 +325,7 @@ TEST_CASE("SimulationInputResolution.AuthorityQueueUnderrunSubstitutesTheInjecte
     rig.resolution.setNeutralInput<MockSimulatable>(MockInput{ -1 });
 
     const auto step = normalStep(1u);
-    const MockResolvedInputs inputs = rig.resolution.prepareSimulationStep(step);
+    const MockResolvedInputs inputs = rig.resolution.collectInputAll(step);
 
     REQUIRE(hasInputFor(inputs, kAuthId));
     REQUIRE(inputFor(inputs, kAuthId).value == -1);
@@ -322,21 +334,38 @@ TEST_CASE("SimulationInputResolution.AuthorityQueueUnderrunSubstitutesTheInjecte
 }
 
 // ---------------------------------------------------------------------------
-// [og-netcode-v2-input-relay item 92] THE REGISTRATION-ORDERING WINDOW.
+// [og-netcode-v2-input-relay item 92, RE-DISPOSITIONED AT ITEM 94] THE
+// REGISTRATION-ORDERING WINDOW.
 // ---------------------------------------------------------------------------
 // SimulationNetSync.h's server `registerSimulatable` overload allocates NO
 // correction cache for an authority id, ever (see `AuthorityQueueUnderrunSub
 // stitutesTheInjectedNeutral` above — no `createCacheFor` call there either,
-// matching production exactly). Pre-fix, that overload called `storage.add`
-// BEFORE `registerAuthorityOwner` (-> `registerAuthorityCharacter`, the ONLY
-// call that populates `queueMap`) — a window during which a concurrent
-// physics tick's sweep 2 (`allocateFrontierSlotsAll`) would see the id in
+// matching production exactly). Pre-item-92-fix, that overload called
+// `storage.add` BEFORE `registerAuthorityOwner` (-> `registerAuthorityCharacter`,
+// the ONLY call that populates `queueMap`) — a window during which a
+// concurrent physics tick's frontier-allocation sweep would see the id in
 // storage, miss it in `queueMap`, and fall through to `pushPredictionTick`
 // for an id that will NEVER have a cache. `SimulationReconciliation::
 // getCacheFor`'s bare `.at(id)` then threw — the exact crash captured in
-// `runs/t91_hardresync_pie/client3_probe.log:86..95`
-// (`SimulationReconciliation.h:783` <- `SimulationInputResolution.h:1673`
-// <- `SimulationManager.h:1006`).
+// `runs/t91_hardresync_pie/client3_probe.log:86..95`.
+//
+// [item 94] ⚠ THE FAILURE MODE THIS WINDOW PRODUCES HAS CHANGED, THE WINDOW
+// HAS NOT. Frontier allocation moved to `SimulationReconciliation::
+// allocateFrontierSlotsAll`, which no longer reads `queueMap` at all — it
+// filters on `findInputCache<T>(id) != nullptr` directly, and item 92's loud
+// `OG_CHECK` guard is DELETED along with the resolution-side sweep that used
+// to carry it (traded away, priced at `allocateFrontierSlotsAll`'s own
+// banner). So this same window (an authority id exposed to storage before it
+// has a cache — no cache ever, on this role) is now a SILENT SKIP, not a
+// crash: `findInputCache` answers nullptr and the sweep moves on. The
+// registration-ordering invariant (`registerAuthorityOwner` before
+// `storage.add`) is STILL worth keeping — it protects sweep 1's own
+// `queueMap`-based branch dispatch in `collectInputForCharacter`, a
+// DIFFERENT correctness property than the crash this window used to
+// threaten — but this specific case's file-banner framing ("the precondition
+// the guard tests") no longer applies: there is no guard left to test the
+// precondition of. What survives is the PRECONDITION ITSELF, now read as
+// "the exact state the new nullable filter must correctly skip".
 //
 // This file has no `SimulationNetSync` (see the `ResolutionRig` comment
 // above), so it cannot drive the free-function facade's ordering directly —
@@ -344,23 +373,16 @@ TEST_CASE("SimulationInputResolution.AuthorityQueueUnderrunSubstitutesTheInjecte
 // `storage.add` and `resolution.registerAuthorityCharacter` in each order in
 // turn.
 //
-// ⛔ NO DEATH TEST (same ruling as item 84's FrontierPairContractTest.cpp —
-// see its file banner): `allocateFrontierSlotForCharacter`'s loud-failure
-// guard (`OG_CHECK`, added by item 92) cannot be trapped by the LLT harness;
-// firing it aborts the whole test process. The first case below pins the
-// PRECONDITION the guard tests — via the same diagnostics-read seam
-// (`findInputCache`) production code uses — rather than calling the guarded
-// sweep and catching what it does.
-//
-// RED/GREEN (quoted in impl/impl_notes_task92.md): with the loud-failure
-// guard temporarily reverted AND a scratch case added that actually calls
+// RED/GREEN (quoted in impl/impl_notes_task92.md, for the item-92 guard this
+// window originally motivated): with the loud-failure guard temporarily
+// reverted AND a scratch case added that actually called
 // `rig.resolution.prepareSimulationStep(step)` on this exact window state,
-// the case goes RED — Catch2 reports an uncaught `std::out_of_range` escaping
-// the test, the same exception class the production crash's SEH translation
-// (`0xe06d7363`) wraps. Restoring the guard and removing the scratch case
-// (this file's actual, permanent content) is the GREEN side: the window
-// state is pinned as unreachable-without-a-throw through the seam below
-// instead, and the second case proves the FIXED ordering never produces it.
+// the case went RED — Catch2 reported an uncaught `std::out_of_range`
+// escaping the test, the same exception class the production crash's SEH
+// translation (`0xe06d7363`) wraps. [item 94] That RED/GREEN pinned the
+// GUARD, which is now gone; the case below instead pins the FILTER'S
+// precondition directly, and is verified against today's code by the second
+// case's clean pass through the real `allocateFrontierSlotsAll` call.
 // ---------------------------------------------------------------------------
 TEST_CASE("SimulationInputResolution.RegistrationWindowLeavesAnAuthorityIdWithNoQueueEntryAndNoCache",
     "[InputResolution]")
@@ -375,18 +397,24 @@ TEST_CASE("SimulationInputResolution.RegistrationWindowLeavesAnAuthorityIdWithNo
     // get a cache, fixed or not).
     rig.storage.add<MockSimulatable>(kWindowId, MockSimulatable{});
 
-    // The precondition allocateFrontierSlotForCharacter's OG_CHECK tests:
-    // no correction cache exists for this id. (queueMap also misses it, by
-    // construction — registerAuthorityCharacter, the only thing that inserts
-    // into queueMap, was never called.) Together these are exactly the state
-    // that made pushPredictionTick's getCacheFor(id).at(id) throw.
+    // [item 94] THE PRECONDITION `allocateFrontierSlotsAll`'s nullable filter
+    // now exploits directly: no correction cache exists for this id.
+    // (queueMap also misses it, by construction — registerAuthorityCharacter,
+    // the only thing that inserts into queueMap, was never called — but the
+    // new sweep no longer reads queueMap at all, so only the cache absence is
+    // load-bearing here.) This is exactly the state that made pre-94's
+    // pushPredictionTick's getCacheFor(id).at(id) throw, and is now the state
+    // the filter silently skips.
     REQUIRE(rig.reconciliation.findInputCache<MockSimulatable>(kWindowId) == nullptr);
 }
 
 // The other side of the same window: the FIXED ordering (registerAuthority
 // Character before storage.add — SimulationNetSync.h's server overload now
-// does this) never produces the state above, and prepareSimulationStep runs
-// clean through both sweeps for a freshly-registered authority id.
+// does this) never produces the state above, and both collectInputAll and
+// the separate allocateFrontierSlotsAll call run clean for a
+// freshly-registered authority id — the AC's "(a) a storage-exposed id with
+// no cache is swept by BOTH sweeps without crash, without allocation, without
+// a detector fire" case.
 TEST_CASE("SimulationInputResolution.AuthorityCharacterRegisteredBeforeStorageExposureAllocatesNoFrontierSlotSafely",
     "[InputResolution]")
 {
@@ -401,38 +429,58 @@ TEST_CASE("SimulationInputResolution.AuthorityCharacterRegisteredBeforeStorageEx
     rig.resolution.setNeutralInput<MockSimulatable>(MockInput{ -1 });
 
     const auto step = normalStep(50u);
-    // Runs sweep 1 AND sweep 2 (prepareSimulationStep calls
-    // allocateFrontierSlotsAll internally) — if the ordering fix or the
-    // guard regressed, this line would throw or abort instead of returning.
-    // No postPredictionAll call: mirrors production exactly — it is a
-    // prediction-role-only call (onGameSimulationAuthority never makes it,
-    // see SimulationManager.h), and this id has no cache to complete a pair
-    // in anyway (server overload's permanent design, unchanged by this fix).
-    const MockResolvedInputs inputs = rig.resolution.prepareSimulationStep(step);
+    const MockResolvedInputs inputs = rig.resolution.collectInputAll(step);
+    // [item 94] BOTH sweeps now, explicitly: collect (above) and the
+    // separate reconciliation call (below) — if the ordering fix or
+    // `allocateFrontierSlotsAll`'s nullable filter regressed, this line would
+    // throw instead of silently skipping. No postPredictionAll call: mirrors
+    // production exactly — it is a prediction-role-only call
+    // (onGameSimulationAuthority never makes either call, see
+    // SimulationManager.h), and this id has no cache to complete a pair in
+    // anyway (server overload's permanent design, unchanged by this fix).
+    rig.reconciliation.allocateFrontierSlotsAll(step);
 
     REQUIRE(hasInputFor(inputs, kOrderedId));
     REQUIRE(inputFor(inputs, kOrderedId).value == -1); // underrun -> injected neutral
-    // Sweep 2's queueMap early-return still holds: no frontier slot opened.
+    // [item 94] The nullable-filter skip still holds: no frontier slot opened.
     const AppliedCaptureRef ref =
         rig.reconciliation.getAppliedCaptureTickRef<MockSimulatable>(kOrderedId, 50u);
     REQUIRE(ref.kind == AppliedCaptureRefKind::NoSlot);
+    // "Without a detector fire" (AC (a)'s third clause) is true by
+    // construction, not merely by observation: `m_frontierSlotAwaitingState`
+    // is a per-CACHE bit (CorrectionCache.h), and this id has no cache at all
+    // (see above) — there is no bit here that could have fired, and no
+    // accessor to probe one through. The absence of a cache is itself the
+    // proof; `allocateFrontierSlotsAll` returning without throwing (the line
+    // above) is what confirms the filter reached that conclusion safely.
+    REQUIRE(rig.reconciliation.findInputCache<MockSimulatable>(kOrderedId) == nullptr);
 }
 
 // ---------------------------------------------------------------------------
-// [og-netcode-v2-input-relay item 93] THE UNREGISTRATION-ORDERING WINDOW —
-// item 92's MIRROR.
+// [og-netcode-v2-input-relay item 93, RE-DISPOSITIONED AT ITEM 94] THE
+// UNREGISTRATION-ORDERING WINDOW — item 92's MIRROR.
 // ---------------------------------------------------------------------------
 // SimulationNetSync.h's free-function `unregisterSimulatable` facade used to
 // call `netSync.unregisterSimulatable` (-> `SimulationInputResolution::
 // unregisterCharacter`, which erases `queueMap`) BEFORE `storage.remove` — a
-// window in which a concurrent physics tick's sweep 2 would see the id STILL
-// in storage (still visible to forEachSimulatable) but no longer in
-// `queueMap`, fall through the guard, and call `pushPredictionTick` for an id
-// that (server overload's permanent design) has NEVER had a correction
-// cache. This is the exact same precondition item 92 fixed on the
+// window in which a concurrent physics tick's frontier-allocation sweep would
+// see the id STILL in storage (still visible to forEachSimulatable) but no
+// longer in `queueMap`, fall through the guard, and call `pushPredictionTick`
+// for an id that (server overload's permanent design) has NEVER had a
+// correction cache. This is the exact same precondition item 92 fixed on the
 // REGISTRATION side, reached from the opposite direction: publish-last on
 // the way in (item 92) means unpublish-first on the way out (item 93) —
 // storage.remove must run BEFORE the queueMap/telemetry teardown, not after.
+// ⚠ [item 94, Part F] THAT REORDER IS **STILL LANDED AND MUST NOT BE
+// "SIMPLIFIED" BACK.** This task's own existence (a nullable, storage-driven
+// allocation filter that no longer falls through to a throwing `.at(id)` at
+// all) removes the reorder's ORIGINAL stated motivation — but that makes item
+// 93's reorder BELT-AND-BRACES, not unnecessary: it still protects sweep 1's
+// `queueMap`-based branch dispatch in `collectInputForCharacter` (a
+// storage-exposed-but-not-yet-queueMap'd id would misclassify as a simulated
+// proxy rather than an authority id, a real if lower-severity defect this
+// task does not touch), and removing it would have zero upside and one real
+// downside.
 //
 // This file has no `SimulationNetSync` (see the `ResolutionRig` comment
 // above), so — same as item 92's pair above — it drives the SAME window at
@@ -440,20 +488,24 @@ TEST_CASE("SimulationInputResolution.AuthorityCharacterRegisteredBeforeStorageEx
 // `storage.remove` in each order in turn, rather than the free-function
 // facade directly.
 //
-// ⛔ NO DEATH TEST, same ruling as item 92's pair immediately above (and
-// item 84's FrontierPairContractTest.cpp): `allocateFrontierSlotForCharacter`'s
-// `OG_CHECK` cannot be trapped by the LLT harness. The first case below pins
-// the PRECONDITION via the diagnostics-read seam (`findInputCache` +
-// `storage.has`) instead of calling the guarded sweep and catching what it
-// does.
+// [item 94] ⚠ THE FAILURE MODE THIS WINDOW PRODUCES HAS CHANGED, THE SAME WAY
+// item 92's pair's did (see that section's own item-94 paragraph): the
+// nullable `findInputCache` filter on `allocateFrontierSlotsAll` silently
+// skips this window's exposed-but-cache-less id instead of falling through to
+// a throwing `.at(id)` — no guard left to test the precondition of, and the
+// case below pins the precondition itself instead.
 //
-// RED/GREEN (quoted in impl/impl_notes_task93.md): with the guard temporarily
-// reverted AND a scratch case added that drove `prepareSimulationStep` on
-// this exact window state (id unregistered from `queueMap` but still in
-// storage — the OLD facade order), the case went RED — the same
-// `std::out_of_range` class ("invalid unordered_map<K, T> key") item 92's RED
-// demonstration produced. Restoring the guard and removing the scratch case
-// is the GREEN side below.
+// RED/GREEN (quoted in impl/impl_notes_task93.md, for the item-92/93 guard
+// this window originally motivated): with the guard temporarily reverted AND
+// a scratch case added that drove `prepareSimulationStep` on this exact
+// window state (id unregistered from `queueMap` but still in storage — the
+// OLD facade order), the case went RED — the same `std::out_of_range` class
+// ("invalid unordered_map<K, T> key") item 92's RED demonstration produced.
+// [item 94] That RED/GREEN pinned the GUARD, which is now gone; the two cases
+// below instead pin the FILTER's precondition and its clean, silent pass —
+// this IS the AC's "(b)"-shaped case for the registration direction (the
+// authority-role half; the client-role, cache-outlives-storage half is a NEW
+// case further below, immediately after the two-sweep-agreement suite).
 // ---------------------------------------------------------------------------
 TEST_CASE("SimulationInputResolution.UnregistrationWindowLeavesAnAuthorityIdInStorageWithNoQueueEntryAndNoCache",
     "[InputResolution]")
@@ -472,11 +524,13 @@ TEST_CASE("SimulationInputResolution.UnregistrationWindowLeavesAnAuthorityIdInSt
     // storage.remove. The id is still visible to forEachSimulatable here.
     rig.resolution.unregisterCharacter<MockSimulatable>(kUnregWindowId);
 
-    // The precondition allocateFrontierSlotForCharacter's OG_CHECK tests:
-    // still in storage (so sweep 2 would visit it), no longer in queueMap
-    // (so the guard's early-return misses it), and no correction cache
-    // (server overload never allocates one) — together, exactly the state
-    // that made pushPredictionTick's getCacheFor(id).at(id) throw.
+    // [item 94] THE PRECONDITION `allocateFrontierSlotsAll`'s nullable filter
+    // now exploits directly: still in storage (so the sweep would visit it)
+    // and no correction cache (server overload never allocates one) —
+    // together, exactly the state that made pre-94's pushPredictionTick's
+    // getCacheFor(id).at(id) throw, and is now the state the filter silently
+    // skips. (queueMap no longer matters to this sweep at all — only listed
+    // here as the historical trigger.)
     REQUIRE(rig.storage.has<MockSimulatable>(kUnregWindowId));
     REQUIRE(rig.reconciliation.findInputCache<MockSimulatable>(kUnregWindowId) == nullptr);
 }
@@ -485,8 +539,9 @@ TEST_CASE("SimulationInputResolution.UnregistrationWindowLeavesAnAuthorityIdInSt
 // BEFORE the queueMap/telemetry teardown — SimulationNetSync.h's
 // unregisterSimulatable free-function facade now does this) removes the id
 // from storage before anything erases queueMap, so it is never visible to
-// forEachSimulatable during teardown at all.
-TEST_CASE("SimulationInputResolution.StorageRemovedBeforeQueueEntryErasureIsInvisibleToPrepareSimulationStep",
+// forEachSimulatable during teardown at all — neither to collectInputAll nor
+// to the separate allocateFrontierSlotsAll call.
+TEST_CASE("SimulationInputResolution.StorageRemovedBeforeQueueEntryErasureIsInvisibleToCollectInputAllAndAllocation",
     "[InputResolution]")
 {
     constexpr unsigned int kUnregOrderedId = 44u;
@@ -502,15 +557,18 @@ TEST_CASE("SimulationInputResolution.StorageRemovedBeforeQueueEntryErasureIsInvi
     REQUIRE_FALSE(rig.storage.has<MockSimulatable>(kUnregOrderedId));
 
     // queueMap still has the id at this point (unregisterCharacter has not
-    // run yet) — but that no longer matters: prepareSimulationStep's sweeps
-    // both iterate storage.forEachSimulatable, so an id storage no longer
-    // has is simply never visited, regardless of what queueMap/cache say
-    // about it. Runs sweep 1 AND sweep 2 (prepareSimulationStep calls
-    // allocateFrontierSlotsAll internally) — if this ordering regressed,
-    // this line would throw or abort.
+    // run yet) — but that no longer matters: collectInputAll and
+    // allocateFrontierSlotsAll are BOTH storage-driven
+    // (m_storage.forEachSimulatable), so an id storage no longer has is
+    // simply never visited by either, regardless of what queueMap/cache say
+    // about it. [item 94] Runs BOTH calls explicitly now — if this ordering
+    // regressed, either line could throw or abort.
     const auto step = normalStep(60u);
-    const MockResolvedInputs inputs = rig.resolution.prepareSimulationStep(step);
+    const MockResolvedInputs inputs = rig.resolution.collectInputAll(step);
     REQUIRE_FALSE(hasInputFor(inputs, kUnregOrderedId));
+    rig.reconciliation.allocateFrontierSlotsAll(step);
+    REQUIRE(rig.reconciliation.getAppliedCaptureTickRef<MockSimulatable>(kUnregOrderedId, 60u).kind
+        == AppliedCaptureRefKind::NoSlot);
 
     // Complete the teardown, matching the fixed facade's remaining two
     // steps, so the rig is left consistent (not load-bearing for the
@@ -596,8 +654,9 @@ TEST_CASE("SimulationInputResolution.ResimLocalRefRungReplaysTheDelayLineEntryAC
         });
 
     const auto step = normalStep(3u);
-    rig.resolution.prepareSimulationStep(step);      // delay line now holds tick 3's capture
-    rig.reconciliation.postPredictionAll(step);      // complete the frontier pair
+    rig.resolution.collectInputAll(step);             // delay line now holds tick 3's capture
+    rig.reconciliation.allocateFrontierSlotsAll(step); // [item 94] opens the frontier pair
+    rig.reconciliation.postPredictionAll(step);       // complete the frontier pair
 
     // Before any correction lands, the resim ref is NoRef.
     {
@@ -636,7 +695,8 @@ TEST_CASE("SimulationInputResolution.ResimSentinelRungResolvesToTheInjectedNeutr
             return constantProvider(1, step, line);
         });
     const auto step = normalStep(4u);
-    rig.resolution.prepareSimulationStep(step);
+    rig.resolution.collectInputAll(step);
+    rig.reconciliation.allocateFrontierSlotsAll(step); // [item 94] opens the frontier pair
     rig.reconciliation.postPredictionAll(step);
 
     // A correction landing with the SENTINEL applied-capture-tick — the
@@ -727,12 +787,13 @@ TEST_CASE("SimulationInputResolution.WipeAllForResyncWipesPendingAndLocalButNotT
     REQUIRE(store->push(1u, 0u, MockInput{ 8 }));
 
     const auto step = normalStep(1u);
-    rig.resolution.prepareSimulationStep(step); // populates the local delay line + pending queue
+    rig.resolution.collectInputAll(step); // populates the local delay line + pending queue
+    rig.reconciliation.allocateFrontierSlotsAll(step); // [item 94] opens the frontier pair
     rig.reconciliation.postPredictionAll(step);
 
     auto* pending = rig.resolution.findPendingInputQueue<MockSimulatable>(kLocalId);
     REQUIRE(pending != nullptr);
-    REQUIRE_FALSE(pending->empty()); // prepareSimulationStep enqueued tick 1's capture
+    REQUIRE_FALSE(pending->empty()); // collectInputAll enqueued tick 1's capture
 
     rig.resolution.wipeAllForResync(0u);
 
@@ -802,40 +863,44 @@ TEST_CASE("SimulationInputResolution.FindPendingInputQueueIsPopulatedForLocalCha
 }
 
 // ---------------------------------------------------------------------------
-// [og-netcode-v2-input-relay item 90] TWO-SWEEP AGREEMENT.
+// [og-netcode-v2-input-relay item 90, RE-POINTED AT ITEM 94] TWO-CALL
+// AGREEMENT (the item-90 LLT, re-pointed rather than renamed away: the
+// property it pins survives the relocation intact).
 //
-// `prepareSimulationStep` resolves every character's input in sweep 1 and
-// allocates the frontier for every prediction-owned id in sweep 2 — two
-// separate `forEachSimulatable` passes inside ONE call. This is the pin that
-// the two sweeps stay in agreement: from one call, every registered
-// prediction-owned id (local-provider AND simulated-proxy alike) gets BOTH a
-// resolved input AND its frontier advanced exactly once, and the StepKind
-// matrix that gates sweep 2 (Normal/Skip allocate, Stall does not) behaves
-// exactly as it did before the sweep split.
+// Pre-94: `prepareSimulationStep` resolved every character's input in sweep 1
+// and allocated the frontier for every prediction-owned id in sweep 2 — two
+// separate `forEachSimulatable` passes inside ONE call. Post-94: `collectInputAll`
+// resolves (one pass) and `reconciliation.allocateFrontierSlotsAll` allocates
+// (a second pass, on a DIFFERENT class, called separately) — mirroring
+// `SimulationManager::onGameSimulationPrediction`'s own collect-then-allocate
+// sequence exactly. This is the pin that the two calls stay in agreement:
+// from one collect + one allocate, every registered prediction-owned id
+// (local-provider AND simulated-proxy alike) gets BOTH a resolved input AND
+// its frontier advanced exactly once, and the StepKind matrix that gates
+// allocation (Normal/Skip allocate, Stall does not) behaves exactly as it did
+// before either relocation.
 //
 // "Frontier advanced" is observed the same way
-// LocalCharacterPrepareSimulationStepRunsTheProviderAndPushesTheFrontierPair
+// LocalCharacterCollectInputAllRunsTheProviderThenReconciliationAllocatesTheFrontierPair
 // already does above: `getAppliedCaptureTickRefKind` answers `NoRef` (a slot
 // exists, uncorrected) once a tick has been pushed and `NoSlot` (the
 // `AppliedCaptureRef{}` default) if it never was — `getCacheIndex` rejects a
 // tick outside the ring's allocated window. "Exactly once" is enforced
-// structurally rather than counted: sweep 2 visits each id exactly once per
-// `forEachSimulatable` pass, and a SECOND `pushPredictionTick` for the same
-// id in the same call would trip item 84's `OG_CHECK` in
+// structurally rather than counted: `allocateFrontierSlotsAll` visits each id
+// exactly once per `forEachSimulatable` pass, and a SECOND `pushPredictionTick`
+// for the same id in the same call would trip item 84's `OG_CHECK` in
 // `StateCorrectionCache::pushPredictionTick` and abort the process — so a
 // case that runs to completion and passes its `postPredictionAll` pairing
 // discipline (the file banner) has already proven at-most-once by not
 // crashing; these cases prove at-least-once with the `NoRef` checks below.
 //
-// ⛔ RED/GREEN, DEMONSTRATED (see impl/impl_notes_task90.md for the quoted
-// run output): with sweep 2 (`allocateFrontierSlotsAll`) locally commented
-// out of `prepareSimulationStep`, every `AppliedCaptureRefKind::NoRef` REQUIRE
-// below goes RED (the query answers `NoSlot` instead — nothing ever pushed
-// the frontier past construction). Restored, every case is GREEN. This is
-// the case that pin protects, and is the reason it exists as its own file
-// section rather than folding into the two single-character cases above.
+// ⛔ RED/GREEN, RE-DEMONSTRATED AT ITEM 94 (quoted in impl/impl_notes_task94.md):
+// with the `reconciliation.allocateFrontierSlotsAll(step)` call commented out
+// of the Normal-step case below — the direct analogue of the manager's own
+// allocate call — every `AppliedCaptureRefKind::NoRef` REQUIRE goes RED (the
+// query answers `NoSlot` instead). Restored, every case is GREEN.
 // ---------------------------------------------------------------------------
-TEST_CASE("SimulationInputResolution.PrepareSimulationStepNormalStepAdvancesEveryPredictionOwnedIdsFrontierExactlyOnce",
+TEST_CASE("SimulationInputResolution.CollectThenAllocateNormalStepAdvancesEveryPredictionOwnedIdsFrontierExactlyOnce",
     "[InputResolution]")
 {
     constexpr unsigned int kLocalIdA  = 11u;
@@ -862,7 +927,10 @@ TEST_CASE("SimulationInputResolution.PrepareSimulationStepNormalStepAdvancesEver
     rig.resolution.registerRemoteCharacter<MockSimulatable>(kRemoteIdB);
 
     const auto step = normalStep(50u);
-    const MockResolvedInputs inputs = rig.resolution.prepareSimulationStep(step);
+    const MockResolvedInputs inputs = rig.resolution.collectInputAll(step);
+    // [item 94] The manager's own collect -> allocate sequence, reproduced
+    // here explicitly rather than folded into one call.
+    rig.reconciliation.allocateFrontierSlotsAll(step);
     // Complete the frontier pair for all four ids — file banner discipline.
     rig.reconciliation.postPredictionAll(step);
 
@@ -877,7 +945,7 @@ TEST_CASE("SimulationInputResolution.PrepareSimulationStepNormalStepAdvancesEver
     }
 }
 
-TEST_CASE("SimulationInputResolution.PrepareSimulationStepSkipStepBackfillsAndAdvancesEveryPredictionOwnedIdsFrontierExactlyOnce",
+TEST_CASE("SimulationInputResolution.CollectThenAllocateSkipStepBackfillsAndAdvancesEveryPredictionOwnedIdsFrontierExactlyOnce",
     "[InputResolution]")
 {
     constexpr unsigned int kLocalIdA  = 11u;
@@ -899,16 +967,19 @@ TEST_CASE("SimulationInputResolution.PrepareSimulationStepSkipStepBackfillsAndAd
     // Establish tick 9 as the last completed tick, same as every other case's
     // opening Normal step.
     const auto firstStep = normalStep(9u);
-    rig.resolution.prepareSimulationStep(firstStep);
+    rig.resolution.collectInputAll(firstStep);
+    rig.reconciliation.allocateFrontierSlotsAll(firstStep);
     rig.reconciliation.postPredictionAll(firstStep);
 
     // A Skip step landing at tick 12 (StepKind::Skip: "sim tick jumps by >1;
-    // previous tick must be back-filled" — SimulationTimeContext.h). Sweep 2
-    // must both backfill tick 11 (step.getTick() - 1, today's single-tick
-    // backfill — tick 10 is a genuine, documented gap, unchanged by this
-    // task) AND push the new frontier tick 12, from the SAME call.
+    // previous tick must be back-filled" — SimulationTimeContext.h).
+    // `allocateFrontierSlotsAll` must both backfill tick 11
+    // (step.getTick() - 1, today's single-tick backfill — tick 10 is a
+    // genuine, documented gap, unchanged by this task) AND push the new
+    // frontier tick 12, from the SAME call.
     const SimulationTimeStep skipStep(12u, /*isResimulating=*/false, StepKind::Skip, kDeltaSeconds);
-    const MockResolvedInputs inputs = rig.resolution.prepareSimulationStep(skipStep);
+    const MockResolvedInputs inputs = rig.resolution.collectInputAll(skipStep);
+    rig.reconciliation.allocateFrontierSlotsAll(skipStep);
     rig.reconciliation.postPredictionAll(skipStep);
 
     for (unsigned int id : allIds)
@@ -932,7 +1003,7 @@ TEST_CASE("SimulationInputResolution.PrepareSimulationStepSkipStepBackfillsAndAd
     }
 }
 
-TEST_CASE("SimulationInputResolution.PrepareSimulationStepStallStepResolvesInputButAllocatesNoFrontierSlot",
+TEST_CASE("SimulationInputResolution.CollectThenAllocateStallStepResolvesInputButAllocatesNoFrontierSlot",
     "[InputResolution]")
 {
     constexpr unsigned int kLocalIdA  = 11u;
@@ -952,12 +1023,16 @@ TEST_CASE("SimulationInputResolution.PrepareSimulationStepStallStepResolvesInput
     rig.resolution.registerRemoteCharacter<MockSimulatable>(kRemoteIdA);
 
     // A fresh rig, no prior Normal step: tick 5 has never been allocated, so
-    // if sweep 2 (wrongly) ran on Stall, tick 5 would read NoRef; if it
-    // (correctly) does not, tick 5 stays NoSlot. `stepAllocatesFrontierSlot`
-    // is `kind != StepKind::Stall` — this is the one StepKind the predicate
-    // answers false for.
+    // if `allocateFrontierSlotsAll` (wrongly) allocated on Stall, tick 5
+    // would read NoRef; if it (correctly) does not, tick 5 stays NoSlot.
+    // `stepAllocatesFrontierSlot` is `kind != StepKind::Stall` — this is the
+    // one StepKind the predicate answers false for.
     const SimulationTimeStep stallStep(5u, /*isResimulating=*/false, StepKind::Stall, kDeltaSeconds);
-    const MockResolvedInputs inputs = rig.resolution.prepareSimulationStep(stallStep);
+    const MockResolvedInputs inputs = rig.resolution.collectInputAll(stallStep);
+    // [item 94] Called explicitly, even on Stall — proving the ALLOCATION
+    // CALL ITSELF is a safe no-op on this StepKind (gated by the predicate
+    // inside), not merely that the test declined to call it.
+    rig.reconciliation.allocateFrontierSlotsAll(stallStep);
     // No postPredictionAll call — item 84's pair never opened on a Stall
     // step, so there is nothing to complete (postPredictionAll's own early
     // return would make the call a no-op anyway).
@@ -965,8 +1040,8 @@ TEST_CASE("SimulationInputResolution.PrepareSimulationStepStallStepResolvesInput
     for (unsigned int id : allIds)
     {
         INFO("id=" << id);
-        // Sweep 1 still resolves an input — resolution is unconditional on
-        // StepKind; only frontier allocation (sweep 2) is gated.
+        // collectInputAll still resolves an input — resolution is
+        // unconditional on StepKind; only frontier allocation is gated.
         REQUIRE(hasInputFor(inputs, id));
 
         const AppliedCaptureRef ref =
@@ -976,99 +1051,78 @@ TEST_CASE("SimulationInputResolution.PrepareSimulationStepStallStepResolvesInput
 }
 
 // ---------------------------------------------------------------------------
-// [og-netcode-v2-input-relay item 91 part I2] SWEEP 1 THROWING PARTWAY — the
-// gap the dispatch's own Q4 predicted the three cases above would miss
-// (item 90 review finding 1): commenting out sweep 2 lets sweep 1 run to
-// completion for every id, which is NOT the same failure shape as sweep 1
-// itself throwing partway through. The two are different mutations with
-// different observable consequences, and only a genuine mid-sweep-1 throw
-// proves the ACTUAL claim the sweep-boundary banner
-// (`SimulationInputResolution.h`, above `prepareSimulationStep`) now states:
-// an uncaught exception during sweep 1 skips sweep 2 for this tick entirely.
+// ---------------------------------------------------------------------------
+// [og-netcode-v2-input-relay item 91 part I2] SWEEP 1 THROWING PARTWAY — RETIRED
+// AT ITEM 94. GRAVESTONE, NOT SILENTLY DELETED.
+// ---------------------------------------------------------------------------
+// This case used to pin: post-item-90, sweep 2 (frontier allocation) ran only
+// after sweep 1's (resolution's) ENTIRE `forEachSimulatable` returned without
+// throwing, INSIDE ONE FUNCTION (`prepareSimulationStep`) — so a throwing
+// provider for one id left EVERY registered id, including ones whose own
+// sweep-1 work had already completed, with NO frontier slot allocated for
+// that tick, a state pre-item-90's per-character-paired shape could not
+// produce.
 //
-// REACHABILITY NOTE. The real trigger is one of the three `.at(id)` lookups
-// in `collectInputForCharacter`'s local-provider branch (delay line,
-// pending-input queue, last-used-capture-tick map) — these throw only when
-// the provider-present/line-present invariant `registerLocalCharacter`
-// always establishes together has ALREADY been broken elsewhere. That is not
-// reproducible through this class's own public API (registration is
-// all-or-nothing) — which is itself the reason the sweep-boundary decision
-// records this as a second-bug-required path, not a standalone defect. This
-// case substitutes a THROWING PROVIDER for that public-API-unreachable
-// corruption: the control-flow consequence at the sweep boundary is
-// identical either way — an uncaught exception unwinds out of
-// `prepareSimulationStep` before sweep 2 (`allocateFrontierSlotsAll`) ever
-// runs, REGARDLESS of which registered id's sweep-1 body happened to run
-// first (this class's storage iterates an `unordered_map`, so processing
-// order is not something a test can pin) — that is exactly why the
-// assertion below holds for BOTH ids without needing to control order.
+// [item 94] THE PROPERTY THIS PINNED NO LONGER EXISTS AT THIS LAYER, BECAUSE
+// THE BOUNDARY IT PINNED NO LONGER EXISTS HERE. `collectInputAll` (this
+// class's method) does not allocate anything at all any more, throw or no
+// throw — the boundary between "resolve" and "allocate" moved from an
+// internal two-sweep split inside one function to two ordinary, separate
+// statements in `SimulationManager::onGameSimulationPrediction`
+// (`m_inputResolution.collectInputAll(step);` followed by
+// `m_reconciliation.allocateFrontierSlotsAll(step);`). Re-deriving this case
+// against `collectInputAll` alone would be a test that PASSES REGARDLESS OF
+// WHETHER THE PROVIDER THROWS — this class structurally cannot allocate a
+// frontier slot any more, so the assertion "no frontier slot allocated"
+// holds unconditionally and proves nothing: exactly the "test which cannot
+// fail" class item 94's own dispatch forbids leaving behind (Part F, applied
+// here on the implementer's own initiative to a case Part F did not name).
+//
+// THE DECISION ITSELF (accepted as documented debt: this path is reachable
+// only via an already-broken registration invariant, a second bug required)
+// CARRIES FORWARD UNCHANGED and is now stated where the two statements it
+// concerns actually sit: `SimulationManager.h`'s `onGameSimulationPrediction`,
+// at the sweep-boundary fence between `collectInputAll` and
+// `allocateFrontierSlotsAll`. The REACHABILITY argument (one of
+// `collectInputForCharacter`'s two remaining `.at(id)` throwing lookups —
+// see that method's own corrected-attribution comment, 91-I's misattribution
+// fix folded in by this task) is unchanged and still lives there too. An
+// equivalent manager-level regression test would need a full
+// `SimulationManager` rig with a throwing mock resolution peer; not written
+// here, because the property it would prove — "an uncaught C++ exception
+// skips the following statement" — is ordinary language guarantee, not a
+// custom mechanism this codebase has otherwise felt the need to
+// regress-test, and no manager-level LLT rig for this exists elsewhere in
+// this file's family to extend cheaply.
 // ---------------------------------------------------------------------------
-TEST_CASE("SimulationInputResolution.PrepareSimulationStepSweep1ThrowingPartwayAllocatesNoFrontierSlotForAnyId",
-    "[InputResolution]")
-{
-    constexpr unsigned int kSurvivingId = 11u;
-    constexpr unsigned int kThrowingId  = 12u;
-    const unsigned int allIds[] = { kSurvivingId, kThrowingId };
-
-    ResolutionRig rig;
-    for (unsigned int id : allIds)
-    {
-        rig.storage.add<MockSimulatable>(id, MockSimulatable{});
-        rig.reconciliation.createCacheFor<MockSimulatable>(id);
-    }
-    rig.resolution.registerLocalCharacter<MockSimulatable>(kSurvivingId,
-        [](const SimulationTimeStep& step, const LocalInputCache<MockInput>& line) {
-            return constantProvider(401, step, line);
-        });
-    rig.resolution.registerLocalCharacter<MockSimulatable>(kThrowingId,
-        [](const SimulationTimeStep&, const LocalInputCache<MockInput>&) -> MockInput {
-            // Stands in for the corruption the three `.at(id)` lookups guard
-            // against — see the file-section comment above.
-            throw std::runtime_error("simulated sweep-1 registration-invariant break");
-        });
-
-    const auto step = normalStep(60u);
-    bool threw = false;
-    try
-    {
-        rig.resolution.prepareSimulationStep(step);
-    }
-    catch (const std::runtime_error&)
-    {
-        threw = true;
-    }
-    REQUIRE(threw);
-    // No postPredictionAll call: sweep 2 never ran, so the frontier-pair
-    // contract never opened for either id this tick — nothing to complete.
-
-    for (unsigned int id : allIds)
-    {
-        INFO("id=" << id);
-        // [item 91 part I] THE PROPERTY THIS CASE PINS: post-item-90, sweep 2
-        // runs only after sweep 1's ENTIRE forEachSimulatable returns without
-        // throwing — so ONE id's provider throwing leaves EVERY registered
-        // id, including one whose own sweep-1 work may have already
-        // completed, with NO frontier slot allocated for this tick.
-        // Pre-item-90 (resolve+allocate paired per character inline) this
-        // could not happen: a mid-loop throw left already-processed
-        // characters FULLY paired instead — see the sweep-boundary banner.
-        const AppliedCaptureRef ref =
-            rig.reconciliation.getAppliedCaptureTickRef<MockSimulatable>(id, 60u);
-        REQUIRE(ref.kind == AppliedCaptureRefKind::NoSlot);
-    }
-}
 
 // ---------------------------------------------------------------------------
-// [og-netcode-v2-input-relay item 91 part I3] MIXED AUTHORITY +
-// PREDICTION-OWNED POPULATION — the three two-sweep cases above register
-// only prediction-owned ids (local-provider / simulated-proxy), never a true
-// authority id (`registerAuthorityCharacter`, the remote-move-queue branch).
-// None of them directly re-proves sweep 2's `queueMap` early-return
-// (`allocateFrontierSlotForCharacter`) correctly excludes authority-owned
-// ids when mixed with prediction-owned ids in the SAME `prepareSimulationStep`
-// call — this case does.
+// [og-netcode-v2-input-relay item 91 part I3, RE-DISPOSITIONED AT ITEM 94]
+// MIXED AUTHORITY + PREDICTION-OWNED POPULATION — the three collect-then-
+// allocate cases above register only prediction-owned ids (local-provider /
+// simulated-proxy), never a true authority id (`registerAuthorityCharacter`,
+// the remote-move-queue branch). None of them directly re-proves that
+// `allocateFrontierSlotsAll`'s nullable filter correctly excludes
+// authority-owned ids when mixed with prediction-owned ids in the SAME call
+// — this case does.
+//
+// [item 94] ⚠ THE SETUP INVERTS FROM ITS PRE-94 SHAPE, AND THAT INVERSION IS
+// THE POINT. Pre-94, this case deliberately created a correction cache for
+// the authority ids too — defensive, so a future regression that forgot the
+// `queueMap` early-return would surface as a wrongly-allocated `NoRef`
+// instead of silently reading `NoSlot` for the right reason by accident.
+// Post-94 that setup would be actively WRONG: the filter IS cache existence
+// now (`findInputCache<T>(id) != nullptr`), so giving an authority id a
+// cache would make `allocateFrontierSlotsAll` correctly, legitimately
+// allocate a slot for it — not a regression, a direct contradiction of the
+// case's own premise ("prediction-owned id" ⇔ "id with a cache", item 94's
+// central established fact). The authority ids below get NO cache, matching
+// `AuthorityQueueUnderrunSubstitutesTheInjectedNeutral` and every other
+// authority-role case in this file, and it is precisely the absence of a
+// cache — not a `queueMap` lookup any more — that the assertions below prove
+// stays exclusive even when mixed with cache-bearing ids in one call.
 // ---------------------------------------------------------------------------
-TEST_CASE("SimulationInputResolution.PrepareSimulationStepMixedAuthorityAndPredictionOwnedPopulationAdvancesOnlyThePredictionOwnedFrontiers",
+TEST_CASE("SimulationInputResolution.CollectThenAllocateMixedAuthorityAndPredictionOwnedPopulationAdvancesOnlyThePredictionOwnedFrontiers",
     "[InputResolution]")
 {
     constexpr unsigned int kMixedLocalId  = 11u;
@@ -1087,11 +1141,10 @@ TEST_CASE("SimulationInputResolution.PrepareSimulationStepMixedAuthorityAndPredi
     for (unsigned int id : authorityIds)
     {
         rig.storage.add<MockSimulatable>(id, MockSimulatable{});
-        // A cache IS created here (unlike AuthorityQueueUnderrunSubstitutesTheInjectedNeutral,
-        // which relies on findInputCache's nullable route) so that a future
-        // regression allocating a frontier slot for an authority id would
-        // surface as NoRef below, not silently read NoSlot for the wrong reason.
-        rig.reconciliation.createCacheFor<MockSimulatable>(id);
+        // [item 94] NO createCacheFor HERE — see the file-section comment
+        // above for why creating one would now be wrong rather than merely
+        // unnecessary. Matches the server overload's permanent design: an
+        // authority id never gets a cache.
     }
     rig.resolution.registerLocalCharacter<MockSimulatable>(kMixedLocalId,
         [](const SimulationTimeStep& step, const LocalInputCache<MockInput>& line) {
@@ -1102,10 +1155,31 @@ TEST_CASE("SimulationInputResolution.PrepareSimulationStepMixedAuthorityAndPredi
         rig.resolution.registerAuthorityCharacter<MockSimulatable>(id);
 
     const auto step = normalStep(70u);
-    const MockResolvedInputs inputs = rig.resolution.prepareSimulationStep(step);
-    // Complete the frontier pair for the prediction-owned ids only —
-    // authority ids never open one (file banner discipline).
-    rig.reconciliation.postPredictionAll(step);
+    const MockResolvedInputs inputs = rig.resolution.collectInputAll(step);
+    // [item 94] The manager's own collect -> allocate sequence.
+    rig.reconciliation.allocateFrontierSlotsAll(step);
+    // [item 94] ⚠ NO postPredictionAll CALL HERE, DELIBERATELY — discovered
+    // while writing this case, not carried over from the pre-94 version.
+    // `postPredictionAll` (SimulationReconciliation.h, untouched by this
+    // task) sweeps storage UNCONDITIONALLY and pushes state through every
+    // id's cache via a bare, throwing `.at(id)` — it has no nullable filter
+    // at all, unlike `allocateFrontierSlotsAll`. That is safe in every real
+    // production configuration because a manager that calls it
+    // (`onGameSimulationPrediction`'s caller) never shares its storage with
+    // authority-only ids — a listen server runs the prediction role and the
+    // authority role on SEPARATE `ASimulationManagerUImpl` instances, each
+    // with its own storage/reconciliation (`SimulationManagerUImpl.cpp`'s
+    // `s_instances[0]`/authority vs the prediction-role instance). This
+    // TEST's rig deliberately mixes both id classes in ONE storage to pin the
+    // ALLOCATION filter in isolation — a configuration production never
+    // produces — so calling `postPredictionAll` here would throw on the very
+    // first authority id it swept, not because of a defect this task
+    // introduced, but because the artificial mix violates a precondition
+    // `postPredictionAll` has always had and this task does not touch. Left
+    // as an unplanned discovery, not filed as a defect: no known path
+    // constructs this storage shape in production. The prediction-owned ids'
+    // frontier state is still fully verified below via `getAppliedCaptureTickRef`
+    // (allocation), which does not require capture to have run.
 
     for (unsigned int id : predictionOwnedIds)
     {
@@ -1119,15 +1193,98 @@ TEST_CASE("SimulationInputResolution.PrepareSimulationStepMixedAuthorityAndPredi
     for (unsigned int id : authorityIds)
     {
         INFO("authority id=" << id);
-        // Sweep 1 still resolves an input for authority ids (underrun ->
-        // injected neutral, same as AuthorityQueueUnderrunSubstitutesTheInjectedNeutral);
-        // this case's own concern is the FRONTIER side, which must stay
-        // untouched even mixed in with prediction-owned ids in one call.
+        // collectInputAll still resolves an input for authority ids
+        // (underrun -> injected neutral, same as
+        // AuthorityQueueUnderrunSubstitutesTheInjectedNeutral); this case's
+        // own concern is the FRONTIER side, which must stay untouched even
+        // mixed in with prediction-owned ids in one allocate call.
         REQUIRE(hasInputFor(inputs, id));
         const AppliedCaptureRef ref =
             rig.reconciliation.getAppliedCaptureTickRef<MockSimulatable>(id, 70u);
         REQUIRE(ref.kind == AppliedCaptureRefKind::NoSlot);
     }
+}
+
+// ---------------------------------------------------------------------------
+// [og-netcode-v2-input-relay item 94] THE CLIENT-SIDE TEARDOWN WINDOW —
+// "CACHE PRESENT, STORAGE ABSENT" (acceptance criterion (b)'s shape).
+// ---------------------------------------------------------------------------
+// The item-92/93 pair above drives the AUTHORITY-side window: an id sits in
+// storage with NO cache (the server overload's permanent design). This case
+// drives its CLIENT-side mirror: a PREDICTION-owned id, WITH a real cache,
+// sits OUTSIDE storage — item 93's fixed teardown order
+// (`storage.remove` -> `netSync.unregisterSimulatable` ->
+// `reconciliation.removeCacheFor`, `SimulationNetSync.h`) opens exactly this
+// window for the width of the middle call, which this case reproduces at the
+// core level (no `SimulationNetSync` in this file — see `ResolutionRig`).
+//
+// Unlike the authority window, "not swept" here cannot be proven merely by
+// absence of a crash (there IS a cache, so a bare `.at(id)` would have
+// succeeded even pre-92/93) — it is proven by both sweeps being
+// STORAGE-DRIVEN (`m_storage.forEachSimulatable`), so an id storage does not
+// have is never visited by either, regardless of what its cache says. "Arms
+// nothing" is checked directly against the frontier-pair detector
+// (`m_frontierSlotAwaitingState`, read through `getDiagnostics()`), not
+// inferred from an absence of side effects — the AC's own third clause.
+// ---------------------------------------------------------------------------
+TEST_CASE("SimulationInputResolution.CacheOutlivesStorageWindowIsNotSweptByAllocationAndArmsNoDetector",
+    "[InputResolution]")
+{
+    constexpr unsigned int kMidTeardownId = 45u;
+    ResolutionRig rig;
+
+    rig.storage.add<MockSimulatable>(kMidTeardownId, MockSimulatable{});
+    rig.reconciliation.createCacheFor<MockSimulatable>(kMidTeardownId);
+    rig.resolution.registerLocalCharacter<MockSimulatable>(kMidTeardownId,
+        [](const SimulationTimeStep& step, const LocalInputCache<MockInput>& line) {
+            return constantProvider(901, step, line);
+        });
+
+    // One full, closed pair at tick 80 — mirrors an ordinary live tick before
+    // the character leaves.
+    const auto firstStep = normalStep(80u);
+    rig.resolution.collectInputAll(firstStep);
+    rig.reconciliation.allocateFrontierSlotsAll(firstStep);
+    rig.reconciliation.postPredictionAll(firstStep);
+
+    const auto* cacheBefore = rig.reconciliation.findInputCache<MockSimulatable>(kMidTeardownId);
+    REQUIRE(cacheBefore != nullptr);
+    REQUIRE_FALSE(cacheBefore->getDiagnostics().frontierSlotAwaitingState());
+    REQUIRE(rig.reconciliation.getAppliedCaptureTickRef<MockSimulatable>(kMidTeardownId, 80u).kind
+        == AppliedCaptureRefKind::NoRef);
+
+    // [item 93] THE FIXED TEARDOWN ORDER, DRIVEN THROUGH THE REAL SEQUENCE:
+    // storage.remove FIRST — the cache still exists (unregisterCharacter,
+    // which would erase it, has not run yet).
+    rig.storage.remove<MockSimulatable>(kMidTeardownId);
+    REQUIRE_FALSE(rig.storage.has<MockSimulatable>(kMidTeardownId));
+    REQUIRE(rig.reconciliation.findInputCache<MockSimulatable>(kMidTeardownId) != nullptr);
+
+    // A further tick's collect + allocate — both storage-driven — must not
+    // touch this id at all: NOT SWEPT.
+    const auto secondStep = normalStep(81u);
+    const MockResolvedInputs inputs = rig.resolution.collectInputAll(secondStep);
+    REQUIRE_FALSE(hasInputFor(inputs, kMidTeardownId));
+    rig.reconciliation.allocateFrontierSlotsAll(secondStep);
+
+    // ARMS NOTHING: the detector bit is exactly as it was before this window
+    // — untouched, not merely false again by coincidence.
+    const auto* cacheAfter = rig.reconciliation.findInputCache<MockSimulatable>(kMidTeardownId);
+    REQUIRE(cacheAfter != nullptr);
+    REQUIRE_FALSE(cacheAfter->getDiagnostics().frontierSlotAwaitingState());
+
+    // NOT SWEPT, restated at the frontier: the tick-81 slot was never opened
+    // (NoSlot), and the tick-80 slot this character's real registration
+    // produced is untouched (still NoRef, not overwritten or advanced).
+    REQUIRE(rig.reconciliation.getAppliedCaptureTickRef<MockSimulatable>(kMidTeardownId, 81u).kind
+        == AppliedCaptureRefKind::NoSlot);
+    REQUIRE(rig.reconciliation.getAppliedCaptureTickRef<MockSimulatable>(kMidTeardownId, 80u).kind
+        == AppliedCaptureRefKind::NoRef);
+
+    // Complete the teardown, matching the fixed facade's remaining step, so
+    // the rig is left consistent.
+    rig.resolution.unregisterCharacter<MockSimulatable>(kMidTeardownId);
+    rig.reconciliation.removeCacheFor<MockSimulatable>(kMidTeardownId);
 }
 
 #endif // WITH_LOW_LEVEL_TESTS

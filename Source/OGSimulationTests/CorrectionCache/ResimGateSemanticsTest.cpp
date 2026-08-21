@@ -114,8 +114,9 @@ namespace
 	constexpr std::int32_t kAuthorityValue   = 4242;
 	constexpr std::int32_t kResimulatedValue = 7777;
 
-	// One predicted tick, exactly as prepareSimulationStep + postPredictionAll produce
-	// it on the client.
+	// One predicted tick, exactly as SimulationReconciliation::
+	// allocateFrontierSlotsAll (item 94) + postPredictionAll produce it on the
+	// client.
 	void predictTick(GateCache& cache, std::uint32_t tick, std::int32_t value)
 	{
 		cache.pushPredictionTick(tick);
