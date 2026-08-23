@@ -196,7 +196,7 @@ TEST_CASE("Correction cache behaves identically with no verdict out-pointer",
 	REQUIRE(stateAt(reported, 501u) == stateAt(silent, 501u));
 	REQUIRE(reported.getAppliedCaptureTick(reported.getCacheIndex(500u))
 	        == silent.getAppliedCaptureTick(silent.getCacheIndex(500u)));
-	REQUIRE(reported.getLastCorrectTick() == silent.getLastCorrectTick());
+	REQUIRE(reported.getDiagnostics().lastCorrectTick() == silent.getDiagnostics().lastCorrectTick());
 }
 
 #endif // WITH_LOW_LEVEL_TESTS

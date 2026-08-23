@@ -112,7 +112,7 @@ TEST_CASE("RemoteMoveQueue.AcceptCaptureTickAtBoundary", "[PCTM][RemoteMoveQueue
 // ---------------------------------------------------------------------------
 // [og-netcode-v2-input-relay T2] THE UNDERRUN-AMBIGUITY PROOF.
 //
-// SimulationNetSync::collectInputAll's remote branch must record the capture tick
+// SimulationInputResolution::collectInputAll's remote branch must record the capture tick
 // of the input the authority applied, and an explicit "no real input" sentinel
 // when the queue underran and the applied input was a SUBSTITUTE. The obvious
 // implementation — dequeue, then check the returned tick — is WRONG, and these

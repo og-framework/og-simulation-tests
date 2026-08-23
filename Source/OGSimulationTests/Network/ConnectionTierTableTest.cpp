@@ -480,4 +480,60 @@ TEST_CASE("TierDelayDeltaTicksIsAntisymmetric", "[Network][ConnectionTierTable]"
     }
 }
 
+// item 69 / og-netcode-v2-input-relay (filed from item 62's review finding 1).
+//
+// `onConnectionTierReceived`'s `oldTier` is the replicated property's
+// COMPILED DEFAULT (0) on a fresh connection's first real OnRep, not a tier
+// the client ever actually ran at — the client was running the pre-arrival
+// no-tier fallback instead. Feeding that 0 into `tierDelayDeltaTicks` as if
+// it were a real prior tier requests a spurious multi-tick client prediction
+// stall, in the WRONG DIRECTION, on every first-ever tier except 0 (see the
+// worked table in SimulationManagerUImpl.cpp's PRESERVED QUIRK note and in
+// Backlog.md item 69). `shouldStallForTierTransition`'s `hadAnyTier`
+// parameter is what a caller uses to tell "0 is the wire default, nothing
+// arrived yet" from "0 is a genuine prior tier" — the property value alone
+// cannot.
+TEST_CASE("FirstEverResolutionRequestsNoStallRegardlessOfTier", "[Network][ConnectionTierTable]")
+{
+    TimeConfig cfg;   // rttTierInputDelays default {1,2,3,4}, floor 0
+
+    // The worst case (dispatch table row 4): today's code computes
+    // tierDelayDeltaTicks(0, 3, cfg) = +3 and requests a 3-tick stall, even
+    // though the true required correction is 0 (the fallback already equals
+    // tier 3's delay). This is the largest freeze, on exactly the connections
+    // the worst-tier fallback exists to protect.
+    REQUIRE(shouldStallForTierTransition(0, 3, /*hadAnyTier=*/false, cfg) == 0);
+
+    // Rows 2 and 3: today's code computes +1 and +2 respectively.
+    REQUIRE(shouldStallForTierTransition(0, 1, /*hadAnyTier=*/false, cfg) == 0);
+    REQUIRE(shouldStallForTierTransition(0, 2, /*hadAnyTier=*/false, cfg) == 0);
+
+    // Row 1: passes today too, but BY COINCIDENCE (tierDelayDeltaTicks(0,0,cfg)
+    // == 0 regardless of hadAnyTier). Pinned explicitly so a future change to
+    // the fallback/tier-0 delay relationship cannot silently turn this into a
+    // real (not coincidental) zero without a test noticing the coincidence
+    // stopped holding for the wrong reason.
+    REQUIRE(shouldStallForTierTransition(0, 0, /*hadAnyTier=*/false, cfg) == 0);
+}
+
+TEST_CASE("GenuineLaterTransitionsStallExactlyAsBefore", "[Network][ConnectionTierTable]")
+{
+    TimeConfig cfg;   // rttTierInputDelays default {1,2,3,4}, floor 0
+
+    // A genuine later UPWARD transition (client already had a real tier) must
+    // still stall by exactly the delta — hadAnyTier must not suppress this.
+    REQUIRE(shouldStallForTierTransition(1, 3, /*hadAnyTier=*/true, cfg)
+            == tierDelayDeltaTicks(1, 3, cfg));
+    REQUIRE(tierDelayDeltaTicks(1, 3, cfg) > 0);   // sanity: this IS an upward move
+
+    // A genuine later DOWNWARD transition must still not stall.
+    REQUIRE(shouldStallForTierTransition(3, 1, /*hadAnyTier=*/true, cfg) == 0);
+    REQUIRE(tierDelayDeltaTicks(3, 1, cfg) < 0);   // sanity: this IS a downward move
+
+    // The oldTier == newTier early-out must survive, both with and without a
+    // prior tier.
+    REQUIRE(shouldStallForTierTransition(2, 2, /*hadAnyTier=*/true, cfg) == 0);
+    REQUIRE(shouldStallForTierTransition(2, 2, /*hadAnyTier=*/false, cfg) == 0);
+}
+
 #endif // WITH_LOW_LEVEL_TESTS

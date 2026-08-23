@@ -166,41 +166,73 @@ namespace
 	}
 
 	// --- Mock manager peers -------------------------------------------------
-	// SimulationManager is duck-typed on its NetSync / Reconciliation / Systems
-	// peers, and member functions of a class template instantiate only when used —
-	// so the authority tick path needs only what it actually calls.
+	// SimulationManager is duck-typed on its NetSync / InputResolution /
+	// Reconciliation / Systems peers, and member functions of a class template
+	// instantiate only when used — so the authority tick path needs only what
+	// it actually calls.
+	//
+	// [item 87] `collectInputAll` (RENAMED `prepareSimulationStep` at item 90)
+	// / `collectResimInputAll` / `wipeAllForResync` LEFT MockNetSync for
+	// MockInputResolution below — they moved off the real `SimulationNetSync`
+	// onto the resolution peer at item 87.
 	struct MockNetSync
+	{
+		template <typename TickT, typename WindowT>
+		void setAuthorityGuardContext(TickT, WindowT) {}
+	};
+
+	// [item 87] The resolution peer's mock. Never invoked on the authority
+	// path beyond `prepareSimulationStep`, but all three must EXIST —
+	// `onGameSimulation()` dispatches to the prediction/resim branches too, so
+	// their bodies compile even though only the authority branch runs, and
+	// `wipeAllForResync` is reachable from the ctor's own resync-callback
+	// lambda, compiled regardless of the runtime `shouldRunPrediction` branch.
+	struct MockInputResolution
 	{
 		MockResolvedInputs nextInputs;
 
+		// [item 90] RENAMED from `collectInputAll` to `prepareSimulationStep`,
+		// then RENAMED BACK at item 94 once frontier allocation left the real
+		// method entirely (see SimulationInputResolution.h's own banner) —
+		// this mock's method must match the manager's current call-site name.
 		MockResolvedInputs collectInputAll(const SimulationTimeStep&) const { return nextInputs; }
 
-		template <typename TickT, typename WindowT>
-		void setAuthorityGuardContext(TickT, WindowT) {}
+		// [og-netcode-v2-input-relay T6, re-targeted item 87] resim input
+		// resolution reads resolution-owned delay lines / relay stores /
+		// neutrals, so SimulationManager's resim branch calls the resolution
+		// peer, not NetSync.
+		MockResolvedInputs collectResimInputAll(unsigned int) const { return MockResolvedInputs{}; }
 
 		void wipeAllForResync(unsigned int) {}
-
-		// [og-netcode-v2-input-relay T6] MOVED here from MockReconciliation, with
-		// the production method: resim input resolution now reads NetSync-owned
-		// delay lines / relay stores / neutrals, so SimulationManager's resim
-		// branch calls m_netSync. Never invoked on the authority path, but it must
-		// EXIST — onGameSimulation() dispatches to the prediction/resim branches
-		// too, so their bodies compile even though only the authority branch runs.
-		MockResolvedInputs collectResimInputAll(unsigned int) const { return MockResolvedInputs{}; }
 	};
 
-	// Never invoked on the authority path, but wipeAllForResync must EXIST: the
-	// ctor's resync-callback lambda body is compiled regardless of the runtime
-	// shouldRunPrediction branch it sits behind.
+	// [item 94] Never invoked on the authority path — `onGameSimulationAuthority`
+	// does not call `allocateFrontierSlotsAll` at all any more (that method is
+	// now single-caller, `onGameSimulationPrediction` only) — but
+	// `onGameSimulationPrediction`'s body still compiles regardless of the
+	// runtime `shouldRunPrediction` branch (same reason `wipeAllForResync`
+	// already had to exist), and its `requires` clause now also names
+	// `SimulationReconciliationConcept<ReconciliationT>` (item 94: it is the
+	// sole caller of `allocateFrontierSlotsAll`), so this mock must satisfy
+	// the FULL concept, not just `wipeAllForResync`.
 	struct MockReconciliation
 	{
+		void allocateFrontierSlotsAll(const SimulationTimeStep&) {}
+		void postPredictionAll(const SimulationTimeStep&) {}
+		void postResimulationAll(const SimulationTimeStep&) {}
+		unsigned int checkDivergenceAll(unsigned int) { return 0u; }
 		void wipeAllForResync(unsigned int) {}
+		void prepareResimAll(unsigned int) {}
+		void applyResimAll() {}
+		unsigned int consumeResimAnchorsAll() { return 0u; }
+		void setResimTriggerPolicy(TimeConfig::ResimTriggerPolicy) {}
 	};
 
 	using MockSystemsExec = NullSystemsExecutor<SimulatableList<MockSimulatable>, MockStaticData>;
 
 	using MockManager = SimulationManager<
-		MockExecutor, MockNetSync, MockReconciliation, MockSystemsExec, MockStorage, MockStaticData>;
+		MockExecutor, MockNetSync, MockInputResolution, MockReconciliation, MockSystemsExec,
+		MockStorage, MockStaticData>;
 
 	// Owns a storage + adapters + executor triple so the two paths in
 	// AdvanceFrameMatchesManagerPath each get an independent, identically-seeded rig.
@@ -284,16 +316,17 @@ TEST_CASE("CorrectionCache.AdvanceFrameMatchesManagerPath", "[CorrectionCache]")
 	constexpr int kSteps = 12;
 
 	// --- Path B: the real SimulationManager authority tick loop --------------
-	SimRig             managerRig;
-	MockNetSync        netSync;
-	MockReconciliation reconciliation;
-	MockSystemsExec    systemsExec;
+	SimRig               managerRig;
+	MockNetSync          netSync;
+	MockInputResolution  inputResolution;
+	MockReconciliation   reconciliation;
+	MockSystemsExec      systemsExec;
 
 	MockManager manager(
 		/*shouldRunPrediction=*/false,
 		/*tickFrequency (= fixed physics dt, per the ctor's own note)=*/ static_cast<double>(kDeltaSeconds),
 		MockManager::Params{
-			managerRig.executor, netSync, reconciliation, systemsExec,
+			managerRig.executor, netSync, inputResolution, reconciliation, systemsExec,
 			managerRig.storage, managerRig.staticData, nullptr });
 
 	TestCache managerCache(nullptr);
@@ -304,7 +337,9 @@ TEST_CASE("CorrectionCache.AdvanceFrameMatchesManagerPath", "[CorrectionCache]")
 
 	for (int i = 0; i < kSteps; ++i)
 	{
-		netSync.nextInputs = makeResolvedInputs(CounterInput{ accelForStep(i) });
+		// [item 87] Re-targeted off `netSync` onto `inputResolution` — the
+		// manager now reads `collectInputAll` from the resolution peer.
+		inputResolution.nextInputs = makeResolvedInputs(CounterInput{ accelForStep(i) });
 
 		// The production dispatch entry point (what FSimulationManagerAsyncCallback
 		// calls); with shouldRunPrediction=false it routes to the authority tick.

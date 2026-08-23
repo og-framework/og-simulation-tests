@@ -4,9 +4,9 @@
 #include <cstdint>
 
 #include "catch_amalgamated.hpp"
-#include "OGSimulation/Network/ClientInputDelayLine.h"
+#include "OGSimulation/Network/LocalInputCache.h"
 #include "OGSimulation/Network/ConnectionTierTable.h"
-#include "OGSimulation/Network/RelayedInputStore.h"   // [T5/AM-3] kRelayedInputStoreCapacityTicks
+#include "OGSimulation/Network/RemoteInputCache.h"   // [T5/AM-3] kRemoteInputCacheCapacityTicks
 #include "OGSimulation/Network/ReplicatedTierConsumer.h"
 #include "OGSimulation/Network/ServerInputDelayQueue.h"
 #include "OGSimulation/PCTimeManagement/TimeConfig.h"
@@ -33,7 +33,8 @@
 //   3. THE NO-TIER ARM (review amendment A2b). The two ends must agree during the
 //      window before a tier has replicated, and the ONLY way they can is if the
 //      client's no-tier fallback and the server's no-entry fallback apply the
-//      floor to the SAME base (`forcedInputLatencyTicks`) — not to tier 0.
+//      floor to the SAME base (`rttTierInputDelays[kMaxConnectionTierIndex]`,
+//      the worst tier, since item 62 / RN-12) — not to tier 0.
 //   4. THE A5 CLAMP, at both intake points and once more on read.
 //   5. THE BENIGN DELTA COLLAPSE. A dominating floor makes tier transitions
 //      report a zero delay delta, which is correct: felt delay did not change, so
@@ -122,13 +123,14 @@ TEST_CASE("RelayDelayFloor: the shipped default is 0 and every derivation is unc
 
     cfg.lanZeroDelayOverride = false;
 
-    // Both no-tier fallbacks answer the bare baseline, exactly as before.
+    // Both no-tier fallbacks answer the bare fallback (the worst tier), exactly
+    // as before.
     const ReplicatedTierConsumer consumer(cfg);
     REQUIRE_FALSE(consumer.hasReceivedTier());
-    REQUIRE(consumer.effectiveInputDelayTicks() == cfg.forcedInputLatencyTicks);
+    REQUIRE(consumer.effectiveInputDelayTicks() == cfg.rttTierInputDelays[kMaxConnectionTierIndex]);
 
     const TestQueue tierlessQueue(cfg);
-    REQUIRE(tierlessQueue.effectiveDelay(liveHandle(kConnA)) == cfg.forcedInputLatencyTicks);
+    REQUIRE(tierlessQueue.effectiveDelay(liveHandle(kConnA)) == cfg.rttTierInputDelays[kMaxConnectionTierIndex]);
 
     // applyRelayDelayFloor itself is the identity on every plausible base.
     for (int32_t base = 0; base <= 10; ++base)
@@ -200,24 +202,24 @@ TEST_CASE("RelayDelayFloor: a nonzero floor dominates lanZeroDelayOverride",
 //    tier has replicated, which is the window the C2 divergence bug lives in.
 // ---------------------------------------------------------------------------
 
-TEST_CASE("RelayDelayFloor: the no-tier arm floors forcedInputLatencyTicks, not tier 0",
+TEST_CASE("RelayDelayFloor: the no-tier arm floors the worst tier, not tier 0 (item 62 / RN-12)",
           "[Network][RelayDelayFloor]")
 {
     TimeConfig cfg;
-    cfg.relayDelayFloorTicks = 1;   // deliberately BELOW forcedInputLatencyTicks (2)
+    cfg.relayDelayFloorTicks = 1;   // deliberately BELOW the worst-tier fallback (4)
 
     const ReplicatedTierConsumer consumer(cfg);
     REQUIRE_FALSE(consumer.hasReceivedTier());
 
-    // The client's pre-arrival answer is max(floor, forced) = 2.
+    // The client's pre-arrival answer is max(floor, fallback) = 4.
     REQUIRE(consumer.effectiveInputDelayTicks()
-            == applyRelayDelayFloor(cfg.forcedInputLatencyTicks, cfg));
-    REQUIRE(consumer.effectiveInputDelayTicks() == cfg.forcedInputLatencyTicks);
+            == applyRelayDelayFloor(cfg.rttTierInputDelays[kMaxConnectionTierIndex], cfg));
+    REQUIRE(consumer.effectiveInputDelayTicks() == cfg.rttTierInputDelays[kMaxConnectionTierIndex]);
 
     // THE BUG THIS PINS: a recompute that dropped the no-tier arm would answer
     // tier 0's floored delay instead — max(1, 1) = 1 — while the server's
-    // no-entry fallback still answers 2. One tick of standing disagreement, on
-    // every client, for the whole pre-tier window.
+    // no-entry fallback still answers 4. Three ticks of standing disagreement,
+    // on every client, for the whole pre-tier window.
     REQUIRE(tierInputDelayTicks(0, cfg) != consumer.effectiveInputDelayTicks());
 
     // The server's two no-tier paths (no table wired / table has no entry) answer
@@ -236,7 +238,7 @@ TEST_CASE("RelayDelayFloor: a floor above the baseline raises BOTH ends' no-tier
           "[Network][RelayDelayFloor]")
 {
     TimeConfig cfg;
-    cfg.relayDelayFloorTicks = 8;   // above forcedInputLatencyTicks and every tier delay
+    cfg.relayDelayFloorTicks = 8;   // above the worst-tier fallback and every tier delay
 
     const ReplicatedTierConsumer consumer(cfg);
     const TestQueue tierlessQueue(cfg);
@@ -281,9 +283,9 @@ TEST_CASE("RelayDelayFloor: the floor moves the SERVER's park schedule, not just
 
     queue.enqueue<MockSimA>(slot0(addr), kCaptureTick, 42);
 
-    // Not due at the un-floored baseline...
+    // Not due at the un-floored fallback...
     REQUIRE_FALSE(queue.hasReadyForTick<MockSimA>(
-        slot0(addr), kCaptureTick + cfg.forcedInputLatencyTicks));
+        slot0(addr), kCaptureTick + cfg.rttTierInputDelays[kMaxConnectionTierIndex]));
     // ...nor one tick early...
     REQUIRE_FALSE(queue.hasReadyForTick<MockSimA>(
         slot0(addr), kCaptureTick + cfg.relayDelayFloorTicks - 1));
@@ -313,8 +315,10 @@ TEST_CASE("RelayDelayFloor: floor >= max tier delay collapses every path to one 
         maxTierDelay = cfg.rttTierInputDelays[tier] > maxTierDelay
             ? cfg.rttTierInputDelays[tier] : maxTierDelay;
     }
-    cfg.relayDelayFloorTicks = maxTierDelay > cfg.forcedInputLatencyTicks
-        ? maxTierDelay : cfg.forcedInputLatencyTicks;
+    // The no-tier fallback IS rttTierInputDelays[kMaxConnectionTierIndex] now
+    // (item 62 / RN-12), so it can never exceed maxTierDelay — the floor only
+    // needs to dominate the tier array itself.
+    cfg.relayDelayFloorTicks = maxTierDelay;
 
     // Path 1: every tier. Path 2: the LAN override. Path 3: the no-tier fallback,
     // on both ends. All three answer the identical D — no sender is advantaged by
@@ -341,15 +345,15 @@ TEST_CASE("RelayDelayFloor: the hard cap is DERIVED from the delay line and the 
     TimeConfig cfg;
 
     // [T5 / AM-3] The derivation is now over the SMALLER of BOTH ring capacities:
-    // the sender's ClientInputDelayLine and the receiver's RelayedInputStore. The
+    // the sender's LocalInputCache and the receiver's RemoteInputCache. The
     // receiver-side bound is the SAME inequality with the wire term set to zero
     // (`dA + rollbackWindowHardCap <= capacity + wire`) — see the full derivation
     // at relayDelayFloorHardCapTicks. Written symbolically, NOT against the literal
     // 44, so lowering either capacity moves the cap instead of invalidating this.
     const int32_t smallerCapacity =
-        static_cast<int32_t>(kClientInputDelayLineCapacityTicks < kRelayedInputStoreCapacityTicks
-                                 ? kClientInputDelayLineCapacityTicks
-                                 : kRelayedInputStoreCapacityTicks);
+        static_cast<int32_t>(kLocalInputCacheCapacityTicks < kRemoteInputCacheCapacityTicks
+                                 ? kLocalInputCacheCapacityTicks
+                                 : kRemoteInputCacheCapacityTicks);
 
     REQUIRE(relayDelayFloorHardCapTicks(cfg) == smallerCapacity - cfg.rollbackWindowHardCap);
     REQUIRE(relayDelayFloorHardCapTicks(cfg) == 44);
@@ -358,8 +362,8 @@ TEST_CASE("RelayDelayFloor: the hard cap is DERIVED from the delay line and the 
     // values — which is exactly why the arms below feed the derivation different
     // capacities rather than trusting the shipped ones.
     REQUIRE(relayDelayFloorHardCapTicks(cfg)
-            == relayDelayFloorHardCapForCapacities(kClientInputDelayLineCapacityTicks,
-                                                   kRelayedInputStoreCapacityTicks,
+            == relayDelayFloorHardCapForCapacities(kLocalInputCacheCapacityTicks,
+                                                   kRemoteInputCacheCapacityTicks,
                                                    cfg.rollbackWindowHardCap));
 
     // The invariant the cap exists to protect: an entry scheduled `floor` ticks out
@@ -480,7 +484,7 @@ TEST_CASE("RelayDelayFloor: a floor exactly at the cap is fully usable",
 
     // ...and the capture it schedules is still resident in a default delay line.
     REQUIRE(static_cast<std::size_t>(cfg.relayDelayFloorTicks + cfg.rollbackWindowHardCap)
-            <= ClientInputDelayLine<int>::kDefaultCapacityTicks);
+            <= LocalInputCache<int>::kDefaultCapacityTicks);
 }
 
 // ---------------------------------------------------------------------------
@@ -530,15 +534,15 @@ TEST_CASE("RelayDelayFloor: a floor CHANGE produces the delta the client stalls 
     TimeConfig cfg;
     ReplicatedTierConsumer consumer(cfg);
 
-    // --- no tier yet: the floor competes with forcedInputLatencyTicks ---------
+    // --- no tier yet: the floor competes with the worst-tier fallback --------
     const int32_t before = consumer.effectiveInputDelayTicks();
-    REQUIRE(before == cfg.forcedInputLatencyTicks);
+    REQUIRE(before == cfg.rttTierInputDelays[kMaxConnectionTierIndex]);
 
-    cfg.relayDelayFloorTicks = 1;                       // still below the baseline
+    cfg.relayDelayFloorTicks = 1;                       // still below the fallback
     REQUIRE(consumer.effectiveInputDelayTicks() - before == 0);     // no stall
 
     cfg.relayDelayFloorTicks = 6;                       // now dominating
-    REQUIRE(consumer.effectiveInputDelayTicks() - before == 6 - cfg.forcedInputLatencyTicks);
+    REQUIRE(consumer.effectiveInputDelayTicks() - before == 6 - cfg.rttTierInputDelays[kMaxConnectionTierIndex]);
     REQUIRE(consumer.effectiveInputDelayTicks() == 6);
 
     // A DECREASE reports a negative delta, which the stall path drops (the client
@@ -559,6 +563,67 @@ TEST_CASE("RelayDelayFloor: a floor CHANGE produces the delta the client stalls 
 
     cfg.relayDelayFloorTicks = tierDelay + 2;
     REQUIRE(consumer.effectiveInputDelayTicks() - beforeRise == 2);  // only the excess is paid
+}
+
+// ---------------------------------------------------------------------------
+// 7. THE FLOOR ADVISORY (item 62 / RN-12) — classifyRelayDelayFloor. WARN, NEVER
+//    ASSERT: floor 0 is the documented "scheduled regime OFF" mode, so it must
+//    stay silent. Every other bucket in the table gets its own case here so the
+//    check can actually fail if a boundary moves.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("RelayDelayFloor: classifyRelayDelayFloor — floor 0 is silent (documented off mode)",
+          "[Network][RelayDelayFloor]")
+{
+    TimeConfig cfg;
+    cfg.relayDelayFloorTicks = 0;
+    REQUIRE(classifyRelayDelayFloor(cfg) == RelayDelayFloorAdvisory::None);
+}
+
+TEST_CASE("RelayDelayFloor: classifyRelayDelayFloor — floor 1 warns (below the hiccup baseline, above off)",
+          "[Network][RelayDelayFloor]")
+{
+    // The one value that is neither off (0) nor a usable scheduled-regime floor
+    // (>= 2, the hiccup-absorption baseline relayDelayFloorTicks now documents).
+    TimeConfig cfg;
+    cfg.relayDelayFloorTicks = 1;
+    REQUIRE(classifyRelayDelayFloor(cfg) == RelayDelayFloorAdvisory::BelowHiccupBaseline);
+}
+
+TEST_CASE("RelayDelayFloor: classifyRelayDelayFloor — floors 2..<max tier delay are silent",
+          "[Network][RelayDelayFloor]")
+{
+    TimeConfig cfg;
+    const int32_t maxTierDelay = maxRttTierInputDelay(cfg);
+    REQUIRE(maxTierDelay == cfg.rttTierInputDelays[kMaxConnectionTierIndex]);   // today's tier table
+
+    for (int32_t floor = 2; floor < maxTierDelay; ++floor)
+    {
+        INFO("floor " << floor);
+        cfg.relayDelayFloorTicks = floor;
+        REQUIRE(classifyRelayDelayFloor(cfg) == RelayDelayFloorAdvisory::None);
+    }
+}
+
+TEST_CASE("RelayDelayFloor: classifyRelayDelayFloor — floor >= max(rttTierInputDelays) notes uniform-D",
+          "[Network][RelayDelayFloor]")
+{
+    TimeConfig cfg;
+    const int32_t maxTierDelay = maxRttTierInputDelay(cfg);
+
+    cfg.relayDelayFloorTicks = maxTierDelay;
+    REQUIRE(classifyRelayDelayFloor(cfg) == RelayDelayFloorAdvisory::UniformDFairnessActive);
+
+    // Above the max, still uniform-D — not a fourth bucket.
+    cfg.relayDelayFloorTicks = maxTierDelay + 5;
+    REQUIRE(classifyRelayDelayFloor(cfg) == RelayDelayFloorAdvisory::UniformDFairnessActive);
+
+    // THE HIGHEST-VALUE CASE: the shipped session floor (6, ini override) is
+    // uniform-D against today's tier table (max delay 4) — this is the config
+    // this advisory exists to surface, per RN-12.
+    REQUIRE(maxTierDelay == 4);
+    cfg.relayDelayFloorTicks = 6;
+    REQUIRE(classifyRelayDelayFloor(cfg) == RelayDelayFloorAdvisory::UniformDFairnessActive);
 }
 
 #endif // WITH_LOW_LEVEL_TESTS

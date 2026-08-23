@@ -40,7 +40,12 @@
 // diagnostic sink boundary ([Reconciliation][Desync]). The sink has no
 // production consumer until the Stage 4 hash-broadcast hookup, so this test
 // file is the only thing compiling that header.
+// Note on [InputResolution]: og-netcode-v2-input-relay item 86 (step 2 of the
+// input-resolution migration) — SimulationInputResolutionTest.cpp, which
+// constructs and drives the new SimulationInputResolution peer directly, with
+// no SimulationNetSync anywhere in that translation unit (the item's own
+// acceptance criterion).
 CATCH_REGISTER_TAG_ALIAS("[@og]",
-    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Network],[Reconciliation],[Determinism][Production],[SimulatableList],[StorageView],[SystemsExecutor],[CorrectionCache]")
+    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Network],[Reconciliation],[Determinism][Production],[SimulatableList],[StorageView],[SystemsExecutor],[CorrectionCache],[InputResolution]")
 
 #endif // WITH_LOW_LEVEL_TESTS

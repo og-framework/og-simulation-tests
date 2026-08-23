@@ -82,7 +82,8 @@ namespace
 
     // Puts `addr` in the tier table at tier 0 — a real entry, not an unknown
     // Address. The distinction matters: an unknown Address falls back to
-    // forcedInputLatencyTicks, a known tier-0 one uses rttTierInputDelays[0].
+    // rttTierInputDelays[kMaxConnectionTierIndex] (item 62 / RN-12's worst-tier
+    // fallback), a known tier-0 one uses rttTierInputDelays[0].
     void seedAtTierZero(TestTierTable& table, const FStandaloneTestHandle& addr)
     {
         table.onRttSample(addr, 0, 1.0);
@@ -204,11 +205,11 @@ TEST_CASE("DequeueRespectsTierDelay", "[Network][InputDelayQueue]")
         REQUIRE(queue.effectiveDelay(addr) == cfg.rttTierInputDelays[2]);
         REQUIRE(queue.hasReadyForTick<MockSimA>(slot0(addr), kCaptureTick + cfg.rttTierInputDelays[2]));
 
-        // The tier delay REPLACES the baseline (C2, locked) — it is NOT added to
-        // forcedInputLatencyTicks. This is the assertion that would catch a
+        // The tier delay REPLACES the fallback (C2, locked) — it is NOT added to
+        // the no-tier fallback. This is the assertion that would catch a
         // regression to additive semantics.
         REQUIRE(queue.effectiveDelay(addr)
-                != cfg.forcedInputLatencyTicks + cfg.rttTierInputDelays[2]);
+                != cfg.rttTierInputDelays[kMaxConnectionTierIndex] + cfg.rttTierInputDelays[2]);
         // [T26] Under due-or-overdue release readiness holds at the due tick AND
         // after, so the additive tick (100 + 2 + 3) is now also "ready" — the
         // additive regression is instead caught by readiness arriving at the
@@ -316,14 +317,14 @@ TEST_CASE("UnknownAddressYieldsNoDequeue", "[Network][InputDelayQueue]")
     REQUIRE(queue.connectionCount() == 1u);
 
     // An Address unknown to the TIER TABLE (as opposed to the queue) is the
-    // other fallback path: it gets the flat baseline, not tier 0's delay.
+    // other fallback path: it gets the worst-tier fallback, not tier 0's delay.
     REQUIRE(tierTable.hasEntry(unknown) == false);
-    REQUIRE(queue.effectiveDelay(unknown) == cfg.forcedInputLatencyTicks);
+    REQUIRE(queue.effectiveDelay(unknown) == cfg.rttTierInputDelays[kMaxConnectionTierIndex]);
 
     // ...and with no tier table wired at all, every Address does.
     TestQueue tierlessQueue(cfg);
     REQUIRE(tierlessQueue.hasTierTable() == false);
-    REQUIRE(tierlessQueue.effectiveDelay(known) == cfg.forcedInputLatencyTicks);
+    REQUIRE(tierlessQueue.effectiveDelay(known) == cfg.rttTierInputDelays[kMaxConnectionTierIndex]);
 }
 
 TEST_CASE("TierChangeUpdatesEffectiveDelay", "[Network][InputDelayQueue]")

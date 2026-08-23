@@ -4,7 +4,7 @@
 #include "catch_amalgamated.hpp"
 
 #include "OGSimulation/Network/RelayReadProbe.h"
-#include "OGSimulation/Network/RelayedInputStore.h"
+#include "OGSimulation/Network/RemoteInputCache.h"
 #include "OGSimulation/RelayedInputRingCodec.h"
 #include "OGSimulation/SimulationFieldDescriptors.h"
 #include "OGSimulation/SimulationNetSync.h"      // resolveScheduledRelayedInput
@@ -47,14 +47,14 @@
 //      inputs to the no-report call on every rung.
 //
 // These run against the REAL production types — the real store, the real codec, the
-// real `populateRelayedInputStore` and the real ladder. The only thing standing in
+// real `populateRemoteInputCache` and the real ladder. The only thing standing in
 // for production is the byte buffer behind the ring (a std::vector rather than the
 // USTRUCT's TArray), per the codec's BUFFER CONCEPT.
 //////////////////////////////////////////////////////////////////////////////
 
 namespace
 {
-    // Same load-bearing asymmetry RelayedInputStoreTest.cpp uses: `forward` is 0
+    // Same load-bearing asymmetry RemoteInputCacheTest.cpp uses: `forward` is 0
     // when value-initialised and 1 in the "game zero", so an assertion can tell the
     // injected neutral from `InputT{}`.
     struct ProbeTestInput
@@ -139,7 +139,7 @@ namespace
     // then hands back the classification. Every outcome case below goes through
     // this, so "the report pointer does not change the answer" is asserted on every
     // rung rather than once.
-    ScheduledRelayedReadOutcome classify(const RelayedInputStore<ProbeTestInput>& store,
+    ScheduledRelayedReadOutcome classify(const RemoteInputCache<ProbeTestInput>& store,
                                          std::uint32_t                            tick,
                                          ProbeTestInput&                          outInput)
     {
@@ -161,7 +161,7 @@ namespace
 TEST_CASE("RelayProbe: rung 0 reports NoProbe, and it is NOT a miss",
           "[Network][RelayProbe]")
 {
-    const RelayedInputStore<ProbeTestInput> store(gameZero());
+    const RemoteInputCache<ProbeTestInput> store(gameZero());
 
     ProbeTestInput served;
     REQUIRE(classify(store, 500u, served) == ScheduledRelayedReadOutcome::NoProbe);
@@ -176,7 +176,7 @@ TEST_CASE("RelayProbe: rung 0 reports NoProbe, and it is NOT a miss",
 TEST_CASE("RelayProbe: a scheduled read whose stamp verifies reports Hit",
           "[Network][RelayProbe]")
 {
-    RelayedInputStore<ProbeTestInput> store(gameZero());
+    RemoteInputCache<ProbeTestInput> store(gameZero());
 
     // dLatest = 4, and the entry at tick 104-4 = 100 carries the SAME stamp.
     store.push(100u, 4u, tagged(100));
@@ -197,7 +197,7 @@ TEST_CASE("RelayProbe: a scheduled read whose stamp verifies reports Hit",
 TEST_CASE("RelayProbe: a probe that finds nothing reports Miss (starvation)",
           "[Network][RelayProbe]")
 {
-    RelayedInputStore<ProbeTestInput> store(gameZero());
+    RemoteInputCache<ProbeTestInput> store(gameZero());
     store.push(104u, 4u, tagged(104));
 
     // Read tick 110 probes capture 106, which is not resident and does not alias
@@ -218,7 +218,7 @@ TEST_CASE("RelayProbe: a probe that finds nothing reports Miss (starvation)",
 TEST_CASE("RelayProbe: a candidate stamped against a STALE delay reports VerifyFail, not Miss",
           "[Network][RelayProbe]")
 {
-    RelayedInputStore<ProbeTestInput> store(gameZero());
+    RemoteInputCache<ProbeTestInput> store(gameZero());
 
     // THE DELAY REGIME SHIFTED. Capture 100 was relayed while the wire was held at
     // dA=2; by the time capture 104 arrived the server had moved the wire to dA=4.
@@ -253,7 +253,7 @@ TEST_CASE("RelayProbe: a candidate stamped against a STALE delay reports VerifyF
 TEST_CASE("RelayProbe: the tick < dA underflow guard reports Miss, not NoProbe",
           "[Network][RelayProbe]")
 {
-    RelayedInputStore<ProbeTestInput> store(gameZero());
+    RemoteInputCache<ProbeTestInput> store(gameZero());
     store.push(1u, 8u, tagged(1));
 
     // A session younger than the delay: no probe tick can be formed. Data HAS
@@ -1213,11 +1213,11 @@ TEST_CASE("RelayProbe: the archived poisoned windows report healthy loss under t
 TEST_CASE("RelayProbe: the ingest report carries the newest capture tick THIS ring held",
           "[Network][RelayProbe]")
 {
-    RelayedInputStore<ProbeTestInput> store(gameZero());
+    RemoteInputCache<ProbeTestInput> store(gameZero());
     const ProbeTestRing ring = makeRing({ 100u, 101u, 102u }, /*dA=*/3u, /*depth=*/3);
 
     const RelayedInputIngestReport report =
-        populateRelayedInputStore<ProbeTestInput>(store, ring);
+        populateRemoteInputCache<ProbeTestInput>(store, ring);
 
     REQUIRE(report.outcome == RelayedInputIngestOutcome::Consumed);
     REQUIRE(report.entriesIngested == 3u);
@@ -1230,7 +1230,7 @@ TEST_CASE("RelayProbe: the ingest report carries the newest capture tick THIS ri
     // a stalled sender look like a healthy one whose gap is always 0.
     const ProbeTestRing restamp = makeRing({ 101u }, /*dA=*/9u, /*depth=*/1);
     const RelayedInputIngestReport second =
-        populateRelayedInputStore<ProbeTestInput>(store, restamp);
+        populateRemoteInputCache<ProbeTestInput>(store, restamp);
 
     REQUIRE(second.newestCaptureTickValid);
     REQUIRE(second.newestCaptureTick == 101u);
@@ -1246,19 +1246,19 @@ TEST_CASE("RelayProbe: the ingest report counts NEW capture ticks, not entries p
     // again. Feeding that to the loss counter would credit re-delivery as new
     // coverage and hide real loss; feeding a constant 1 charges the burst rate as
     // loss. Only "ticks this arrival made newly resident" is neither.
-    RelayedInputStore<ProbeTestInput> store(gameZero());
+    RemoteInputCache<ProbeTestInput> store(gameZero());
 
     // A three-entry flush round: all three are new.
     const ProbeTestRing first = makeRing({ 400u, 401u, 402u }, /*dA=*/2u, /*depth=*/3);
     const RelayedInputIngestReport a =
-        populateRelayedInputStore<ProbeTestInput>(store, first);
+        populateRemoteInputCache<ProbeTestInput>(store, first);
     REQUIRE(a.entriesIngested == 3u);
     REQUIRE(a.newCaptureTicksIngested == 3u);
 
     // THE SAME RING AGAIN — the shape a suppressed-but-still-OnRep'd round, or a
     // re-replication, produces. Three entries are pushed again and NOTHING is new.
     const RelayedInputIngestReport b =
-        populateRelayedInputStore<ProbeTestInput>(store, first);
+        populateRemoteInputCache<ProbeTestInput>(store, first);
     REQUIRE(b.entriesIngested == 3u);
     REQUIRE(b.newCaptureTicksIngested == 0u);
 
@@ -1267,7 +1267,7 @@ TEST_CASE("RelayProbe: the ingest report counts NEW capture ticks, not entries p
     // counter may subtract.
     const ProbeTestRing overlap = makeRing({ 402u, 403u, 404u }, /*dA=*/2u, /*depth=*/3);
     const RelayedInputIngestReport c =
-        populateRelayedInputStore<ProbeTestInput>(store, overlap);
+        populateRemoteInputCache<ProbeTestInput>(store, overlap);
     REQUIRE(c.entriesIngested == 3u);
     REQUIRE(c.newCaptureTicksIngested == 2u);
     REQUIRE(c.newestCaptureTick == 404u);
@@ -1277,7 +1277,7 @@ TEST_CASE("RelayProbe: the ingest report counts NEW capture ticks, not entries p
     // no capture tick it did not already have.
     const ProbeTestRing restamp = makeRing({ 403u }, /*dA=*/9u, /*depth=*/1);
     const RelayedInputIngestReport d =
-        populateRelayedInputStore<ProbeTestInput>(store, restamp);
+        populateRemoteInputCache<ProbeTestInput>(store, restamp);
     REQUIRE(d.entriesIngested == 1u);
     REQUIRE(d.newCaptureTicksIngested == 0u);
 }
@@ -1285,14 +1285,14 @@ TEST_CASE("RelayProbe: the ingest report counts NEW capture ticks, not entries p
 TEST_CASE("RelayProbe: a ring that delivered nothing reports no newest capture tick",
           "[Network][RelayProbe]")
 {
-    RelayedInputStore<ProbeTestInput> store(gameZero());
+    RemoteInputCache<ProbeTestInput> store(gameZero());
 
     // NEVER WRITTEN — version byte 0. Nothing was read, so there is no newest tick,
     // and the flag (rather than a 0 sentinel) is what says so: 0 is a perfectly
     // ordinary capture tick.
     const ProbeTestRing empty;
     const RelayedInputIngestReport neverWritten =
-        populateRelayedInputStore<ProbeTestInput>(store, empty);
+        populateRemoteInputCache<ProbeTestInput>(store, empty);
     REQUIRE(neverWritten.outcome == RelayedInputIngestOutcome::NeverWritten);
     REQUIRE_FALSE(neverWritten.newestCaptureTickValid);
 
@@ -1302,7 +1302,7 @@ TEST_CASE("RelayProbe: a ring that delivered nothing reports no newest capture t
     bad.bytes[relayedInputRing::kVersionOffset] =
         static_cast<std::uint8_t>(relayedInputRing::kWireFormatVersion + 1u);
     const RelayedInputIngestReport mismatch =
-        populateRelayedInputStore<ProbeTestInput>(store, bad);
+        populateRemoteInputCache<ProbeTestInput>(store, bad);
     REQUIRE(mismatch.outcome == RelayedInputIngestOutcome::VersionMismatch);
     REQUIRE_FALSE(mismatch.newestCaptureTickValid);
 }
@@ -1310,7 +1310,7 @@ TEST_CASE("RelayProbe: a ring that delivered nothing reports no newest capture t
 TEST_CASE("RelayProbe: the ingest report drives the cadence probe end to end",
           "[Network][RelayProbe]")
 {
-    RelayedInputStore<ProbeTestInput> store(gameZero());
+    RemoteInputCache<ProbeTestInput> store(gameZero());
     RelayArrivalProbe                 probe(/*windowSamples=*/3u);
     RelayArrivalWindowSummary         summary;
 
@@ -1324,7 +1324,7 @@ TEST_CASE("RelayProbe: the ingest report drives the cadence probe end to end",
     {
         const ProbeTestRing ring = makeRing({ captureTick }, /*dA=*/2u, /*depth=*/1);
         const RelayedInputIngestReport report =
-            populateRelayedInputStore<ProbeTestInput>(store, ring);
+            populateRemoteInputCache<ProbeTestInput>(store, ring);
 
         REQUIRE(report.newestCaptureTickValid);
         // [T34 loss-counter fix] BOTH probe inputs come from the report — the
@@ -1387,7 +1387,7 @@ namespace
     // Classifies a read and hands back the whole report, having first asserted that
     // asking for the report did not change the answer. Same contract as `classify`
     // above, widened to the T20 fields.
-    ScheduledRelayedReadReport classifyFully(const RelayedInputStore<ProbeTestInput>& store,
+    ScheduledRelayedReadReport classifyFully(const RemoteInputCache<ProbeTestInput>& store,
                                              std::uint32_t                            tick,
                                              ProbeTestInput&                          outInput)
     {
@@ -1409,7 +1409,7 @@ namespace
 TEST_CASE("RelayMissClass: an empty store has no resident span",
           "[Network][RelayMissClass]")
 {
-    const RelayedInputStore<ProbeTestInput> store(gameZero());
+    const RemoteInputCache<ProbeTestInput> store(gameZero());
 
     const auto span = store.residentSpan();
     REQUIRE_FALSE(span.valid);
@@ -1419,7 +1419,7 @@ TEST_CASE("RelayMissClass: an empty store has no resident span",
 TEST_CASE("RelayMissClass: the resident span reports oldest, newest and count",
           "[Network][RelayMissClass]")
 {
-    RelayedInputStore<ProbeTestInput> store(gameZero());
+    RemoteInputCache<ProbeTestInput> store(gameZero());
     store.push(300u, 2u, tagged(300));
     store.push(305u, 2u, tagged(305));
     store.push(301u, 2u, tagged(301));
@@ -1436,7 +1436,7 @@ TEST_CASE("RelayMissClass: the resident span reports oldest, newest and count",
     REQUIRE(store.findLatest().captureTick == span.newest);
 
     // A single entry is a degenerate span, not an invalid one.
-    RelayedInputStore<ProbeTestInput> one(gameZero());
+    RemoteInputCache<ProbeTestInput> one(gameZero());
     one.push(42u, 0u, tagged(42));
     const auto single = one.residentSpan();
     REQUIRE(single.valid);
@@ -1455,13 +1455,13 @@ TEST_CASE("RelayMissClass: rung 0 and hit and verify-fail are NOT misses",
     ProbeTestInput served;
 
     // CLASS 1 — rung 0. No probe, no span, no delta.
-    const RelayedInputStore<ProbeTestInput> empty(gameZero());
+    const RemoteInputCache<ProbeTestInput> empty(gameZero());
     const ScheduledRelayedReadReport rung0 = classifyFully(empty, 500u, served);
     REQUIRE(rung0.outcome == ScheduledRelayedReadOutcome::NoProbe);
     REQUIRE(rung0.missClass == ScheduledRelayedReadMissClass::NotAMiss);
     REQUIRE_FALSE(rung0.deltaToNewestValid);
 
-    RelayedInputStore<ProbeTestInput> store(gameZero());
+    RemoteInputCache<ProbeTestInput> store(gameZero());
     store.push(100u, 4u, tagged(100));
     store.push(104u, 4u, tagged(104));
 
@@ -1476,7 +1476,7 @@ TEST_CASE("RelayMissClass: rung 0 and hit and verify-fail are NOT misses",
     // CLASS 3 — verify-fail. Capture 200 was relayed while the wire was held at
     // dA=2; by the time 204 arrived the server had moved to dA=4. The read at 204
     // therefore probes 200 — RESIDENT, but stamped against a schedule that has moved.
-    RelayedInputStore<ProbeTestInput> shifted(gameZero());
+    RemoteInputCache<ProbeTestInput> shifted(gameZero());
     shifted.push(200u, 2u, tagged(200));
     shifted.push(204u, 4u, tagged(204));
     const ScheduledRelayedReadReport verify = classifyFully(shifted, 204u, served);
@@ -1489,7 +1489,7 @@ TEST_CASE("RelayMissClass: rung 0 and hit and verify-fail are NOT misses",
 TEST_CASE("RelayMissClass: a hole INSIDE the resident span is missInSpan",
           "[Network][RelayMissClass]")
 {
-    RelayedInputStore<ProbeTestInput> store(gameZero());
+    RemoteInputCache<ProbeTestInput> store(gameZero());
 
     // THE COVERAGE HOLE. 100 and 104 arrived; 102 never did. 102 % 64 = 38, and
     // neither 100 % 64 = 36 nor 104 % 64 = 40 aliases it, so this is a genuine
@@ -1520,7 +1520,7 @@ TEST_CASE("RelayMissClass: a hole INSIDE the resident span is missInSpan",
 TEST_CASE("RelayMissClass: asking newer than anything resident is missAboveNewest",
           "[Network][RelayMissClass]")
 {
-    RelayedInputStore<ProbeTestInput> store(gameZero());
+    RemoteInputCache<ProbeTestInput> store(gameZero());
     store.push(100u, 4u, tagged(100));
     store.push(104u, 4u, tagged(104));
 
@@ -1541,7 +1541,7 @@ TEST_CASE("RelayMissClass: asking newer than anything resident is missAboveNewes
 TEST_CASE("RelayMissClass: asking older than anything resident is missBelowOldest",
           "[Network][RelayMissClass]")
 {
-    RelayedInputStore<ProbeTestInput> store(gameZero());
+    RemoteInputCache<ProbeTestInput> store(gameZero());
 
     // The store holds 200 and 204 only; the read at 150 probes 146. 146 % 64 = 18,
     // 200 % 64 = 8, 204 % 64 = 12 — no aliasing, so the absence is real.
@@ -1562,7 +1562,7 @@ TEST_CASE("RelayMissClass: asking older than anything resident is missBelowOldes
 TEST_CASE("RelayMissClass: the tick < dA underflow guard is its OWN class, not belowOldest",
           "[Network][RelayMissClass]")
 {
-    RelayedInputStore<ProbeTestInput> store(gameZero());
+    RemoteInputCache<ProbeTestInput> store(gameZero());
     store.push(1u, 8u, tagged(1));
 
     // T19 pins this as a Miss rather than rung 0 and that is unchanged. T20 adds the
@@ -1587,17 +1587,17 @@ TEST_CASE("RelayMissClass: the tick < dA underflow guard is its OWN class, not b
 TEST_CASE("RelayMissClass: at DEPTH 1 a clobbered tick is still INSIDE the store's span",
           "[Network][RelayMissClass]")
 {
-    RelayedInputStore<ProbeTestInput> store(gameZero());
+    RemoteInputCache<ProbeTestInput> store(gameZero());
 
     // TWO ARRIVALS OF A DEPTH-1 RING, exactly as the shipped configuration produces
     // them: the server wrote capture 100, replicated, then wrote 101 and 102 before
     // the next replication — so 101 was clobbered and never transmitted, and the
     // client's store ends up holding 100 and 102 with a hole at 101.
     const ProbeTestRing first = makeRing({ 100u }, /*dA=*/2u, /*depth=*/1);
-    REQUIRE(populateRelayedInputStore<ProbeTestInput>(store, first).entriesIngested == 1u);
+    REQUIRE(populateRemoteInputCache<ProbeTestInput>(store, first).entriesIngested == 1u);
 
     const ProbeTestRing second = makeRing({ 101u, 102u }, /*dA=*/2u, /*depth=*/1);
-    REQUIRE(populateRelayedInputStore<ProbeTestInput>(store, second).entriesIngested == 1u);
+    REQUIRE(populateRemoteInputCache<ProbeTestInput>(store, second).entriesIngested == 1u);
 
     // THE RING CARRIED ONE ENTRY. THE STORE SPANS THREE TICKS. If the classification
     // read the RING's span it would see a single tick, every miss would land outside
@@ -1627,7 +1627,7 @@ TEST_CASE("RelayMissClass: the four miss sub-counters always partition `miss`",
 {
     RelayReadProbe probe;
 
-    RelayedInputStore<ProbeTestInput> store(gameZero());
+    RemoteInputCache<ProbeTestInput> store(gameZero());
     store.push(100u, 4u, tagged(100));
     store.push(104u, 4u, tagged(104));
 
@@ -1642,13 +1642,13 @@ TEST_CASE("RelayMissClass: the four miss sub-counters always partition `miss`",
     }
 
     // ...and one belowOldest and one noProbeTick, each from a store that can make it.
-    RelayedInputStore<ProbeTestInput> far(gameZero());
+    RemoteInputCache<ProbeTestInput> far(gameZero());
     far.push(200u, 4u, tagged(200));
     ScheduledRelayedReadReport below;
     resolveScheduledRelayedInput(far, 150u, &below);
     probe.notePredictionRead(7u, below);
 
-    RelayedInputStore<ProbeTestInput> young(gameZero());
+    RemoteInputCache<ProbeTestInput> young(gameZero());
     young.push(1u, 8u, tagged(1));
     ScheduledRelayedReadReport underflow;
     resolveScheduledRelayedInput(young, 3u, &underflow);
@@ -1672,7 +1672,7 @@ TEST_CASE("RelayMissClass: prediction and resim keep SEPARATE miss classes and d
 {
     RelayReadProbe probe;
 
-    RelayedInputStore<ProbeTestInput> store(gameZero());
+    RemoteInputCache<ProbeTestInput> store(gameZero());
     store.push(100u, 4u, tagged(100));
     store.push(104u, 4u, tagged(104));
 
