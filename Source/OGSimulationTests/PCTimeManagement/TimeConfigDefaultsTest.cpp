@@ -122,8 +122,10 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     // replaced the level-triggered resim gate with an edge-triggered one and shipped
     // it DEFAULTED TO REPRODUCE THE OLD OBSERVABLE BEHAVIOUR, so that nothing
     // changes by default and the mechanism can be validated separately from the
-    // policy. Flipping this to `OnDisagreement` is backlog item 46 and is
-    // HARD-BLOCKED on item 30 (a non-degenerate verdict): with today's
+    // policy. Flipping this to `OnDisagreement` is backlog item 46, SEQUENCED
+    // AFTER item 30 (a non-degenerate verdict) rather than blocked by it —
+    // item 30, ruled 2026-08-12: "no longer a blocker ... do not re-file this
+    // as blocking anything". The sequencing is a cost argument: with the
     // always-false verdict, "disagrees" is EVERY landing, which is the modelled
     // 3-6x sustained physics-cost storm of design §4.
     //
