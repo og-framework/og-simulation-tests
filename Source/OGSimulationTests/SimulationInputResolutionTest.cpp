@@ -249,7 +249,7 @@ TEST_CASE("SimulationInputResolution.LocalCharacterCollectInputAllRunsTheProvide
     REQUIRE(inputFor(inputs, kLocalId).value == 7);
 
     // The tick push actually allocated a slot in a REAL reconciliation
-    // instance — findInputCache is non-null and the ref for this tick is
+    // instance — findCorrectionCache is non-null and the ref for this tick is
     // NoRef (a slot exists, nothing has corrected it yet).
     const AppliedCaptureRef ref =
         rig.reconciliation.getAppliedCaptureTickRef<MockSimulatable>(kLocalId, 10u);
@@ -352,12 +352,12 @@ TEST_CASE("SimulationInputResolution.AuthorityQueueUnderrunSubstitutesTheInjecte
 // [item 94] ⚠ THE FAILURE MODE THIS WINDOW PRODUCES HAS CHANGED, THE WINDOW
 // HAS NOT. Frontier allocation moved to `SimulationReconciliation::
 // allocateFrontierSlotsAll`, which no longer reads `queueMap` at all — it
-// filters on `findInputCache<T>(id) != nullptr` directly, and item 92's loud
+// filters on `findCorrectionCache<T>(id) != nullptr` directly, and item 92's loud
 // `OG_CHECK` guard is DELETED along with the resolution-side sweep that used
 // to carry it (traded away, priced at `allocateFrontierSlotsAll`'s own
 // banner). So this same window (an authority id exposed to storage before it
 // has a cache — no cache ever, on this role) is now a SILENT SKIP, not a
-// crash: `findInputCache` answers nullptr and the sweep moves on. The
+// crash: `findCorrectionCache` answers nullptr and the sweep moves on. The
 // registration-ordering invariant (`registerAuthorityOwner` before
 // `storage.add`) is STILL worth keeping — it protects sweep 1's own
 // `queueMap`-based branch dispatch in `collectInputForCharacter`, a
@@ -405,7 +405,7 @@ TEST_CASE("SimulationInputResolution.RegistrationWindowLeavesAnAuthorityIdWithNo
     // load-bearing here.) This is exactly the state that made pre-94's
     // pushPredictionTick's getCacheFor(id).at(id) throw, and is now the state
     // the filter silently skips.
-    REQUIRE(rig.reconciliation.findInputCache<MockSimulatable>(kWindowId) == nullptr);
+    REQUIRE(rig.reconciliation.findCorrectionCache<MockSimulatable>(kWindowId) == nullptr);
 }
 
 // The other side of the same window: the FIXED ordering (registerAuthority
@@ -453,7 +453,7 @@ TEST_CASE("SimulationInputResolution.AuthorityCharacterRegisteredBeforeStorageEx
     // accessor to probe one through. The absence of a cache is itself the
     // proof; `allocateFrontierSlotsAll` returning without throwing (the line
     // above) is what confirms the filter reached that conclusion safely.
-    REQUIRE(rig.reconciliation.findInputCache<MockSimulatable>(kOrderedId) == nullptr);
+    REQUIRE(rig.reconciliation.findCorrectionCache<MockSimulatable>(kOrderedId) == nullptr);
 }
 
 // ---------------------------------------------------------------------------
@@ -490,7 +490,7 @@ TEST_CASE("SimulationInputResolution.AuthorityCharacterRegisteredBeforeStorageEx
 //
 // [item 94] ⚠ THE FAILURE MODE THIS WINDOW PRODUCES HAS CHANGED, THE SAME WAY
 // item 92's pair's did (see that section's own item-94 paragraph): the
-// nullable `findInputCache` filter on `allocateFrontierSlotsAll` silently
+// nullable `findCorrectionCache` filter on `allocateFrontierSlotsAll` silently
 // skips this window's exposed-but-cache-less id instead of falling through to
 // a throwing `.at(id)` — no guard left to test the precondition of, and the
 // case below pins the precondition itself instead.
@@ -532,7 +532,7 @@ TEST_CASE("SimulationInputResolution.UnregistrationWindowLeavesAnAuthorityIdInSt
     // skips. (queueMap no longer matters to this sweep at all — only listed
     // here as the historical trigger.)
     REQUIRE(rig.storage.has<MockSimulatable>(kUnregWindowId));
-    REQUIRE(rig.reconciliation.findInputCache<MockSimulatable>(kUnregWindowId) == nullptr);
+    REQUIRE(rig.reconciliation.findCorrectionCache<MockSimulatable>(kUnregWindowId) == nullptr);
 }
 
 // The other side of the same window: the FIXED ordering (storage.remove
@@ -1112,7 +1112,7 @@ TEST_CASE("SimulationInputResolution.CollectThenAllocateStallStepResolvesInputBu
 // `queueMap` early-return would surface as a wrongly-allocated `NoRef`
 // instead of silently reading `NoSlot` for the right reason by accident.
 // Post-94 that setup would be actively WRONG: the filter IS cache existence
-// now (`findInputCache<T>(id) != nullptr`), so giving an authority id a
+// now (`findCorrectionCache<T>(id) != nullptr`), so giving an authority id a
 // cache would make `allocateFrontierSlotsAll` correctly, legitimately
 // allocate a slot for it — not a regression, a direct contradiction of the
 // case's own premise ("prediction-owned id" ⇔ "id with a cache", item 94's
@@ -1247,7 +1247,7 @@ TEST_CASE("SimulationInputResolution.CacheOutlivesStorageWindowIsNotSweptByAlloc
     rig.reconciliation.allocateFrontierSlotsAll(firstStep);
     rig.reconciliation.postPredictionAll(firstStep);
 
-    const auto* cacheBefore = rig.reconciliation.findInputCache<MockSimulatable>(kMidTeardownId);
+    const auto* cacheBefore = rig.reconciliation.findCorrectionCache<MockSimulatable>(kMidTeardownId);
     REQUIRE(cacheBefore != nullptr);
     REQUIRE_FALSE(cacheBefore->getDiagnostics().frontierSlotAwaitingState());
     REQUIRE(rig.reconciliation.getAppliedCaptureTickRef<MockSimulatable>(kMidTeardownId, 80u).kind
@@ -1258,7 +1258,7 @@ TEST_CASE("SimulationInputResolution.CacheOutlivesStorageWindowIsNotSweptByAlloc
     // which would erase it, has not run yet).
     rig.storage.remove<MockSimulatable>(kMidTeardownId);
     REQUIRE_FALSE(rig.storage.has<MockSimulatable>(kMidTeardownId));
-    REQUIRE(rig.reconciliation.findInputCache<MockSimulatable>(kMidTeardownId) != nullptr);
+    REQUIRE(rig.reconciliation.findCorrectionCache<MockSimulatable>(kMidTeardownId) != nullptr);
 
     // A further tick's collect + allocate — both storage-driven — must not
     // touch this id at all: NOT SWEPT.
@@ -1269,7 +1269,7 @@ TEST_CASE("SimulationInputResolution.CacheOutlivesStorageWindowIsNotSweptByAlloc
 
     // ARMS NOTHING: the detector bit is exactly as it was before this window
     // — untouched, not merely false again by coincidence.
-    const auto* cacheAfter = rig.reconciliation.findInputCache<MockSimulatable>(kMidTeardownId);
+    const auto* cacheAfter = rig.reconciliation.findCorrectionCache<MockSimulatable>(kMidTeardownId);
     REQUIRE(cacheAfter != nullptr);
     REQUIRE_FALSE(cacheAfter->getDiagnostics().frontierSlotAwaitingState());
 
