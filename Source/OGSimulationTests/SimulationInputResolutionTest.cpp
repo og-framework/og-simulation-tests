@@ -1287,4 +1287,77 @@ TEST_CASE("SimulationInputResolution.CacheOutlivesStorageWindowIsNotSweptByAlloc
     rig.reconciliation.removeCacheFor<MockSimulatable>(kMidTeardownId);
 }
 
+
+// ---------------------------------------------------------------------------
+// THE LOCAL-INPUT-CACHE READ SEAM on this peer's diagnostic view:
+// `getDiagnostics().localInputCache<T>(id)`.
+//
+// The precedent for the shape of this case is named in
+// `docs/DiagnosticsConventions.md` §5 —
+//     ResimGate.Policy.TheResimGateProbeAccessorObservesTheShippedFeed
+// — an accessor must be shown to observe the REAL feed, not merely to compile.
+// The feed here is `collectInputAll`'s own `delayLine.push(tick, capture)`: the
+// provider values below are never written through the seam, only read back
+// through it, and the pointer is re-fetched each time so a live view is
+// distinguishable from a snapshot.
+//
+// ABSENCE IS THE OTHER HALF. A line exists for exactly the provider-owning ids
+// (`registerLocalCharacter` creates it, `unregisterCharacter` erases it), so an
+// unknown id, a relay-only proxy and an unregistered id must all answer nullptr
+// rather than throw — `m_localInputCaches` is reached with `find`, never `.at`.
+// ---------------------------------------------------------------------------
+TEST_CASE("SimulationInputResolution.TheLocalInputCacheAccessorObservesTheShippedCaptureFeed",
+    "[InputResolution]")
+{
+    ResolutionRig rig;
+
+    // Before registration there is no line at all.
+    REQUIRE(rig.resolution.getDiagnostics().localInputCache<MockSimulatable>(kLocalId) == nullptr);
+
+    rig.storage.add<MockSimulatable>(kLocalId, MockSimulatable{});
+    rig.reconciliation.createCacheFor<MockSimulatable>(kLocalId);
+
+    // A provider whose value THIS CASE changes between ticks — a constant one
+    // could not tell a live read from a value baked in at registration.
+    std::int32_t providerValue = 0;
+    rig.resolution.registerLocalCharacter<MockSimulatable>(kLocalId,
+        [&providerValue](const SimulationTimeStep&, const LocalInputCache<MockInput>&) {
+            return MockInput{ providerValue };
+        });
+
+    REQUIRE(rig.resolution.getDiagnostics().localInputCache<MockSimulatable>(kLocalId) != nullptr);
+    REQUIRE(rig.resolution.getDiagnostics().localInputCache<MockSimulatable>(kLocalId)->residentCount() == 0u);
+
+    providerValue = 7;
+    const auto firstStep = normalStep(10u);
+    rig.resolution.collectInputAll(firstStep);
+    rig.reconciliation.allocateFrontierSlotsAll(firstStep);
+    rig.reconciliation.postPredictionAll(firstStep);
+
+    REQUIRE(rig.resolution.getDiagnostics().localInputCache<MockSimulatable>(kLocalId)->has(10));
+    REQUIRE(rig.resolution.getDiagnostics().localInputCache<MockSimulatable>(kLocalId)->at(10).value == 7);
+
+    providerValue = -3;
+    const auto secondStep = normalStep(11u);
+    rig.resolution.collectInputAll(secondStep);
+    rig.reconciliation.allocateFrontierSlotsAll(secondStep);
+    rig.reconciliation.postPredictionAll(secondStep);
+
+    // The second tick is visible through the same seam, and the first is still
+    // there: a per-tick history, not a latest-capture scalar.
+    const auto* line = rig.resolution.getDiagnostics().localInputCache<MockSimulatable>(kLocalId);
+    REQUIRE(line->at(11).value == -3);
+    REQUIRE(line->at(10).value == 7);
+    REQUIRE(line->residentCount() == 2u);
+
+    // A relay-only proxy owns no capture of its own, so it gets no line — the
+    // exact complement `registerRemoteCharacter` maintains.
+    rig.resolution.registerRemoteCharacter<MockSimulatable>(kRemoteId);
+    REQUIRE(rig.resolution.getDiagnostics().localInputCache<MockSimulatable>(kRemoteId) == nullptr);
+
+    // The lifetime mirrors `m_localInputCaches`: unregistration erases the line.
+    rig.resolution.unregisterCharacter<MockSimulatable>(kLocalId);
+    REQUIRE(rig.resolution.getDiagnostics().localInputCache<MockSimulatable>(kLocalId) == nullptr);
+}
+
 #endif // WITH_LOW_LEVEL_TESTS
