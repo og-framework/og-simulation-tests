@@ -6,6 +6,7 @@
 #include "OGSimulation/Network/ReplicatedTierConsumer.h"
 #include "OGSimulation/PCTimeManagement/ClientPredictionClock.h"
 #include "OGSimulation/PCTimeManagement/NetworkTimeEstimator.h"
+#include <vector>
 
 // ---------------------------------------------------------------------------
 // Test helpers
@@ -520,6 +521,309 @@ TEST_CASE("PCTM.ClientPredictionClock.MultipleUpwardTransitionsAccumulate",
     // guards against a "last delta wins" implementation passing by accident.
     REQUIRE(control.getPredictionTick() - stalled.getPredictionTick()
             > static_cast<unsigned int>(deltaB));
+}
+
+// ===========================================================================
+// THE CLOCK'S EVENT SEAM - skip / stall / hard-resync counts and last ticks
+//
+// The seven words live on `getDiagnostics()`; they are written PER EVENT inside
+// `advancePrediction`'s branches, never once per call. Every case below therefore
+// asserts the count on EVERY call, not only on the ones that fire, so a per-tick
+// implementation fails on the very first non-event call.
+//
+// ⛔ No reader in the clock, the manager or any peer may consult these words. The
+// case that makes that a red test rather than a comment is the last one in this file.
+// ===========================================================================
+
+namespace
+{
+    // A graduated zone wide enough for a +/-20 drift to stay inside it.
+    TimeConfig makeEventSeamConfig()
+    {
+        TimeConfig cfg;
+        cfg.minTicksBeforeDriftCheck = 0;
+        cfg.softDriftThresholdTicks  = 3;
+        cfg.hardResyncThresholdTicks = 50;
+        cfg.gradualCorrectionRate    = 4;
+        cfg.tickFrequency            = 60.0;
+        return cfg;
+    }
+
+    // Drive one call at a chosen drift. `target == authority + predOffsetFloorTicks` with no
+    // RTT sample, so the authority tick is set that much lower and the named drift is the real one.
+    ClientPredictionClock::AdvanceResult driveOneAtDrift(ClientPredictionClock& clock,
+                                                         NetworkTimeEstimator& est, int drift)
+    {
+        const int authority = static_cast<int>(clock.getPredictionTick()) + drift
+                            - static_cast<int>(est.getPredictionOffsetTicks());
+        est.recordAuthorityTick(authority > 0 ? static_cast<unsigned int>(authority) : 0u);
+        return clock.advancePrediction();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Graduated SKIPS: one count per event, and the tick is the one jumped TO.
+// ---------------------------------------------------------------------------
+TEST_CASE("PCTM.ClientPredictionClock.Events.GraduatedSkipsCountPerEventAtTheTickJumpedTo",
+          "[PCTM][ClientPredictionClock][ClockEvents]")
+{
+    TimeConfig cfg = makeEventSeamConfig();
+    NetworkTimeEstimator est(cfg, nullptr);
+    ClientPredictionClock clock(cfg, est, nullptr);
+
+    REQUIRE(clock.getDiagnostics().skipCount()    == 0u);
+    REQUIRE(clock.getDiagnostics().lastSkipTick() == 0u);
+
+    unsigned int expectedSkips = 0u;
+    for (unsigned int call = 1u; call <= 12u; ++call)
+    {
+        const ClientPredictionClock::AdvanceResult result = driveOneAtDrift(clock, est, +20);
+        const bool isSkipCall = (call % 4u) == 0u;
+        REQUIRE((result == ClientPredictionClock::AdvanceResult::Skip) == isSkipCall);
+
+        if (isSkipCall)
+        {
+            ++expectedSkips;
+            REQUIRE(clock.getDiagnostics().lastSkipTick() == clock.getPredictionTick());
+        }
+        // Asserted on EVERY call: a per-tick counter would already be ahead here.
+        REQUIRE(clock.getDiagnostics().skipCount() == expectedSkips);
+    }
+
+    REQUIRE(expectedSkips == 3u);
+    REQUIRE(clock.getDiagnostics().stallCount()      == 0u);
+    REQUIRE(clock.getDiagnostics().hardResyncCount() == 0u);
+}
+
+// ---------------------------------------------------------------------------
+// Graduated STALLS: one count per event, and the tick is the frontier held at.
+// ---------------------------------------------------------------------------
+TEST_CASE("PCTM.ClientPredictionClock.Events.GraduatedStallsCountPerEventAtTheHeldFrontier",
+          "[PCTM][ClientPredictionClock][ClockEvents]")
+{
+    TimeConfig cfg = makeEventSeamConfig();
+    NetworkTimeEstimator est(cfg, nullptr);
+    ClientPredictionClock clock(cfg, est, nullptr);
+
+    // Wind the frontier up in a pure dead band so a -20 drift is expressible at all.
+    cfg.softDriftThresholdTicks = 1000;
+    for (unsigned int i = 0u; i < 30u; ++i)
+        driveOneAtDrift(clock, est, 0);
+    cfg.softDriftThresholdTicks = 3;
+
+    REQUIRE(clock.getDiagnostics().stallCount()    == 0u);
+    REQUIRE(clock.getDiagnostics().lastStallTick() == 0u);
+
+    unsigned int expectedStalls = 0u;
+    for (unsigned int call = 1u; call <= 12u; ++call)
+    {
+        const unsigned int before = clock.getPredictionTick();
+        const ClientPredictionClock::AdvanceResult result = driveOneAtDrift(clock, est, -20);
+        const bool isStallCall = (call % 4u) == 0u;
+        REQUIRE((result == ClientPredictionClock::AdvanceResult::Stall) == isStallCall);
+
+        if (isStallCall)
+        {
+            ++expectedStalls;
+            REQUIRE(clock.getPredictionTick() == before);
+            REQUIRE(clock.getDiagnostics().lastStallTick() == clock.getPredictionTick());
+        }
+        REQUIRE(clock.getDiagnostics().stallCount() == expectedStalls);
+    }
+
+    REQUIRE(expectedStalls == 3u);
+    REQUIRE(clock.getDiagnostics().skipCount()       == 0u);
+    REQUIRE(clock.getDiagnostics().hardResyncCount() == 0u);
+}
+
+// ---------------------------------------------------------------------------
+// The TIER-DEBT stall is the second stall branch, and it counts too.
+// ---------------------------------------------------------------------------
+TEST_CASE("PCTM.ClientPredictionClock.Events.TheTierDebtStallCountsAtTheHeldFrontier",
+          "[PCTM][ClientPredictionClock][ClockEvents]")
+{
+    TimeConfig cfg = makeStallTestConfig();
+    NetworkTimeEstimator est(cfg, nullptr);
+    ClientPredictionClock clock(cfg, est, nullptr);
+
+    driveTicks(clock, est, 10u);
+    REQUIRE(clock.getDiagnostics().stallCount() == 0u);
+
+    clock.requestInputDelayIncreaseStall(3);
+    const unsigned int heldFrontier = clock.getPredictionTick();
+
+    for (unsigned int paid = 1u; paid <= 3u; ++paid)
+    {
+        est.recordAuthorityTick(0);
+        REQUIRE(clock.advancePrediction() == ClientPredictionClock::AdvanceResult::Stall);
+        REQUIRE(clock.getDiagnostics().stallCount()    == paid);
+        REQUIRE(clock.getDiagnostics().lastStallTick() == heldFrontier);
+    }
+
+    // Debt paid: the next call is an ordinary advance and moves no counter.
+    est.recordAuthorityTick(0);
+    REQUIRE(clock.advancePrediction() == ClientPredictionClock::AdvanceResult::Normal);
+    REQUIRE(clock.getDiagnostics().stallCount() == 3u);
+    REQUIRE(clock.getDiagnostics().skipCount()  == 0u);
+}
+
+// ---------------------------------------------------------------------------
+// The HARD RESYNC records the exact from/to pair - the user's storm, by its numbers.
+// The display had only "at least as old as the last poll" before this seam existed.
+// ---------------------------------------------------------------------------
+TEST_CASE("PCTM.ClientPredictionClock.Events.AHardResyncRecordsTheExactFromAndToTicks",
+          "[PCTM][ClientPredictionClock][ClockEvents]")
+{
+    TimeConfig cfg;
+    cfg.minTicksBeforeDriftCheck = 0;
+    cfg.softDriftThresholdTicks  = 1000;
+    cfg.hardResyncThresholdTicks = 5000;
+    cfg.gradualCorrectionRate    = 4;
+    cfg.tickFrequency            = 60.0;
+
+    NetworkTimeEstimator est(cfg, nullptr);
+    ClientPredictionClock clock(cfg, est, nullptr);
+
+    // The pair the user's session logged, 22 ticks backward.
+    const unsigned int stormFromTick = 6219u;
+    const unsigned int stormToTick   = 6197u;
+
+    while (clock.getPredictionTick() < stormFromTick)
+        driveOneAtDrift(clock, est, 0);
+    REQUIRE(clock.getPredictionTick() == stormFromTick);
+    REQUIRE(clock.getDiagnostics().hardResyncCount() == 0u);
+
+    cfg.softDriftThresholdTicks  = 3;
+    cfg.hardResyncThresholdTicks = 21;
+
+    unsigned int callbackTick = 0u;
+    clock.registerResyncCallback([&](unsigned int newTick) { callbackTick = newTick; });
+
+    est.recordAuthorityTick(stormToTick - est.getPredictionOffsetTicks());
+    REQUIRE(clock.advancePrediction() == ClientPredictionClock::AdvanceResult::HardResync);
+
+    REQUIRE(clock.getDiagnostics().hardResyncCount()        == 1u);
+    REQUIRE(clock.getDiagnostics().lastHardResyncFromTick() == stormFromTick);
+    REQUIRE(clock.getDiagnostics().lastHardResyncToTick()   == stormToTick);
+    REQUIRE(callbackTick                                    == stormToTick);
+    REQUIRE(clock.getPredictionTick()                       == stormToTick);
+    REQUIRE(clock.getDiagnostics().skipCount()              == 0u);
+    REQUIRE(clock.getDiagnostics().stallCount()             == 0u);
+}
+
+// ---------------------------------------------------------------------------
+// ⛔⛔ THE FENCE - the seven words cannot reach any clock decision.
+//
+// One fixed drift lifecycle (dead band, graduated skips, graduated stalls, a tier-debt
+// stall, a hard resync and a tail) is driven CLEAN and then again for every combination
+// of scribbler seed at the three points, recording every clock output after every call.
+// Every scribbled trace must be byte-identical to the clean one.
+//
+// ⛔ `finalCounters` is deliberately outside `operator==`: the seam is the ONE thing the
+// runs are allowed to differ in, and the sweep requires that they actually do.
+//
+// A trace that captured nothing would compare equal forever, so the last run moves ONE
+// REAL INPUT - a fourth tick of tier debt.
+//
+// ⭐ It REQUIRES the trace to move, so the instrument is proven sensitive in the same case
+// that proves the seam invisible.
+// ---------------------------------------------------------------------------
+
+namespace
+{
+    struct ClockTrace
+    {
+        std::vector<unsigned int> values;
+        std::vector<unsigned int> finalCounters;
+        bool operator==(const ClockTrace& other) const { return values == other.values; }
+    };
+
+    void recordClockOutputs(const ClientPredictionClock& clock,
+                            ClientPredictionClock::AdvanceResult result, ClockTrace& trace)
+    {
+        trace.values.push_back(static_cast<unsigned int>(result));
+        trace.values.push_back(clock.getPredictionTick());
+        trace.values.push_back(clock.getResimulationTick());
+        trace.values.push_back(static_cast<unsigned int>(clock.evaluateDrift()));
+        trace.values.push_back(clock.getRequiredInputDelayIncreaseStallTicks());
+        trace.values.push_back(clock.isResimulating() ? 1u : 0u);
+    }
+
+    // A nonzero seed scribbles the seven words at that point; 0 means do not scribble.
+    // `extraDebtTicks` is the sensitivity knob and is the only REAL input that ever moves.
+    void driveTracedClockLifecycle(ClockTrace& trace, unsigned int afterDeadBand,
+                                   unsigned int afterGraduated, unsigned int afterDebt,
+                                   unsigned int extraDebtTicks)
+    {
+        TimeConfig cfg;
+        cfg.minTicksBeforeDriftCheck = 0;
+        cfg.softDriftThresholdTicks  = 1000;
+        cfg.hardResyncThresholdTicks = 5000;
+        cfg.gradualCorrectionRate    = 4;
+        cfg.tickFrequency            = 60.0;
+
+        NetworkTimeEstimator est(cfg, nullptr);
+        ClientPredictionClock clock(cfg, est, nullptr);
+        clock.registerResyncCallback([&](unsigned int newTick) { trace.values.push_back(newTick); });
+
+        for (unsigned int i = 0u; i < 30u; ++i)
+            recordClockOutputs(clock, driveOneAtDrift(clock, est, 0), trace);
+        if (afterDeadBand != 0u)
+            clock.editDiagnostics().scribbleEventCountersForFenceTest(afterDeadBand);
+
+        cfg.softDriftThresholdTicks = 3;
+        for (unsigned int i = 0u; i < 12u; ++i)
+            recordClockOutputs(clock, driveOneAtDrift(clock, est, +20), trace);
+        for (unsigned int i = 0u; i < 12u; ++i)
+            recordClockOutputs(clock, driveOneAtDrift(clock, est, -20), trace);
+        if (afterGraduated != 0u)
+            clock.editDiagnostics().scribbleEventCountersForFenceTest(afterGraduated);
+
+        cfg.softDriftThresholdTicks = 1000;
+        clock.requestInputDelayIncreaseStall(static_cast<int32_t>(3u + extraDebtTicks));
+        for (unsigned int i = 0u; i < 6u; ++i)
+            recordClockOutputs(clock, driveOneAtDrift(clock, est, 0), trace);
+        if (afterDebt != 0u)
+            clock.editDiagnostics().scribbleEventCountersForFenceTest(afterDebt);
+
+        cfg.softDriftThresholdTicks  = 3;
+        cfg.hardResyncThresholdTicks = 21;
+        recordClockOutputs(clock, driveOneAtDrift(clock, est, -22), trace);
+        for (unsigned int i = 0u; i < 4u; ++i)
+            recordClockOutputs(clock, driveOneAtDrift(clock, est, 0), trace);
+
+        const ClientPredictionClock::Diagnostics seam = clock.getDiagnostics();
+        trace.finalCounters = { seam.skipCount(), seam.lastSkipTick(),
+                               seam.stallCount(), seam.lastStallTick(),
+                               seam.hardResyncCount(), seam.lastHardResyncFromTick(),
+                               seam.lastHardResyncToTick() };
+    }
+}
+
+TEST_CASE("ClientPredictionClock.Events.TheEventCountersCannotReachAnyClockDecision",
+          "[PCTM][ClientPredictionClock][ClockEvents]")
+{
+    ClockTrace clean;
+    driveTracedClockLifecycle(clean, 0u, 0u, 0u, 0u);
+    REQUIRE(clean.values.size() > 300u);   // the trace is substantial, not a stub
+
+    unsigned int poisonedRuns = 0u;
+    for (unsigned int afterDeadBand = 1u; afterDeadBand <= 4u; ++afterDeadBand)
+    for (unsigned int afterGraduated = 1u; afterGraduated <= 4u; ++afterGraduated)
+    for (unsigned int afterDebt = 1u; afterDebt <= 4u; ++afterDebt)
+    {
+        ClockTrace scribbled;
+        driveTracedClockLifecycle(scribbled, afterDeadBand, afterGraduated, afterDebt, 0u);
+        REQUIRE(scribbled == clean);
+        if (scribbled.finalCounters != clean.finalCounters)
+            ++poisonedRuns;
+    }
+    REQUIRE(poisonedRuns == 64u);   // every seed really did poison the seam
+
+    ClockTrace sensitivity;
+    driveTracedClockLifecycle(sensitivity, 0u, 0u, 0u, 1u);
+    REQUIRE(sensitivity.values.size() == clean.values.size());
+    REQUIRE_FALSE(sensitivity == clean);
 }
 
 #endif // WITH_LOW_LEVEL_TESTS
