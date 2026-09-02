@@ -45,7 +45,17 @@
 // constructs and drives the new SimulationInputResolution peer directly, with
 // no SimulationNetSync anywhere in that translation unit (the item's own
 // acceptance criterion).
+// Note on [LinearBodyState]: the slim 24-byte body-state wire shape and the
+// PhysicsDeclaration concept (brawler-movement-simulation seam task) —
+// PhysicsBodyState/LinearBodyStateTest.cpp, which pins the two conversion
+// bridges (the lossy widening in particular) and the concept's accept/reject
+// behaviour over mock declarations.
+// Note on [SimulationComposite]: the composite's zero() fold and the widened
+// SimulationInput role concept (brawler-movement-simulation task 22) --
+// SimulationCompositeZeroTest.cpp. The mocks are deliberately split into one
+// whose zero() differs from T{} and one whose zero() equals it, because only the
+// former can tell the fold apart from a value-initialising one.
 CATCH_REGISTER_TAG_ALIAS("[@og]",
-    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Network],[Reconciliation],[Determinism][Production],[SimulatableList],[StorageView],[SystemsExecutor],[CorrectionCache],[InputResolution]")
+    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Network],[Reconciliation],[Determinism][Production],[SimulatableList],[StorageView],[SystemsExecutor],[CorrectionCache],[InputResolution],[LinearBodyState],[SimulationComposite]")
 
 #endif // WITH_LOW_LEVEL_TESTS
