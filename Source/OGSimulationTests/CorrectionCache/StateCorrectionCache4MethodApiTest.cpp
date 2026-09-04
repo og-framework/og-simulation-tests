@@ -104,6 +104,10 @@ namespace
 		void addBodyTorque(BodyId, const glm::vec3&) {}
 		void setBodyAngularVelocity(BodyId, const glm::vec3&) {}
 		void setBodyLinearVelocity(BodyId, const glm::vec3&) {}
+		// Task 3b force seam. No-op: this task adds the capability only; task 12's
+		// movement-sim tests are the ones that record these calls.
+		void addBodyAcceleration(BodyId, const glm::vec3&) {}
+		void addBodyVelocityChange(BodyId, const glm::vec3&) {}
 		glm::vec3 getBodyInertiaTensor(BodyId) const { return glm::vec3(1.f); }
 		PhysicsBodyState captureBodyState(BodyId) const { return PhysicsBodyState{}; }
 	};
