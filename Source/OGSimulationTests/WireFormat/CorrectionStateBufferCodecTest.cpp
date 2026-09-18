@@ -40,8 +40,13 @@
 //     input, no client capture stands behind this tick") round-trips as itself
 //     and is distinguishable from every real capture tick, INCLUDING tick 0,
 //     which is an ordinary session-start capture;
-//   * the version fence is at 2 (bumped 1 -> 2 by this task) — the SINGLE fence
-//     of the increment.
+//   * the version fence is at 3 — the SINGLE fence of the increment.
+//     History: 1 -> 2 by this task; 2 -> 3 by og-brawler-ringout-gamemode task 2,
+//     when a whole sub-simulation joined the state composite. ⚠ THIS BANNER IS A
+//     PRESENT-TENSE VALUE CLAIM, so it goes stale on every bump — unlike the
+//     conditional "bump if anything before it moved" wording elsewhere, which does
+//     not. It was missed by that task's own tree-wide sweep because the sweep did
+//     not reach the header of the file it was editing two hunks below.
 //
 // These run against the ENGINE-AGNOSTIC codec, which is the same code the UE
 // USTRUCT (FSimulationStateSyncBuffer) delegates to — a std::vector-backed
@@ -209,7 +214,7 @@ TEST_CASE("CorrectionStateBuffer.RealCaptureTickZeroIsNotTheSentinel",
 // ---------------------------------------------------------------------------
 // Layout + fence. Both halves are wire contracts a future edit must not move
 // silently: the ref sits between the tick and the composite, and the version
-// fence is at 2.
+// fence is at 3.
 // ---------------------------------------------------------------------------
 TEST_CASE("CorrectionStateBuffer.LayoutAndVersionFence",
           "[WireFormat][CorrectionStateRef]")
@@ -221,7 +226,18 @@ TEST_CASE("CorrectionStateBuffer.LayoutAndVersionFence",
 
     // The SINGLE wire fence of the input-relay increment. It was 1 before T4;
     // if this ever reads 1 again, mismatched builds stop being detected.
-    REQUIRE(correctionStateBuffer::kWireFormatVersion == 2u);
+    //
+    // [ringout task 2, 2026-09-13] 2 -> 3. THIS ASSERTION IS WHY THE BUMP IS
+    // SAFE TO MAKE: it went RED on the edit, which is the only place in either
+    // suite that notices the constant moving at all. The reason for the bump is
+    // written at the constant in CorrectionStateBufferCodec.h — in short, the
+    // state composite gained a whole sub-simulation (brawlerRingout, +9 B) that
+    // an older archived build does not compile in, and the payload layout cannot
+    // express that difference. `!= 2u` is deliberate company for `!= 1u`: a
+    // future append that reasons "offsets did not move, so no bump" must still
+    // ask whether the OTHER side even has the sub-simulation.
+    REQUIRE(correctionStateBuffer::kWireFormatVersion == 3u);
+    REQUIRE(correctionStateBuffer::kWireFormatVersion != 2u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 1u);
 
     // The two header scalars really do precede the composite: the first
