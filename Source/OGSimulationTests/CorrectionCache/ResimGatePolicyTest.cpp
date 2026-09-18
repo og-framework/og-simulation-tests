@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 #if WITH_LOW_LEVEL_TESTS
 
+#include <algorithm>
 #include <cstdint>
+#include <utility>
 #include <vector>
 
 #include "catch_amalgamated.hpp"
@@ -171,12 +173,32 @@ namespace
 	// on, `MockStorage`/`MockStaticData`'s declaration order — it just forwards
 	// whatever `SimulationManager` itself was built with, exactly as the real
 	// `SimulationSystemsExecutor` peer is duck-typed over both.
+	// [ringout task 19] The mock now RECORDS the role the manager hands it, on all four fire
+	// methods. The role is not observable any other way from this side of the boundary: the
+	// manager derives it from its own `m_runsPrediction` at each of eight call sites and stores
+	// nothing, so a site that passed a literal - or the wrong sign - is invisible until a mock
+	// writes it down. `firesOnRole` in the real executor is what CONSUMES this value; this file
+	// is about whether the value arriving there is right.
 	struct MockSystemsExec
 	{
+		// (isAuthority, isResimulating) per step fire, in call order.
+		std::vector<std::pair<bool, bool>> stepFires;
+		// isAuthority per lifecycle fire, in call order.
+		std::vector<bool> registerFires;
+		std::vector<bool> unregisterFires;
+
 		template <typename StorageT, typename StaticDataT>
-		void firePreIntegrate(const SimulationTimeStep&, StorageT&, const StaticDataT&) {}
+		void firePreIntegrate(const SimulationTimeStep& step, StorageT&, const StaticDataT&, bool isAuthority)
+		{ stepFires.emplace_back(isAuthority, step.getIsResimulating()); }
 		template <typename StorageT, typename StaticDataT>
-		void firePostIntegrate(const SimulationTimeStep&, StorageT&, const StaticDataT&) {}
+		void firePostIntegrate(const SimulationTimeStep& step, StorageT&, const StaticDataT&, bool isAuthority)
+		{ stepFires.emplace_back(isAuthority, step.getIsResimulating()); }
+		template <typename StorageT, typename StaticDataT>
+		void notifyCharacterRegistered(unsigned int, StorageT&, const StaticDataT&, bool isAuthority)
+		{ registerFires.push_back(isAuthority); }
+		template <typename StorageT, typename StaticDataT>
+		void notifyCharacterUnregistered(unsigned int, StorageT&, const StaticDataT&, bool isAuthority)
+		{ unregisterFires.push_back(isAuthority); }
 	};
 	struct MockStorage {};
 	struct MockStaticData {};
@@ -638,6 +660,79 @@ TEST_CASE("ResimGate.Policy.OnPostGameSimulationFeedsSurvivingAnchorsToTheProbe"
 	ResimGateWindowSummary snap;
 	rig.manager.getDiagnostics().resimGateProbe().fillSummary(snap);
 	REQUIRE(snap.survivingAnchors == 7u);
+}
+
+// ---------------------------------------------------------------------------
+// [ringout task 19] THE MANAGER IS THE ROLE SOURCE, AND THIS IS THE ONLY THING THAT SAYS SO.
+//
+// `SimulationSystemsExecutor` gates every hook on a `bool isAuthority` its caller supplies. In
+// production the only caller is `SimulationManager`, at eight sites, each passing
+// `!m_runsPrediction`. Nothing stores the value and no other peer reads it, so a site that
+// passed a literal `true`, or dropped the `!`, would be invisible to every other suite in this
+// tree AND to og-brawler's: the score system would simply stop being authority-only, on the
+// role where that is silent rather than loud.
+//
+// ⛔ THE POISON THAT SHOWS THIS BITES: invert ONE of the eight sites to `m_runsPrediction`.
+// Ring-out task 19 did exactly that and this case went red; restored, it went green again. The
+// arm and its output are in that task's notes.
+//
+// ⚠ SCOPE. This case is about the VALUE the manager delivers. That the executor then acts on
+// it correctly is `SystemsExecutor.AuthorityOnlySystemIsInertOffTheAuthority`, in the sibling
+// suite, over the real executor; this one deliberately uses a recording mock so a defect in the
+// executor cannot make a defect in the manager look fine.
+// ---------------------------------------------------------------------------
+TEST_CASE("SimulationManager.SystemsExecutorReceivesTheManagerRole",
+	"[CorrectionCache][ResimGate]")
+{
+	SECTION("the AUTHORITY rig: every fire, of every kind, carries isAuthority=true")
+	{
+		ManagerRig rig(/*shouldRunPrediction=*/false);
+
+		rig.manager.onGameSimulation(SimulationUpdateInfo(/*isResimulation=*/false, /*isFirstResimulationStep=*/false));
+		rig.manager.onGameSimulation(SimulationUpdateInfo(/*isResimulation=*/false, /*isFirstResimulationStep=*/false));
+		rig.manager.notifyCharacterRegistered(7u);
+		rig.manager.notifyCharacterUnregistered(7u);
+
+		// Two ticks x (pre + post).
+		REQUIRE(rig.systemsExec.stepFires.size() == 4u);
+		for (const auto& fire : rig.systemsExec.stepFires)
+		{
+			CHECK(fire.first);             // isAuthority
+			CHECK_FALSE(fire.second);      // and never a resim step - F1, the authority does not rewind
+		}
+		REQUIRE(rig.systemsExec.registerFires == std::vector<bool>{ true });
+		REQUIRE(rig.systemsExec.unregisterFires == std::vector<bool>{ true });
+	}
+
+	SECTION("the PREDICTION rig: every fire carries isAuthority=false, forward AND replay")
+	{
+		ManagerRig rig(/*shouldRunPrediction=*/true);
+
+		// Two forward prediction ticks, to put the frontier at 2.
+		rig.manager.onGameSimulation(SimulationUpdateInfo(/*isResimulation=*/false, /*isFirstResimulationStep=*/false));
+		rig.manager.onGameSimulation(SimulationUpdateInfo(/*isResimulation=*/false, /*isFirstResimulationStep=*/false));
+		// A resim from tick 1, then one replay tick - the same door
+		// `TriggerRewindIfNeeded_Internal` uses in production.
+		rig.manager.prepareResimulation(/*chaosStep=*/0, /*simTick=*/1u);
+		rig.manager.onGameSimulation(SimulationUpdateInfo(/*isResimulation=*/true, /*isFirstResimulationStep=*/true));
+		rig.manager.notifyCharacterRegistered(7u);
+		rig.manager.notifyCharacterUnregistered(7u);
+
+		// Three ticks x (pre + post).
+		REQUIRE(rig.systemsExec.stepFires.size() == 6u);
+		for (const auto& fire : rig.systemsExec.stepFires)
+			CHECK_FALSE(fire.first);
+		REQUIRE(rig.systemsExec.registerFires == std::vector<bool>{ false });
+		REQUIRE(rig.systemsExec.unregisterFires == std::vector<bool>{ false });
+
+		// ⭐ THE VACUITY GUARD. If no fire were a RESIM fire, "false on every resim step" would
+		// be true of a run that never resimulated, and the whole replay half of the claim would
+		// be untested. At least one must be, and it must still be false.
+		const auto resimFires = std::count_if(
+			rig.systemsExec.stepFires.begin(), rig.systemsExec.stepFires.end(),
+			[](const std::pair<bool, bool>& f) { return f.second; });
+		REQUIRE(resimFires == 2);   // pre + post of the one replay tick
+	}
 }
 
 #endif // WITH_LOW_LEVEL_TESTS
