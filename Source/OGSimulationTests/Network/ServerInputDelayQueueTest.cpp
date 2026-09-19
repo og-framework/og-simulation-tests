@@ -248,14 +248,26 @@ TEST_CASE("DifferentSimTypesIndependent", "[Network][InputDelayQueue]")
     REQUIRE(queue.tryDequeueForTick<MockSimA>(slot0(addr), dueTick, outA));
     REQUIRE(outA == 42);
 
-    // The converse direction too: a MockSimB enqueue at the SAME capture tick is
-    // not deduped against MockSimA's, because dedup is per (Address, SimT).
-    queue.enqueue<MockSimA>(slot0(addr), kCaptureTick, 42);
-    queue.enqueue<MockSimB>(slot0(addr), kCaptureTick, 1.5f);
+    // The per-sim RELEASED watermark (task 1's late gate, arm 2) is per (slot,
+    // SimT) too: MockSimA has just released capture tick 100, and that must say
+    // nothing about MockSimB's slot, which has released nothing.
+    REQUIRE(queue.lastReleasedCaptureTick<MockSimA>(slot0(addr)) == kCaptureTick);
+    REQUIRE(queue.lastReleasedCaptureTick<MockSimB>(slot0(addr)) == TestQueue::kNoLateGate);
+
+    // The converse direction: an enqueue at the SAME capture tick on two sims is
+    // not deduped across them, because dedup is per (Address, SimT). A SECOND
+    // capture tick is used here — re-admitting 100 on MockSimA is now refused as
+    // a late re-send of an already-released capture, which is the defect task 1
+    // closed, not a property this case ever meant to rely on.
+    constexpr int32_t kSecondCaptureTick = kCaptureTick + 1;
+    const int32_t secondDueTick = kSecondCaptureTick + queue.effectiveDelay(addr);
+
+    queue.enqueue<MockSimA>(slot0(addr), kSecondCaptureTick, 42);
+    queue.enqueue<MockSimB>(slot0(addr), kSecondCaptureTick, 1.5f);
     REQUIRE(queue.pendingCount<MockSimA>(slot0(addr)) == 1u);
     REQUIRE(queue.pendingCount<MockSimB>(slot0(addr)) == 1u);
 
-    REQUIRE(queue.tryDequeueForTick<MockSimB>(slot0(addr), dueTick, outB));
+    REQUIRE(queue.tryDequeueForTick<MockSimB>(slot0(addr), secondDueTick, outB));
     REQUIRE(outB == Catch::Approx(1.5f));
     REQUIRE(queue.pendingCount<MockSimA>(slot0(addr)) == 1u);      // survivor untouched
 }
@@ -854,6 +866,159 @@ TEST_CASE("SlotRangeCheckMatchesSubstitutionMaskBound", "[Network][InputDelayQue
     // must produce a differing key even when the address matches exactly.
     REQUIRE(TestQueue::SlotKey(addr, 0) == TestQueue::SlotKey(addr, 0));
     REQUIRE_FALSE(TestQueue::SlotKey(addr, 0) == TestQueue::SlotKey(addr, 1));
+}
+
+// ---------------------------------------------------------------------------
+// The LATE arm of enqueue (og-netcode-v2-field-defects task 1).
+//
+// These two cases are written against the 2026-09-13 field log verbatim — the
+// same capture ticks, the same tier, the same bundle contents — because the
+// defect is a TIMING relationship between a redundancy bundle's arrival and the
+// release of its oldest re-send, and a synthetic tick sequence would let the
+// shape be right while the arithmetic was wrong. Tier 2 is the tier the affected
+// connection actually held; the delay is still read from cfg, not written as 3.
+// ---------------------------------------------------------------------------
+namespace
+{
+    // The "no window gate" sentinel every case below passes for `staleBefore`.
+    // Spelled once so the late gate (a DIFFERENT parameter that happens to share
+    // the sentinel VALUE) can never be passed by accident in its place.
+    constexpr int32_t kNoWindowGate = std::numeric_limits<int32_t>::min();
+
+    // Puts `addr` on tier 2, the tier the affected connection held in the session
+    // these cases reproduce. Requires a cfg whose dwell gate is open.
+    int32_t seedAtTierTwo(TestTierTable& table, const TimeConfig& cfg,
+                          const FStandaloneTestHandle& addr)
+    {
+        driveToTier(table, cfg, addr, 2);
+        return cfg.rttTierInputDelays[2];
+    }
+}
+
+TEST_CASE("LateResendOfAReleasedCaptureIsDroppedAndTheDueCaptureIsDelivered", "[Network][InputDelayQueue]")
+{
+    TimeConfig cfg;
+    cfg.tierMinDwellTicks = 1;      // open the R-A2 dwell gate; not the thing under test
+    TestTierTable tierTable(cfg);
+    TestQueue queue(cfg, tierTable);
+
+    const FStandaloneTestHandle addr = liveHandle(kConnA);
+    const int32_t delay = seedAtTierTwo(tierTable, cfg, addr);
+    REQUIRE(queue.effectiveDelay(addr) == delay);
+
+    // The session's own ticks. Capture C is due at C + delay.
+    constexpr int32_t kC1733 = 1733;
+    constexpr int32_t kC1734 = 1734;
+    constexpr int32_t kC1735 = 1735;
+    constexpr int32_t kC1736 = 1736;
+    REQUIRE(kC1733 + delay == kC1736);      // the release tick the whole case turns on
+
+    // Steady state: three captures parked, none released yet.
+    REQUIRE(queue.enqueue<MockSimA>(slot0(addr), kC1733, kC1733));
+    REQUIRE(queue.enqueue<MockSimA>(slot0(addr), kC1734, kC1734));
+    REQUIRE(queue.enqueue<MockSimA>(slot0(addr), kC1735, kC1735));
+
+    // Server tick 1736 releases 1733. After this the slot no longer remembers it
+    // in the deque — which is the entire reason the duplicate scan cannot see the
+    // re-send below.
+    int out = 0;
+    int32_t captured = -1;
+    REQUIRE(queue.tryDequeueForTick<MockSimA>(slot0(addr), kC1736, out, kNoWindowGate, &captured));
+    REQUIRE(captured == kC1733);
+    REQUIRE(queue.lastReleasedCaptureTick<MockSimA>(slot0(addr)) == kC1733);
+
+    // The late packet, carrying the new capture plus the previous three. It lands
+    // AFTER tick 1736 has run, so the next tick the drain will serve is 1737.
+    constexpr int32_t kFirstUpcomingSimTick = 1737;
+
+    REQUIRE(queue.enqueue<MockSimA>(slot0(addr), kC1736, kC1736, kFirstUpcomingSimTick));
+
+    // 1735 and 1734 are still parked, so they are ordinary duplicates — the
+    // pre-existing first-value-wins path, and NOT counted as late.
+    REQUIRE_FALSE(queue.enqueue<MockSimA>(slot0(addr), kC1735, -1, kFirstUpcomingSimTick));
+    REQUIRE_FALSE(queue.enqueue<MockSimA>(slot0(addr), kC1734, -1, kFirstUpcomingSimTick));
+    REQUIRE(queue.lateDroppedCount() == 0u);
+
+    // 1733 is NOT parked any more. Its release tick (1736) is behind the first
+    // undrained tick (1737), so it is refused as LATE rather than re-parked.
+    //
+    // CHECK, not REQUIRE, for the next three: without the gate this line is the
+    // FIRST thing to fail, and stopping here would hide the consequence the case
+    // is really about — which tick 1737 goes on to deliver. Catch2 reports both.
+    CHECK_FALSE(queue.enqueue<MockSimA>(slot0(addr), kC1733, -1, kFirstUpcomingSimTick));
+    CHECK(queue.lateDroppedCount() == 1u);
+    CHECK(queue.pendingCount<MockSimA>(slot0(addr)) == 3u);     // 1734, 1735, 1736 — not four
+
+    // Tick 1737 therefore delivers 1734. Before the fix it delivered 1733 a second
+    // time, and every later input ran one tick behind for the rest of the session.
+    REQUIRE(queue.tryDequeueForTick<MockSimA>(slot0(addr), 1737, out, kNoWindowGate, &captured));
+    CHECK(captured == kC1734);
+    CHECK(captured != kC1733);              // the log shape, negated
+    CHECK(out == kC1734);
+
+    // 1738 delivers 1735 — the schedule is unshifted, not merely un-duplicated.
+    REQUIRE(queue.tryDequeueForTick<MockSimA>(slot0(addr), 1738, out, kNoWindowGate, &captured));
+    CHECK(captured == kC1735);
+    CHECK(1738 - captured == delay);
+}
+
+TEST_CASE("DeliveredLagEqualsDelayOnEveryTickAfterALateResend", "[Network][InputDelayQueue]")
+{
+    TimeConfig cfg;
+    cfg.tierMinDwellTicks = 1;
+    TestTierTable tierTable(cfg);
+    TestQueue queue(cfg, tierTable);
+
+    const FStandaloneTestHandle addr = liveHandle(kConnA);
+    const int32_t delay = seedAtTierTwo(tierTable, cfg, addr);
+
+    // Same priming as the case above: 1733..1735 parked, 1733 released at 1736.
+    for (int32_t c = 1733; c <= 1735; ++c)
+    {
+        REQUIRE(queue.enqueue<MockSimA>(slot0(addr), c, c));
+    }
+    int out = 0;
+    int32_t captured = -1;
+    REQUIRE(queue.tryDequeueForTick<MockSimA>(slot0(addr), 1736, out, kNoWindowGate, &captured));
+    REQUIRE(captured == 1733);
+
+    // The late re-send of 1733, refused.
+    REQUIRE_FALSE(queue.enqueue<MockSimA>(slot0(addr), 1733, -1, /*firstUpcomingSimTick=*/1737));
+
+    // Now run the stream forward the way production feeds it: at server tick T the
+    // client's packet for capture T arrives carrying the previous
+    // redundancyDepthTicks captures behind it, and THEN the drain for T runs. The
+    // meter's invariant is that every delivered capture is exactly `delay` ticks
+    // old — the quantity the delay bar reads as Agree / ServerLater.
+    constexpr int32_t kRedundancyDepthTicks = 3;
+    constexpr int32_t kLastTick = 1800;
+
+    int32_t deliveredCount = 0;
+    for (int32_t simTick = 1737; simTick <= kLastTick; ++simTick)
+    {
+        for (int32_t back = 0; back <= kRedundancyDepthTicks; ++back)
+        {
+            const int32_t captureTick = simTick - back;
+            queue.enqueue<MockSimA>(slot0(addr), captureTick, captureTick, simTick);
+        }
+
+        REQUIRE(queue.tryDequeueForTick<MockSimA>(slot0(addr), simTick, out, kNoWindowGate, &captured));
+        REQUIRE(simTick - captured == delay);       // Agree on every tick, forever
+        REQUIRE(out == captured);
+        ++deliveredCount;
+    }
+
+    REQUIRE(deliveredCount == kLastTick - 1737 + 1);
+
+    // One input per tick in, one per tick out: the slot never accumulates the
+    // extra entry that produced the permanent shift.
+    REQUIRE(queue.pendingCount<MockSimA>(slot0(addr)) == static_cast<std::size_t>(delay));
+
+    // Exactly one refusal in the whole run: the single re-send that arrived after
+    // its release tick. Every later re-send in the loop is still parked when its
+    // bundle lands, so it stays an ordinary duplicate — the late class does not
+    // quietly absorb the common case.
+    REQUIRE(queue.lateDroppedCount() == 1u);
 }
 
 #endif // WITH_LOW_LEVEL_TESTS

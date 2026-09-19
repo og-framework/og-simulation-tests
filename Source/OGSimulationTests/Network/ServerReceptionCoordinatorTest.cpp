@@ -1471,4 +1471,240 @@ TEST_CASE("ReceptionCoordinator receiveInputBundle delivers a malformed slot wit
     REQUIRE(relay.calls.empty());
 }
 
+// ---------------------------------------------------------------------------
+// The LATE class at the coordinator (og-netcode-v2-field-defects task 1).
+//
+// The delay queue owns the predicate and the count; what the coordinator owns is
+// the TICK REFERENCE the predicate is judged against (armed by the drain, not by
+// the receipt gate) and the reporting that lets a shipped log tell a late drop
+// apart from the out-of-order-older skip beside it. Both are what these cases
+// pin. The queue-level behaviour itself is covered in ServerInputDelayQueueTest.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("LateDropIsCountedSeparatelyFromRelayOooSkip", "[Network][ReceptionCoordinator][RelayTap]")
+{
+    TimeConfig cfg;
+    TestCoordinator coord(cfg);
+    RecordingRelaySink relay;
+
+    const FStandaloneTestHandle wire = live(1);
+    // No tier entry, so the worst-tier fallback applies (item 62 / RN-12).
+    const std::int32_t delay = cfg.rttTierInputDelays[kMaxConnectionTierIndex];
+
+    for (std::int32_t c = 100; c <= 102; ++c)
+    {
+        REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, c, int(c), relay).parked);
+    }
+    REQUIRE(relay.calls.size() == 3);
+
+    // One drain step, serving only tick 100 + delay: it releases capture 100 and
+    // arms the coordinator's first-undrained-tick reference at 101 + delay.
+    RecordingDeliver deliver;
+    coord.releaseDelayedInputs<MockSimA>(/*firstUpcomingSimTick=*/100 + delay,
+                                         /*numSteps=*/1, std::ref(deliver));
+    REQUIRE(deliver.calls.size() == 1);
+    REQUIRE(deliver.calls[0].captureTick == 100u);
+
+    REQUIRE(coord.lateDroppedCount() == 0u);
+    REQUIRE(coord.relayOooSkipCount() == 0u);
+
+    // (a) A redundancy re-send of the already-released 100. Its release tick is
+    // behind the drain, so it is refused — and it is NOT a relay hole, because
+    // nothing was applied that a peer is now missing.
+    const ReceiveRemoteInputResult resend =
+        coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 999, relay);
+    REQUIRE(resend.parked);                 // the CORE handled it: do not deliver undelayed
+    REQUIRE_FALSE(resend.acceptedNew);
+    REQUIRE(coord.lateDroppedCount() == 1u);
+    REQUIRE(coord.relayOooSkipCount() == 0u);
+    REQUIRE(relay.calls.size() == 3);       // never relayed
+
+    // (b) T26's population, in the same case so the two cannot be confused: a
+    // genuinely-new capture, older than the watermark, whose release tick is still
+    // AHEAD of the drain. It parks, it will be applied in capture order, and it is
+    // the one counted as a relay hole.
+    REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/105, 105, relay).acceptedNew);
+    const ReceiveRemoteInputResult ooo =
+        coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/103, 103, relay);
+    REQUIRE(ooo.parked);
+    REQUIRE_FALSE(ooo.acceptedNew);
+    REQUIRE(coord.relayOooSkipCount() == 1u);
+    REQUIRE(coord.lateDroppedCount() == 1u);        // unmoved — disjoint populations
+
+    // And 103 really is applied, which is what makes it a relay hole rather than a
+    // drop: drain far enough forward and it comes out between 102 and 105.
+    coord.releaseDelayedInputs<MockSimA>(/*firstUpcomingSimTick=*/101 + delay,
+                                         /*numSteps=*/8, std::ref(deliver));
+    std::vector<std::uint32_t> appliedAfterFirst;
+    for (std::size_t i = 1; i < deliver.calls.size(); ++i)
+    {
+        appliedAfterFirst.push_back(deliver.calls[i].captureTick);
+    }
+    const std::vector<std::uint32_t> expectedApplied{ 101u, 102u, 103u, 105u };
+    REQUIRE(appliedAfterFirst == expectedApplied);
+}
+
+TEST_CASE("ReceptionCoordinator reports the late class on the RelaySkip and InputStats window lines", "[Network][ReceptionCoordinator]")
+{
+    TimeConfig cfg;
+    TestCoordinator coord(cfg);
+    std::vector<std::string> logged;
+    coord.setLogger([&logged](const char* m) { logged.emplace_back(m); });
+
+    const FStandaloneTestHandle wire = live(1);
+    const std::int32_t delay      = cfg.rttTierInputDelays[kMaxConnectionTierIndex];
+    const std::int32_t serverTick = 600;
+    const std::int32_t window     = static_cast<std::int32_t>(2.0 * cfg.tickFrequency);
+
+    coord.reapConnections(serverTick);      // arms the receipt gate AND opens the window
+
+    for (std::int32_t c = serverTick; c < serverTick + 3; ++c)
+    {
+        REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, c, int(c)).parked);
+    }
+
+    RecordingDeliver deliver;
+    coord.releaseDelayedInputs<MockSimA>(/*firstUpcomingSimTick=*/serverTick + delay,
+                                         /*numSteps=*/1, std::ref(deliver));
+    REQUIRE(deliver.calls.size() == 1);
+
+    // Two re-sends of the released capture inside this window.
+    coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, serverTick, 1);
+    coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, serverTick, 2);
+    REQUIRE(coord.lateDroppedCount() == 2u);
+
+    REQUIRE_FALSE(hasLineContaining(logged, "late=2"));      // rate-limited to the window
+
+    coord.reapConnections(serverTick + window);
+
+    // [InputStats] carries it because the window carried a delivery; [RelaySkip]
+    // carries it even though NO out-of-order-older tick was skipped this window —
+    // otherwise the class this field exists to expose would be invisible exactly
+    // when it is the only thing happening.
+    REQUIRE(hasLineContaining(logged, "[InputStats]"));
+    REQUIRE(hasLineContaining(logged, "[RelaySkip]"));
+    REQUIRE(hasLineContaining(logged, "late=2"));
+    REQUIRE(hasLineContaining(logged, "[Warning]"));
+
+    // The leading clause of [InputStats] that run scripts grep is unchanged.
+    REQUIRE(hasLineContaining(logged, "dropped 0 / 1 remote inputs = 0%"));
+
+    std::size_t statsLines = 0;
+    std::size_t skipLines  = 0;
+    for (const std::string& s : logged)
+    {
+        if (s.find("[InputStats]") != std::string::npos) ++statsLines;
+        if (s.find("[RelaySkip]")  != std::string::npos) ++skipLines;
+    }
+    REQUIRE(statsLines == 1);
+    REQUIRE(skipLines  == 1);       // the window summary only; no Verbose per-event line
+
+    // The window counter resets while the lifetime total does not.
+    coord.reapConnections(serverTick + 2 * window);
+    REQUIRE(coord.lateDroppedCount() == 2u);
+    for (const std::string& s : logged)
+    {
+        if (s.find("[RelaySkip]") != std::string::npos)
+        {
+            REQUIRE(s.find("late=2") != std::string::npos);
+        }
+    }
+}
+
+TEST_CASE("ReceptionCoordinator fails the late gate open before the first drain", "[Network][ReceptionCoordinator]")
+{
+    TimeConfig cfg;
+    TestCoordinator coord(cfg);
+
+    const FStandaloneTestHandle wire = live(1);
+    const std::int32_t delay = cfg.rttTierInputDelays[kMaxConnectionTierIndex];
+
+    // No drain has run, so there is no tick reference to judge lateness against.
+    // A capture whose release tick is long past by the eventual clock must still
+    // be parked: refusing player input on a reference that does not exist is the
+    // worse error, and it is the same fail-open choice the receipt gate makes.
+    REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 42).parked);
+    REQUIRE(coord.lateDroppedCount() == 0u);
+
+    RecordingDeliver deliver;
+    coord.releaseDelayedInputs<MockSimA>(/*firstUpcomingSimTick=*/100 + delay,
+                                         /*numSteps=*/1, std::ref(deliver));
+    REQUIRE(deliver.calls.size() == 1);
+    REQUIRE(deliver.calls[0].captureTick == 100u);
+}
+
+// ---------------------------------------------------------------------------
+// The relay-tap gate's THIRD term, on the one population that can exercise it:
+// a capture can be the newest this id has ever sent AND already late. The two
+// were indistinguishable before the late gate existed. `noteCaptureTick` returns
+// TRUE unconditionally on FIRST SIGHT of an id, so a fresh connection's - or a
+// post-stall reconnect's - first-ever packet can land with its release tick
+// already behind the drain. On bare `acceptedNew` the core would then log a park
+// that never happened and relay a schedule it has already declined to keep;
+// `queuedNewEntry` is the term that refuses both. Every other late-class case
+// here drives a RE-SEND, where `acceptedNew` is false and the bare gate is
+// already closed - so none of them can witness this.
+// ---------------------------------------------------------------------------
+
+TEST_CASE("ANewestCaptureThatIsAlsoLateIsNotParkedNorRelayed", "[Network][ReceptionCoordinator][RelayTap]")
+{
+    TimeConfig cfg;
+    TestCoordinator coord(cfg);
+    std::vector<std::string> logged;
+    coord.setLogger([&logged](const char* m) { logged.emplace_back(m); });
+    RecordingRelaySink relay;
+
+    const FStandaloneTestHandle wire = live(1);
+    // No tier entry, so the worst-tier fallback applies (item 62 / RN-12).
+    const std::int32_t delay         = cfg.rttTierInputDelays[kMaxConnectionTierIndex];
+    const std::int32_t firstUpcoming = 500;
+
+    // (1) Arm the drain reference. Nothing is parked, so this drain delivers
+    // nothing: the reference is recorded BEFORE the empty-claim early-out, which
+    // is the only reason a no-op frame can arm it at all.
+    RecordingDeliver deliver;
+    coord.releaseDelayedInputs<MockSimA>(firstUpcoming, /*numSteps=*/1, std::ref(deliver));
+    REQUIRE(deliver.calls.empty());
+    // => the first undrained tick is now firstUpcoming + 1.
+
+    // (2) A BRAND-NEW id whose FIRST-EVER capture is already late: its release
+    // tick falls one tick short of the first undrained tick.
+    const std::int32_t lateCapture = firstUpcoming - delay - 1;
+    REQUIRE(lateCapture + delay < firstUpcoming + 1);
+
+    const ReceiveRemoteInputResult late =
+        coord.receiveRemoteInput<MockSimA>(/*id=*/77, wire, /*slot=*/0, lateCapture, 42, relay);
+
+    REQUIRE(late.acceptedNew);              // first sight of this id - NOT a re-send
+    REQUIRE(late.parked);                   // the CORE handled it: do not deliver undelayed
+    REQUIRE(coord.lateDroppedCount() == 1u);
+
+    // CHECK, not REQUIRE: on a bare-`acceptedNew` gate BOTH of these fail, and
+    // stopping at the first would hide half of what the third term buys.
+    CHECK(relay.calls.empty());                             // no schedule promised to a peer
+    CHECK_FALSE(hasLineContaining(logged, "[Park]"));       // no park claimed in the log
+
+    // (3) The positive control, so neither negative above can pass vacuously: a
+    // second brand-new id whose capture is NOT late parks, logs and relays through
+    // the very same sink and logger.
+    RecordingRelaySink controlRelay;
+    const ReceiveRemoteInputResult inTime =
+        coord.receiveRemoteInput<MockSimA>(/*id=*/78, wire, /*slot=*/1, firstUpcoming, 43, controlRelay);
+
+    REQUIRE(inTime.acceptedNew);
+    REQUIRE(inTime.parked);
+    REQUIRE(coord.lateDroppedCount() == 1u);                // unmoved - disjoint populations
+    REQUIRE(controlRelay.countFor(78u) == 1u);
+    REQUIRE(hasLineContaining(logged, "[Park]"));
+
+    // ...and every [Park] line that now exists is the control's, never the late one's.
+    for (const std::string& s : logged)
+    {
+        if (s.find("[Park]") != std::string::npos)
+        {
+            REQUIRE(s.find("id=78") != std::string::npos);
+        }
+    }
+}
+
 #endif // WITH_LOW_LEVEL_TESTS

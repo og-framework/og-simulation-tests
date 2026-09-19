@@ -55,7 +55,12 @@
 // SimulationCompositeZeroTest.cpp. The mocks are deliberately split into one
 // whose zero() differs from T{} and one whose zero() equals it, because only the
 // former can tell the fold apart from a value-initialising one.
+// Note on [Registration]: og-netcode-v2-field-defects task 3 —
+// RegistrationLifecycleTest.cpp, the registration/unregistration lifecycle:
+// publication order (storage.add last, delay line before provider), the NOCACHE
+// degrade tripwire and its per-tick rate limit, and DeferredLifecycleQueue's
+// game->physics marshalling semantics (invisible on step N, whole on N+1).
 CATCH_REGISTER_TAG_ALIAS("[@og]",
-    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Network],[Reconciliation],[Determinism][Production],[SimulatableList],[StorageView],[SystemsExecutor],[CorrectionCache],[InputResolution],[LinearBodyState],[SimulationComposite]")
+    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Network],[Reconciliation],[Determinism][Production],[SimulatableList],[StorageView],[SystemsExecutor],[CorrectionCache],[InputResolution],[LinearBodyState],[SimulationComposite],[Registration]")
 
 #endif // WITH_LOW_LEVEL_TESTS
