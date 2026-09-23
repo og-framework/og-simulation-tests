@@ -60,7 +60,11 @@
 // publication order (storage.add last, delay line before provider), the NOCACHE
 // degrade tripwire and its per-tick rate limit, and DeferredLifecycleQueue's
 // game->physics marshalling semantics (invisible on step N, whole on N+1).
+// Note on [IntegrationExecutor]: og-netcode-v2-field-defects task 16 --
+// IntegrateScopeTest.cpp, the simulationLog::IntegrateScope log context that
+// integrateAll opens around each integrate. Its nested-scope vacuity arm is
+// hidden ([.][IntegrationExecutorNestedScope]) because it is expected to abort.
 CATCH_REGISTER_TAG_ALIAS("[@og]",
-    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Network],[Reconciliation],[Determinism][Production],[SimulatableList],[StorageView],[SystemsExecutor],[CorrectionCache],[InputResolution],[LinearBodyState],[SimulationComposite],[Registration]")
+    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Network],[Reconciliation],[Determinism][Production],[SimulatableList],[StorageView],[SystemsExecutor],[CorrectionCache],[InputResolution],[LinearBodyState],[SimulationComposite],[Registration],[IntegrationExecutor]")
 
 #endif // WITH_LOW_LEVEL_TESTS
