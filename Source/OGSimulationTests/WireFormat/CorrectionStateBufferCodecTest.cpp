@@ -236,7 +236,13 @@ TEST_CASE("CorrectionStateBuffer.LayoutAndVersionFence",
     // express that difference. `!= 2u` is deliberate company for `!= 1u`: a
     // future append that reasons "offsets did not move, so no bump" must still
     // ask whether the OTHER side even has the sub-simulation.
-    REQUIRE(correctionStateBuffer::kWireFormatVersion == 3u);
+    //
+    // [og-netcode-v2-field-defects task 9, 2026-09-23] 3 -> 4, and this time it is the
+    // ordinary reason: a field (the brawler radial's `hasHitGuard`, 1 B) was REMOVED from the
+    // middle of the state composite, so every later offset moved. `!= 3u` joins the company
+    // below for the same reason `!= 2u` did.
+    REQUIRE(correctionStateBuffer::kWireFormatVersion == 4u);
+    REQUIRE(correctionStateBuffer::kWireFormatVersion != 3u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 2u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 1u);
 
