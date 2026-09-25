@@ -40,9 +40,11 @@
 //     input, no client capture stands behind this tick") round-trips as itself
 //     and is distinguishable from every real capture tick, INCLUDING tick 0,
 //     which is an ordinary session-start capture;
-//   * the version fence is at 3 — the SINGLE fence of the increment.
+//   * the version fence is at 5 — the SINGLE fence of the increment.
 //     History: 1 -> 2 by this task; 2 -> 3 by og-brawler-ringout-gamemode task 2,
-//     when a whole sub-simulation joined the state composite. ⚠ THIS BANNER IS A
+//     when a whole sub-simulation joined the state composite; 3 -> 4 and 4 -> 5 by
+//     og-netcode-v2-field-defects tasks 9 and 17 (fields removed mid-composite;
+//     task 9 left this line at 3, fixed by task 17). ⚠ THIS BANNER IS A
 //     PRESENT-TENSE VALUE CLAIM, so it goes stale on every bump — unlike the
 //     conditional "bump if anything before it moved" wording elsewhere, which does
 //     not. It was missed by that task's own tree-wide sweep because the sweep did
@@ -214,7 +216,7 @@ TEST_CASE("CorrectionStateBuffer.RealCaptureTickZeroIsNotTheSentinel",
 // ---------------------------------------------------------------------------
 // Layout + fence. Both halves are wire contracts a future edit must not move
 // silently: the ref sits between the tick and the composite, and the version
-// fence is at 3.
+// fence is at 5.
 // ---------------------------------------------------------------------------
 TEST_CASE("CorrectionStateBuffer.LayoutAndVersionFence",
           "[WireFormat][CorrectionStateRef]")
@@ -241,7 +243,13 @@ TEST_CASE("CorrectionStateBuffer.LayoutAndVersionFence",
     // ordinary reason: a field (the brawler radial's `hasHitGuard`, 1 B) was REMOVED from the
     // middle of the state composite, so every later offset moved. `!= 3u` joins the company
     // below for the same reason `!= 2u` did.
-    REQUIRE(correctionStateBuffer::kWireFormatVersion == 4u);
+    //
+    // [og-netcode-v2-field-defects task 17, 2026-09-24] 4 -> 5, the ordinary reason again: the
+    // brawler projectile slot's `hitRootBodyId` (4 B) was REMOVED from each of the three pool
+    // slots, which sit in the middle of the state composite. No `!= 4u` was kept: after
+    // `== 5u` any `!=` on another literal cannot fail, so it would read as a second pin and
+    // not be one (task 17 review N3). The `!=` lines below are the earlier tasks' own.
+    REQUIRE(correctionStateBuffer::kWireFormatVersion == 5u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 3u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 2u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 1u);
