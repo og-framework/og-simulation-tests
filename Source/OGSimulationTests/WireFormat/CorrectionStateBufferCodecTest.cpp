@@ -249,7 +249,12 @@ TEST_CASE("CorrectionStateBuffer.LayoutAndVersionFence",
     // slots, which sit in the middle of the state composite. No `!= 4u` was kept: after
     // `== 5u` any `!=` on another literal cannot fail, so it would read as a second pin and
     // not be one (task 17 review N3). The `!=` lines below are the earlier tasks' own.
-    REQUIRE(correctionStateBuffer::kWireFormatVersion == 5u);
+    //
+    // [og-netcode-v2-field-defects task 27, 2026-09-26] 5 -> 6, the ordinary reason again: the
+    // brawler radial InitialConditions' dead `activeRootBodyId` (4 B) was REMOVED from the
+    // composite's first slice, and the radial State gained its 3 B synced hit ledger. Seen RED
+    // on the edit (`6 == 5`). No `!= 5u`, for task 17's reason above.
+    REQUIRE(correctionStateBuffer::kWireFormatVersion == 6u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 3u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 2u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 1u);
