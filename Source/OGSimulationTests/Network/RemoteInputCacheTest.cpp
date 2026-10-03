@@ -475,6 +475,27 @@ TEST_CASE("RemoteInputCache: a version mismatch drops the WHOLE ring",
     REQUIRE_FALSE(store.findLatest().valid);
 }
 
+TEST_CASE("RemoteInputCache: a relayed ring stamped version 1 is refused",
+          "[Network][RemoteInputCache]")
+{
+    RemoteInputCache<StoreTestInput> store(gameZeroInput());
+
+    StoreTestRing ring = makeRing({ 300u, 301u, 302u }, 3);
+    REQUIRE(relayedInputRing::getWireFormatVersion(ring) == relayedInputRing::kWireFormatVersion);
+    REQUIRE(relayedInputRing::entryCount(ring) == 3u);
+
+    ring.bytes[relayedInputRing::kVersionOffset] = static_cast<std::uint8_t>(1u);
+
+    const RelayedInputIngestReport report =
+        populateRemoteInputCache<StoreTestInput>(store, ring);
+
+    REQUIRE(report.outcome == RelayedInputIngestOutcome::VersionMismatch);
+    REQUIRE(report.versionOnWire == 1u);
+    REQUIRE(report.entriesIngested == 0u);
+    REQUIRE(store.residentCount() == 0u);
+    REQUIRE_FALSE(store.findLatest().valid);
+}
+
 // [og-netcode-v2-input-relay task 79] "RemoteInputCache: the mismatch log gate
 // opens exactly once per store" USED TO BE HERE. The gate it exercised
 // (`shouldLogVersionMismatchOnce`) is retired from this class — see the
