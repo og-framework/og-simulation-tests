@@ -183,21 +183,6 @@ namespace
         template <typename T> void writeToBuffer(std::uint32_t, T) {}
     };
 
-    struct RegInputSyncBuffer
-    {
-        std::uint32_t lastTick = 0;
-        RegInput      lastInput{};
-
-        void write(const RegInput& input, std::uint32_t tick)
-        { lastInput = input; lastTick = tick; }
-
-        std::uint32_t readInto(RegInput& outInput) const
-        { outInput = lastInput; return lastTick; }
-
-        template <typename T> T readFromBuffer(std::uint32_t) const { return T{}; }
-        template <typename T> void writeToBuffer(std::uint32_t, T) {}
-    };
-
     struct RegRelayedInputRing
     {
         std::vector<std::uint8_t> bytes;
@@ -219,12 +204,10 @@ namespace
     struct RegPredictionOwner
     {
         using SyncedCorrectionBufferType  = RegStateSyncBuffer;
-        using SyncedRemoteInputBufferType = RegInputSyncBuffer;
         using RelayedInputRingType        = RegRelayedInputRing;
 
         std::function<void(const RegStateSyncBuffer&)>   onCorrectionStateReceived;
         std::function<void(const RegRelayedInputRing&)>  onRelayedInputReceived;
-        RegInputSyncBuffer                               outgoingInputBuffer;
         RegRelayedInputRing                              relayedInputRing;
 
         void setOnCorrectionStateReceivedCallback(std::function<void(const RegStateSyncBuffer&)> fn)
@@ -236,8 +219,6 @@ namespace
         void clearOnRelayedInputReceivedCallback() { onRelayedInputReceived = nullptr; }
 
         const RegRelayedInputRing& getRelayedInputRing() const { return relayedInputRing; }
-
-        RegInputSyncBuffer* getClientToServerInputSyncedBuffer() { return &outgoingInputBuffer; }
 
         void sendLocalInputToAuthority(const PendingInputQueue<RegInput>&,
                                        std::uint32_t, std::uint32_t) {}

@@ -23,8 +23,9 @@
 // the engine-coupled OGSimulationUnreal module (bCompileAgainstEngine = false).
 //
 // DEFERRED (UE-coupled, not in this file): the watermark-trim NetSerialize +
-// version-byte-offset regressions for FSimulationStateSyncBuffer /
-// FSimulationInputSyncBuffer (Backlog T12 "WireFormat_Buffers.cpp"). Those need
+// version-byte-offset regressions for FSimulationStateSyncBuffer (Backlog T12
+// "WireFormat_Buffers.cpp"; the input sync buffer it also named was retired in
+// og-syncedInput-rework task 9). Those need
 // FArchive + the USTRUCT NetSerialize, which require an engine-coupled LLT
 // target that does not exist yet (docs/low-level-tests.md "Future: testing
 // UE-coupled code"). Deferred per user direction 2026-06-22; see impl notes.
