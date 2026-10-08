@@ -8,6 +8,11 @@ file(GLOB_RECURSE OGSIM_TESTS_SOURCES CONFIGURE_DEPENDS
     "${CMAKE_CURRENT_SOURCE_DIR}/*.h"
 )
 
+# Jolt/ needs og_simulation_jolt (og-simulation-jolt); without that target the Jolt cases are left out.
+if(NOT TARGET og_simulation_jolt)
+    list(FILTER OGSIM_TESTS_SOURCES EXCLUDE REGEX "/Jolt/")
+endif()
+
 add_executable(og_simulation_tests ${OGSIM_TESTS_SOURCES})
 
 target_compile_definitions(og_simulation_tests PRIVATE
@@ -15,5 +20,9 @@ target_compile_definitions(og_simulation_tests PRIVATE
 )
 
 target_link_libraries(og_simulation_tests PRIVATE og_simulation Catch2 glm::glm-header-only)
+
+if(TARGET og_simulation_jolt)
+    target_link_libraries(og_simulation_tests PRIVATE og_simulation_jolt)
+endif()
 
 add_test(NAME og_simulation_tests COMMAND og_simulation_tests)

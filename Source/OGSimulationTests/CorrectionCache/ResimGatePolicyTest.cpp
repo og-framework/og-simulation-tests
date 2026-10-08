@@ -66,6 +66,7 @@ namespace
 		void captureBodyStatesAll() {}
 		void integrateAll(const SimulationTimeStep&, int) {}
 		void firstResimStepAll(int32_t) {}
+		void pushCorrectedBodyStatesAll() {}
 	};
 	// [item 87] `collectInputAll` (RENAMED `prepareSimulationStep` at item 90,
 	// RENAMED BACK at item 94) / `collectResimInputAll` / `wipeAllForResync`
@@ -604,7 +605,7 @@ TEST_CASE("ResimGate.Policy.TheResimGateProbeAccessorObservesTheShippedFeed",
 //      (`ClientPredictionClock.cpp`'s `doNormalAdvance`), which also advances
 //      `m_resimulationTick` in lockstep while the two are in sync. This is
 //      exact, deterministic arithmetic, not a race against drift correction.
-//   2. `prepareResimulation(chaosStep=0, simTick=1)` — the SAME public entry
+//   2. `prepareResimulation(physicsStep=0, simTick=1)` — the SAME public entry
 //      point Chaos's rewind hook calls in production — sets the resim cursor
 //      to 1, one tick behind the frontier (2), so `isResimulating()` becomes
 //      true.
@@ -637,7 +638,7 @@ TEST_CASE("ResimGate.Policy.OnPostGameSimulationFeedsSurvivingAnchorsToTheProbe"
 	// Step 2: prepare a resim from tick 1 — one behind the frontier (2) — the
 	// same door `FSimulationManagerAsyncCallback::TriggerRewindIfNeeded_Internal`
 	// calls in production.
-	rig.manager.prepareResimulation(/*chaosStep=*/0, /*simTick=*/1u);
+	rig.manager.prepareResimulation(/*physicsStep=*/0, /*simTick=*/1u);
 
 	// Step 3: one resim replay tick brings the resim cursor to 2, equal to the
 	// frontier — the clock has caught up mid-Chaos-resim.
@@ -713,7 +714,7 @@ TEST_CASE("SimulationManager.SystemsExecutorReceivesTheManagerRole",
 		rig.manager.onGameSimulation(SimulationUpdateInfo(/*isResimulation=*/false, /*isFirstResimulationStep=*/false));
 		// A resim from tick 1, then one replay tick - the same door
 		// `TriggerRewindIfNeeded_Internal` uses in production.
-		rig.manager.prepareResimulation(/*chaosStep=*/0, /*simTick=*/1u);
+		rig.manager.prepareResimulation(/*physicsStep=*/0, /*simTick=*/1u);
 		rig.manager.onGameSimulation(SimulationUpdateInfo(/*isResimulation=*/true, /*isFirstResimulationStep=*/true));
 		rig.manager.notifyCharacterRegistered(7u);
 		rig.manager.notifyCharacterUnregistered(7u);
