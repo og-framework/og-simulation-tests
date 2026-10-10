@@ -65,6 +65,6 @@
 // integrateAll opens around each integrate. Its nested-scope vacuity arm is
 // hidden ([.][IntegrationExecutorNestedScope]) because it is expected to abort.
 CATCH_REGISTER_TAG_ALIAS("[@og]",
-    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Network],[Reconciliation],[Determinism][Production],[SimulatableList],[StorageView],[SystemsExecutor],[CorrectionCache],[InputResolution],[LinearBodyState],[SimulationComposite],[Registration],[IntegrationExecutor],[Scheduler],[StepDriver],[Mailbox],[PhysicsWorld],[StaticGeometry],[ThreadRunner],[LatencyProbe],[Jolt],[NetTransport],[HotPathSession],[Dilation],[Outbound],[Lifecycle],[RenderSnapshot]")
+    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Network],[Reconciliation],[Determinism][Production],[SimulatableList],[StorageView],[SystemsExecutor],[CorrectionCache],[InputResolution],[LinearBodyState],[SimulationComposite],[Registration],[IntegrationExecutor],[Scheduler],[StepDriver],[Mailbox],[PhysicsWorld],[StaticGeometry],[ThreadRunner],[LatencyProbe],[Jolt],[NetTransport],[HotPathSession],[Dilation],[Outbound],[Lifecycle],[RenderSnapshot],[RenderInterpolation]")
 
 #endif // WITH_LOW_LEVEL_TESTS
