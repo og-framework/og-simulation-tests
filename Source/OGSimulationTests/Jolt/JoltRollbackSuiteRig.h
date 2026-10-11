@@ -203,9 +203,19 @@ namespace joltSuite
         int32_t input = 0;
     };
 
+    enum class ProbeDrive : uint8_t
+    {
+        Scripted,
+        Swing
+    };
+
+    inline constexpr uint32_t kSwingPhaseTicks = 20;
+    inline constexpr float kSwingAngularAcceleration = 12.f;
+
     struct ProbeStaticData
     {
         std::vector<IntegrateRecord>* log = nullptr;
+        ProbeDrive drive = ProbeDrive::Scripted;
     };
 
     inline float scriptedAcceleration(uint32_t tick, uint32_t id, uint32_t axis, int32_t input)
@@ -246,6 +256,12 @@ namespace joltSuite
             if (staticData.log != nullptr)
             {
                 staticData.log->push_back(IntegrateRecord{ id, step.getTick(), step.getStepKind(), step.getIsResimulating(), input.value });
+            }
+
+            if (staticData.drive == ProbeDrive::Swing)
+            {
+                integrateSwing(step, input, physics, query);
+                return;
             }
 
             ProbeState& state = m_all.editState();
@@ -296,6 +312,31 @@ namespace joltSuite
         }
 
     private:
+        void integrateSwing(const SimulationTimeStep& step, const ProbeInput& input, JoltPhysicsBodyAdapter& physics, JoltSpatialQueryAdapter& query)
+        {
+            ProbeState& state = m_all.editState();
+            const uint32_t tick = step.getTick();
+            const glm::vec3 capsulePosition = state.capsule.bodyState.position;
+            glm::vec3 capsuleVelocity = state.capsule.bodyState.linearVelocity;
+
+            query.setVolumeParentTransform(volume, glm::translate(glm::mat4(1.f), capsulePosition));
+            state.queryHits = int32_t(query.overlap({ volume }).size());
+
+            const glm::vec3 home = homeOf(slot);
+            capsuleVelocity.x += kDt * (scriptedAcceleration(tick, id, 0, input.value) - 3.f * capsuleVelocity.x - 4.f * (capsulePosition.x - home.x));
+            capsuleVelocity.y += kDt * (scriptedAcceleration(tick, id, 1, input.value) - 3.f * capsuleVelocity.y - 4.f * (capsulePosition.y - home.y));
+            glm::mat4 capsulePose(1.f);
+            capsulePose[3] = glm::vec4(capsulePosition, 1.f);
+            physics.setBodyTransform(composite.bodyOf(5), capsulePose);
+            physics.setBodyLinearVelocity(composite.bodyOf(5), capsuleVelocity);
+
+            const float angularAcceleration = ((tick / kSwingPhaseTicks + id) % 2u == 0u ? 1.f : -1.f) * kSwingAngularAcceleration;
+            physics.addBodyTorque(composite.bodyOf(0), physics.getBodyInertiaTensor(composite.bodyOf(0)) * glm::vec3(0.2f, 0.f, 1.f) * angularAcceleration);
+
+            ++state.integrations;
+            state.lastInput = input.value;
+        }
+
         ProbeAllState m_all;
         ProbeAllState m_viz;
     };
@@ -694,6 +735,7 @@ namespace joltSuite
         uint32_t depthTicks = 8;
         int32_t inputDelayTicks = 2;
         TimeConfig::ResimTriggerPolicy triggerPolicy = TimeConfig::ResimTriggerPolicy::OnDisagreement;
+        ProbeDrive drive = ProbeDrive::Scripted;
     };
 
     using ProbeDriver = SimulationStepDriver<ProbeManager, ObservedJoltWorld, PushProbeExecutor, ProbeHooks>;
@@ -704,7 +746,7 @@ namespace joltSuite
             : config(rigConfig)
             , scene(runtime, rigConfig.scene)
             , observed(scene.world)
-            , staticData{ &log }
+            , staticData{ &log, rigConfig.drive }
             , reconciliation(storage)
             , resolution(storage, reconciliation)
             , netSync(storage, reconciliation, resolution)
