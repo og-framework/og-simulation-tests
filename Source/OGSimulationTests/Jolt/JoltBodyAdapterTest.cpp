@@ -359,7 +359,7 @@ TEST_CASE("JoltPhysicsFactory.EveryBrawlerDeclarationBindsAChaosParityBody", "[J
     JoltPhysicsFactory factory(adapter, declarations, kSlot, kSimulatableId);
 
     CHECK(factory.parentBodyId() == JoltPhysicsBodyAdapter::bodyIdOf(world.slotBodyId(kSlot, kCapsule)));
-    CHECK(world.physics().GetCombineFriction() == &joltBodyDefaults::combineFrictionAverage);
+    CHECK(world.physics().GetCombineFriction() == &joltBodyDefaults::combineFrictionAverageExceptRoots);
     CHECK(world.physics().GetCombineRestitution() == &joltBodyDefaults::combineRestitutionAverage);
 
     for (uint32_t index = 0; index < declarations.size(); ++index)
@@ -420,8 +420,11 @@ TEST_CASE("JoltPhysicsFactory.EveryBrawlerDeclarationBindsAChaosParityBody", "[J
 
     JPH::BodyLockRead capsuleLock(world.physics().GetBodyLockInterfaceNoLock(), world.slotBodyId(kSlot, kCapsule));
     JPH::BodyLockRead radialLock(world.physics().GetBodyLockInterfaceNoLock(), world.slotBodyId(kSlot, kRadial));
+    JPH::BodyLockRead guardLock(world.physics().GetBodyLockInterfaceNoLock(), world.slotBodyId(kSlot, kGuardBody));
     const JPH::SubShapeID wholeShape;
-    CHECK(world.physics().GetCombineFriction()(capsuleLock.GetBody(), wholeShape, radialLock.GetBody(), wholeShape) == Catch::Approx(0.35f));
+    CHECK(world.physics().GetCombineFriction()(capsuleLock.GetBody(), wholeShape, radialLock.GetBody(), wholeShape) == 0.f);
+    CHECK(world.physics().GetCombineFriction()(radialLock.GetBody(), wholeShape, capsuleLock.GetBody(), wholeShape) == 0.f);
+    CHECK(world.physics().GetCombineFriction()(radialLock.GetBody(), wholeShape, guardLock.GetBody(), wholeShape) == Catch::Approx(0.7f));
     CHECK(world.physics().GetCombineRestitution()(capsuleLock.GetBody(), wholeShape, radialLock.GetBody(), wholeShape) == Catch::Approx(0.15f));
 }
 
@@ -488,7 +491,7 @@ TEST_CASE("JoltBodyAdapter.ResolvableMeansBoundNeverOccupied", "[Jolt]")
     CHECK(reader.captureBodyState(slot1Capsule).position == glm::vec3(0.f));
     CHECK(reader.getBodyMass(slot1Capsule) == 0.f);
     CHECK(adapter.getBodyMass(slot1Capsule) > 0.f);
-    CHECK(world.bodies().GetUserData(world.slotBodyId(1, kCapsule)) == joltBodyUserData::encode(JoltBodyBinding{ kSimulatableId, 5 }));
+    CHECK(world.bodies().GetUserData(world.slotBodyId(1, kCapsule)) == joltBodyUserData::encode(JoltBodyBinding{ kSimulatableId, 5 }, /*isRoot*/ true));
 
     CHECK_FALSE(adapter.isBodyResolvable(BodyId{ 0 }));
     CHECK_FALSE(adapter.isBodyResolvable(BodyId{ 1u + world.simulatableSlots() * world.bodiesPerSlot() }));
