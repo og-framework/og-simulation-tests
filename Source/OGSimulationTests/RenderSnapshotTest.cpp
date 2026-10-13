@@ -5,6 +5,8 @@
 #include "glm/glm.hpp"
 #include "glm/gtc/quaternion.hpp"
 #include "OGSimulation/PhysicsBodyState.h"
+#include "OGSimulation/PhysicsDeclaration.h"
+#include "OGSimulation/QueryGeometry.h"
 #include "OGSimulation/RenderSnapshot.h"
 #include "OGSimulation/SimulationObjectStorage.h"
 #include "OGSimulation/SimulationTimeContext.h"
@@ -293,6 +295,123 @@ TEST_CASE("RenderSnapshot.KeyOrderSpansSimulatableTypes", "[RenderSnapshot]")
     }
     CHECK(snapshot.bodies[0].positionCm == linearPositionOf(1u));
     CHECK(snapshot.bodies[3].positionCm == linearPositionOf(10u));
+}
+
+namespace
+{
+    struct RootPart { LinearBodyState bodyState; };
+    struct ChildPart { PhysicsBodyState bodyState; };
+    struct PlainPart { LinearBodyState bodyState; };
+
+    struct ThreeBodyState
+    {
+        RootPart root;
+        ChildPart child;
+        PlainPart plain;
+
+        template <typename S>
+        const S& get() const
+        {
+            if constexpr (std::is_same_v<S, RootPart>)
+                return root;
+            else if constexpr (std::is_same_v<S, ChildPart>)
+                return child;
+            else
+                return plain;
+        }
+    };
+
+    PhysicalObjectDescriptor descriptorWithRoot(bool isRoot)
+    {
+        PhysicalObjectDescriptor descriptor;
+        descriptor.body.isRoot = isRoot;
+        return descriptor;
+    }
+
+    struct RootDeclaration
+    {
+        using StateType = RootPart;
+        static const PhysicalObjectDescriptor& descriptor()
+        {
+            static const PhysicalObjectDescriptor value = descriptorWithRoot(true);
+            return value;
+        }
+        static const LinearBodyState& bodyStateOf(const RootPart& s) { return s.bodyState; }
+    };
+
+    struct SnappedChildDeclaration
+    {
+        using StateType = ChildPart;
+        static constexpr RenderCorrectionMode renderCorrection = RenderCorrectionMode::SnapInRootFrame;
+        static const PhysicalObjectDescriptor& descriptor()
+        {
+            static const PhysicalObjectDescriptor value = descriptorWithRoot(false);
+            return value;
+        }
+        static const PhysicsBodyState& bodyStateOf(const ChildPart& s) { return s.bodyState; }
+    };
+
+    struct PlainDeclaration
+    {
+        using StateType = PlainPart;
+        static const LinearBodyState& bodyStateOf(const PlainPart& s) { return s.bodyState; }
+    };
+
+    struct ThreeDeclarationComposite
+    {
+        RootDeclaration root;
+        SnappedChildDeclaration child;
+        PlainDeclaration plain;
+
+        template <typename F>
+        void forEach(F&& f) const
+        {
+            f(root);
+            f(child);
+            f(plain);
+        }
+    };
+
+    struct ThreeBodySimulatable
+    {
+        using InputType = NoInput;
+
+        const AllStateOf<ThreeBodyState>& getAllState() const { return allState; }
+        const ThreeDeclarationComposite& getPhysicsComposite() const { return composite; }
+
+        AllStateOf<ThreeBodyState> allState;
+        ThreeDeclarationComposite composite;
+    };
+}
+
+TEST_CASE("RenderSnapshot.RenderCorrectionModeAndRootAreCopiedPerBody", "[RenderSnapshot]")
+{
+    STATIC_REQUIRE(renderCorrectionModeOf<SnappedChildDeclaration>() == RenderCorrectionMode::SnapInRootFrame);
+    STATIC_REQUIRE(renderCorrectionModeOf<RootDeclaration>() == RenderCorrectionMode::Smooth);
+    STATIC_REQUIRE(renderCorrectionModeOf<PlainDeclaration>() == RenderCorrectionMode::Smooth);
+
+    SimulationObjectStorage<ThreeBodySimulatable> storage;
+    storage.add(6u, ThreeBodySimulatable{});
+
+    Snapshot snapshot;
+    for (RenderBody& body : snapshot.bodies)
+    {
+        body.renderCorrection = 0xABu;
+        body.isRoot = 0xABu;
+    }
+    fillRenderSnapshot(snapshot, storage, someOutcome(), 0.0);
+
+    REQUIRE(snapshot.bodyCount == 3u);
+    const std::vector<std::pair<uint8_t, uint8_t>> expected{ { 0u, 1u }, { 1u, 0u }, { 0u, 0u } };
+    for (size_t index = 0; index < expected.size(); ++index)
+    {
+        INFO("declaration " << index << " (root, snapped child, plain)");
+        CHECK(snapshot.bodies[index].declarationIndex == uint8_t(index));
+        CHECK(snapshot.bodies[index].renderCorrection == expected[index].first);
+        CHECK(snapshot.bodies[index].isRoot == expected[index].second);
+    }
+    CHECK(snapshot.bodies[0].hasRotation == 0u);
+    CHECK(snapshot.bodies[1].hasRotation == 1u);
 }
 
 #endif // WITH_LOW_LEVEL_TESTS
