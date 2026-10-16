@@ -18,8 +18,8 @@
 #include "../Mocks/MockPhysicsWorld.h"
 
 // Shared by the step-driver suites. Every call the driver makes on the world, the hooks and the
-// integration executor lands in ONE ordered event list, so a case can assert the interleaving
-// across all of them, not just each one's own order.
+// manager lands in ONE ordered event list, so a case can assert the interleaving across all of
+// them, not just each one's own order.
 namespace stepDriverTestSupport
 {
     using Events = std::vector<std::string>;
@@ -176,25 +176,6 @@ namespace stepDriverTestSupport
     };
 
     static_assert(StepHooks<RecordingHooks>, "RecordingHooks must model StepHooks");
-
-    class RecordingIntegration
-    {
-    public:
-        explicit RecordingIntegration(Events& events) : m_events(&events) {}
-
-        void firstResimStepAll(int32_t) {}
-        void captureBodyStatesAll() {}
-        void pushCorrectedBodyStatesAll()
-        {
-            ++pushes;
-            m_events->push_back("push");
-        }
-
-        uint32_t pushes = 0;
-
-    private:
-        Events* m_events;
-    };
 
     // The interleaving of one resim of `anchor` up to `present`, followed by the normal tick
     // `present + 1`: the sequence the task's acceptance criteria spell out.

@@ -259,12 +259,16 @@ namespace
             return pendingAnchor.has_value() ? *pendingAnchor : std::numeric_limits<unsigned int>::max();
         }
 
+        // Mirrors the real manager, whose prepareResimulation ends with the push
+        // (StepDriver.RealManager.PrepareResimulationPushesOnceAfterTheCacheRestore pins that).
         void prepareResimulation(int32_t physicsStep, uint32_t simTick)
         {
             m_events->push_back(tickEvent("prepare", simTick));
             preparedPhysicsSteps.push_back(physicsStep);
             m_probe.notePrepare(simTick);
             m_clock.startResimulation(simTick);
+            ++pushes;
+            m_events->push_back("push");
         }
 
         uint32_t currentIntegratedTick() const { return m_lastStep.has_value() ? m_lastStep->getTick() : 0u; }
@@ -290,6 +294,7 @@ namespace
         uint32_t applyEdges = 0u;
         uint32_t checks = 0u;
         uint32_t wipes = 0u;
+        uint32_t pushes = 0u;
 
     private:
         void integrate()
@@ -319,16 +324,15 @@ namespace
         std::optional<SimulationTimeStep> m_lastStep;
     };
 
-    using Driver = SimulationStepDriver<RecordingManager, LoggedWorld, RecordingIntegration, RecordingHooks>;
+    using Driver = SimulationStepDriver<RecordingManager, LoggedWorld, RecordingHooks>;
 
     struct Rig
     {
         explicit Rig(bool client, uint32_t ringDepthTicks = 64u, StepDriverConfig config = StepDriverConfig{ kDt })
             : world(ringDepthTicks, events)
             , manager(client, events, world, ringDepthTicks)
-            , integration(events)
             , hooks(events)
-            , driver(manager, world, integration, hooks, config)
+            , driver(manager, world, hooks, config)
         {
         }
 
@@ -363,7 +367,6 @@ namespace
         Events events;
         LoggedWorld world;
         RecordingManager manager;
-        RecordingIntegration integration;
         RecordingHooks hooks;
         Driver driver;
         uint64_t physicsStep = 0u;
@@ -1072,11 +1075,10 @@ TEST_CASE("StepDriver.ResyncCallbacks.TheDriverUnregistersItsOwnCallbackOnDestru
     Events events;
     LoggedWorld world(8u, events);
     RecordingManager manager(/*runsPrediction=*/true, events, world, 8u);
-    RecordingIntegration integration(events);
     RecordingHooks hooks(events);
     REQUIRE(manager.getClientClock().callbackCount() == 1u);
     {
-        Driver driver(manager, world, integration, hooks, StepDriverConfig{ kDt });
+        Driver driver(manager, world, hooks, StepDriverConfig{ kDt });
         REQUIRE(manager.getClientClock().callbackCount() == 2u);
     }
     REQUIRE(manager.getClientClock().callbackCount() == 1u);

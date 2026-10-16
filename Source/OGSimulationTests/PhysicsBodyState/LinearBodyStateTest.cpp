@@ -26,9 +26,9 @@
 // lossy behaviour is PINNED here rather than left to be discovered:
 //
 //   * the fabricated values are asserted, not merely described;
-//   * the widening is asserted to be IMPLICIT — the engine's rewind push
-//     `pushBodyState(ownBodyId, D::bodyStateOf(state))` takes a
-//     `const PhysicsBodyState&` at a generic call site, and that implicit
+//   * the widening is asserted to be IMPLICIT — the rewind push reads
+//     `D::bodyStateOf(state)` as a `PhysicsBodyState` at generic call sites
+//     (`pushCorrectedBodyStatesAll`, and an engine host's push probe), and that implicit
 //     conversion is the zero-edit property the whole design rests on. Marking
 //     the operator `explicit` breaks `is_convertible` below, loudly;
 //   * the narrowing direction is asserted to be ASSIGNMENT-ONLY. There is no
@@ -322,7 +322,7 @@ TEST_CASE("LinearBodyState push bridge fabricates identity rotation, zero angula
     slim.position       = glm::vec3(10.f, 20.f, 30.f);
     slim.linearVelocity = glm::vec3(-1.f, -2.f, -3.f);
 
-    // Implicit — exactly as at `pushBodyState(id, D::bodyStateOf(state))`.
+    // Implicit — exactly as where the push probe stashes `D::bodyStateOf(state)`.
     const PhysicsBodyState widened = slim;
 
     CHECK(widened.position.x == 10.f);
@@ -440,10 +440,10 @@ TEST_CASE("PhysicsDeclaration accepts both body-state shapes and rejects gaps",
 TEST_CASE("PhysicsDeclaration requires the const bodyStateOf overload to widen",
           "[LinearBodyState][ConstWidening]")
 {
-    // F-1. The rewind push is
-    //     pushBodyState(decl.bindings.ownBodyId, D::bodyStateOf(state))
-    // against `pushBodyState(BodyId, const PhysicsBodyState&)`. It reads through
-    // the CONST overload and lets it convert. Requiring that overload merely to
+    // F-1. The rewind push (`pushCorrectedBodyStatesAll`) reads
+    //     D::bodyStateOf(state.template get<S>())
+    // as a `PhysicsBodyState`. It reads through the CONST overload and lets it
+    // convert. Requiring that overload merely to
     // EXIST left the conversion assumed; it is now checked.
     STATIC_REQUIRE_FALSE(PhysicsDeclaration<MockNonWideningConstBodyStateDecl, MockGameStaticData>);
 

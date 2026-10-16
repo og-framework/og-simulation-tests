@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: MPL-2.0
 #if WITH_LOW_LEVEL_TESTS
 
+#include <algorithm>
 #include <cstdint>
+#include <iterator>
 #include <set>
 #include <vector>
 
@@ -33,9 +35,17 @@ namespace
     {
         void firstResimStepAll(int32_t) {}
         void captureBodyStatesAll() {}
-        void pushCorrectedBodyStatesAll() { ++pushes; }
+        void pushCorrectedBodyStatesAll()
+        {
+            ++pushes;
+            if (events != nullptr)
+            {
+                events->push_back("push");
+            }
+        }
         void integrateAll(const SimulationTimeStep&, int) {}
         uint32_t pushes = 0u;
+        Events* events = nullptr;
     };
 
     struct RmNetSync
@@ -88,7 +98,13 @@ namespace
             }
         }
 
-        void prepareResimAll(std::uint32_t) {}
+        void prepareResimAll(std::uint32_t)
+        {
+            if (events != nullptr)
+            {
+                events->push_back("prepareResimAll");
+            }
+        }
         void applyResimAll() { ++applies; }
         void postPredictionAll(const SimulationTimeStep&) {}
         ResimSweepDiagnostics postResimulationAll(const SimulationTimeStep&) { return ResimSweepDiagnostics{}; }
@@ -104,6 +120,7 @@ namespace
         uint32_t wipes = 0u;
         uint32_t consumes = 0u;
         uint32_t applies = 0u;
+        Events* events = nullptr;
     };
 
     struct RmSystemsExec
@@ -132,7 +149,7 @@ namespace
                   RealManager::Params{ integration, netSync, inputResolution, reconciliation, systemsExec,
                                        storage, staticData, nullptr })
             , hooks(events)
-            , driver(manager, world, integration, hooks, StepDriverConfig{ 1.f / 60.f })
+            , driver(manager, world, hooks, StepDriverConfig{ 1.f / 60.f })
         {
         }
 
@@ -167,7 +184,7 @@ namespace
         LoggedWorld world;
         RealManager manager;
         RecordingHooks hooks;
-        SimulationStepDriver<RealManager, LoggedWorld, RmIntegration, RecordingHooks> driver;
+        SimulationStepDriver<RealManager, LoggedWorld, RecordingHooks> driver;
         uint64_t physicsStep = 0u;
     };
 }
@@ -276,6 +293,57 @@ TEST_CASE("StepDriver.RealManager.TheAuthorityStepsServerTickPlusOneAndSavesNoth
     }
     CHECK(savedTicksIn(rig.events).empty());
     CHECK(countOf(rig.events, "scratch") == 0u);
+}
+
+// The real manager's prepareResimulation is the push's only production caller: per granted resim it
+// restores og-sim state (prepareResimAll) and then pushes it into the already-restored world, once,
+// before the first replayed step.
+TEST_CASE("StepDriver.RealManager.PrepareResimulationPushesOnceAfterTheCacheRestore", "[StepDriver]")
+{
+    RealManagerRig rig(/*client=*/true, /*ringDepthTicks=*/32u);
+    rig.integration.events = &rig.events;
+    rig.reconciliation.events = &rig.events;
+
+    rig.holdDrift(500);
+    REQUIRE(rig.tick().hardResync);
+    for (int i = 0; i < 10; ++i)
+    {
+        rig.holdDrift(1);
+        REQUIRE(rig.tick().kind == StepKind::Normal);
+    }
+
+    uint32_t granted = 0u;
+    for (const uint32_t depth : { 6u, 1u, 3u })
+    {
+        INFO("resim depth " << depth);
+        const SimTick present = rig.present();
+        const SimTick anchor = present - depth;
+        rig.reconciliation.anchor = anchor;
+        rig.holdDrift(1);
+        rig.events.clear();
+        const TickOutcome resim = rig.tick();
+        REQUIRE_FALSE(resim.resimRefused);
+        REQUIRE(resim.replayedTicks == depth);
+        ++granted;
+
+        REQUIRE(countOf(rig.events, "prepareResimAll") == 1u);
+        REQUIRE(countOf(rig.events, "push") == 1u);
+        const auto prepareAt = std::distance(rig.events.begin(),
+            std::find(rig.events.begin(), rig.events.end(), std::string("prepareResimAll")));
+        const auto pushAt = std::distance(rig.events.begin(),
+            std::find(rig.events.begin(), rig.events.end(), std::string("push")));
+        REQUIRE(prepareAt < pushAt);
+
+        const auto restore = std::find(rig.events.begin(), rig.events.end(), tickEvent("restore", anchor));
+        REQUIRE(std::distance(restore, rig.events.end()) >= 6);
+        const Events arm(restore, restore + 6);
+        REQUIRE(arm == Events{ tickEvent("restore", anchor), "occ", "prepareResimAll", "push", "occ", "step" });
+
+        rig.holdDrift(1);
+        REQUIRE(rig.tick().replayedTicks == 0u);
+    }
+    REQUIRE(rig.integration.pushes == granted);
+    REQUIRE(rig.reconciliation.consumes == granted);
 }
 
 #endif // WITH_LOW_LEVEL_TESTS

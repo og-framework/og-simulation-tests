@@ -427,7 +427,6 @@ namespace joltSuite
     using ProbeNetSync = SimulationNetSync<ProbeSim>;
     using ProbeExecutor = SimulationIntegrationExecutor<ProbeStaticData, JoltPhysicsBodyAdapter, JoltSpatialQueryAdapter, ProbeSim>;
     using ProbeSystems = NullSystemsExecutor<SimulatableList<ProbeSim>, ProbeStaticData>;
-    using ProbeManager = SimulationManager<ProbeExecutor, ProbeNetSync, ProbeResolution, ProbeReconciliation, ProbeSystems, ProbeStorage, ProbeStaticData>;
 
     inline ProbeInput scriptedInput(const SimulationTimeStep& step, uint32_t id)
     {
@@ -688,6 +687,8 @@ namespace joltSuite
 
         void firstResimStepAll(int32_t physicsStep) { m_executor.firstResimStepAll(physicsStep); }
         void captureBodyStatesAll() { m_executor.captureBodyStatesAll(); }
+        template <typename InputsT>
+        void integrateAll(const SimulationTimeStep& step, const InputsT& inputs) { m_executor.integrateAll(step, inputs); }
         void pushCorrectedBodyStatesAll()
         {
             std::vector<PhysicsBodyState> before;
@@ -718,6 +719,8 @@ namespace joltSuite
 
     static_assert(SimulationIntegrationExecutorConcept<PushProbeExecutor>);
 
+    using ProbeManager = SimulationManager<PushProbeExecutor, ProbeNetSync, ProbeResolution, ProbeReconciliation, ProbeSystems, ProbeStorage, ProbeStaticData>;
+
     struct ProbeHooks
     {
         void beforeTick(const UpcomingTick&) {}
@@ -738,7 +741,7 @@ namespace joltSuite
         ProbeDrive drive = ProbeDrive::Scripted;
     };
 
-    using ProbeDriver = SimulationStepDriver<ProbeManager, ObservedJoltWorld, PushProbeExecutor, ProbeHooks>;
+    using ProbeDriver = SimulationStepDriver<ProbeManager, ObservedJoltWorld, ProbeHooks>;
 
     struct DriverRig
     {
@@ -752,8 +755,8 @@ namespace joltSuite
             , netSync(storage, reconciliation, resolution)
             , executor(storage, staticData, scene.bodies, scene.query)
             , pushProbe(executor, storage, scene.bodies)
-            , manager(true, double(kDt), ProbeManager::Params{ executor, netSync, resolution, reconciliation, systems, storage, staticData, nullptr })
-            , driver(manager, observed, pushProbe, hooks, StepDriverConfig{ kDt, rigConfig.policy, rigConfig.depthTicks })
+            , manager(true, double(kDt), ProbeManager::Params{ pushProbe, netSync, resolution, reconciliation, systems, storage, staticData, nullptr })
+            , driver(manager, observed, hooks, StepDriverConfig{ kDt, rigConfig.policy, rigConfig.depthTicks })
         {
             resolution.setNeutralInput<ProbeSim>(ProbeInput{ 0 });
             resolution.setClientEffectiveInputDelayTicks(rigConfig.inputDelayTicks);
