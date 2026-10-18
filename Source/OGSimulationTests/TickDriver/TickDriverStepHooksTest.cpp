@@ -211,7 +211,7 @@ namespace
         {
         }
 
-        void applyOccupancyCommands_Step() { m_events->push_back("drainOccupancy"); }
+        void applyBodySlotOccupancyCommands_Step() { m_events->push_back("drainBodySlotOccupancy"); }
 
         void publishTickOffset_Step(int64_t offset)
         {
@@ -339,7 +339,7 @@ namespace
 
     Events clientResimTick(SimTick anchor, SimTick present, uint64_t physicsStep)
     {
-        Events expected{ "clock", "drainOccupancy", tickEvent("restore", anchor), "occ", tickEvent("prepare", anchor) };
+        Events expected{ "clock", "drainBodySlotOccupancy", tickEvent("restore", anchor), "occ", tickEvent("prepare", anchor) };
         for (SimTick tick = anchor + 1u; tick <= present; ++tick)
         {
             expected.insert(expected.end(), { "occ", "simResim", "step", "postResim", tickEvent("save", tick) });
@@ -354,7 +354,7 @@ namespace
 
     Events authorityTick(SimTick upcomingTick, uint64_t physicsStep)
     {
-        Events expected{ "clock", "drainOccupancy", tickEvent("releaseInputs", upcomingTick),
+        Events expected{ "clock", "drainBodySlotOccupancy", tickEvent("releaseInputs", upcomingTick),
                          "captureCorrection:" + std::to_string(physicsStep), "clock", "sim", "onStepStarted", "step", "post" };
         const Events after = afterTickEvents(upcomingTick, physicsStep);
         expected.insert(expected.end(), after.begin(), after.end());
@@ -363,7 +363,7 @@ namespace
 
     bool isHookEvent(const std::string& event)
     {
-        static const char* const kHookPrefixes[] = { "clock", "drainOccupancy", "releaseInputs", "captureCorrection",
+        static const char* const kHookPrefixes[] = { "clock", "drainBodySlotOccupancy", "releaseInputs", "captureCorrection",
             "onStepStarted", "onStepEnded", "publish:", "hostAfterTick", "publishTickOffset", "pushStepCost" };
         return std::any_of(std::begin(kHookPrefixes), std::end(kHookPrefixes),
             [&event](const char* prefix) { return event.rfind(prefix, 0) == 0; });

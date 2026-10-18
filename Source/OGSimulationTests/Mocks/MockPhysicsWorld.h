@@ -22,7 +22,7 @@ enum class MockWorldCallKind : uint8_t
     InvalidateAllTicks,
     SaveScratch,
     CommitScratch,
-    ApplyOccupancy,
+    ApplyBodySlotOccupancy,
     StateHash
 };
 
@@ -115,10 +115,10 @@ public:
         record({ MockWorldCallKind::CommitScratch, tick, 0.f, {}, false });
     }
 
-    void applyOccupancy(const BodySlotOccupancy& occupancy)
+    void applyBodySlotOccupancy(const BodySlotOccupancy& occupancy)
     {
         m_live.occupancy = occupancy;
-        record({ MockWorldCallKind::ApplyOccupancy, 0, 0.f, occupancy, false });
+        record({ MockWorldCallKind::ApplyBodySlotOccupancy, 0, 0.f, occupancy, false });
     }
 
     std::optional<uint64_t> stateHash(SimTick tick) const

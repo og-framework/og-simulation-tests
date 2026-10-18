@@ -250,7 +250,7 @@ TEST_CASE("JoltSpatialQuery.OverlapHitAndMiss", "[Jolt]")
     QueryWorld scene(lease.runtime);
     JoltWorldAccessScope access;
     const Brawler target = bind(scene, 2, 42);
-    scene.world.applyOccupancy(occupancyOf({ 2 }));
+    scene.world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 2 }));
     spreadOut(scene, target);
 
     const QueryVolumeId volume = volumeAt(scene, sphereVolume(50.f, bit(kBody) | bit(kGuard)), glm::vec3(0.f));
@@ -280,7 +280,7 @@ TEST_CASE("JoltSpatialQuery.SelfIgnoreDropsEveryBodyOfTheIgnoredRoot", "[Jolt]")
     JoltWorldAccessScope access;
     const Brawler self = bind(scene, 0, 10);
     const Brawler other = bind(scene, 1, 20);
-    scene.world.applyOccupancy(occupancyOf({ 0, 1 }));
+    scene.world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 0, 1 }));
     spreadOut(scene, self);
     spreadOut(scene, other);
     for (uint32_t declaration = 0; declaration < self.bodies.size(); ++declaration)
@@ -313,7 +313,7 @@ TEST_CASE("JoltSpatialQuery.CategoryFilteringIsAnyOfOverMembership", "[Jolt]")
     QueryWorld scene(lease.runtime);
     JoltWorldAccessScope access;
     const Brawler target = bind(scene, 3, 33);
-    scene.world.applyOccupancy(occupancyOf({ 3 }));
+    scene.world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 3 }));
     spreadOut(scene, target);
     for (uint32_t declaration = 0; declaration < target.bodies.size(); ++declaration)
     {
@@ -348,7 +348,7 @@ TEST_CASE("JoltSpatialQuery.AnEmptySearchIsATraceChannelQuery", "[Jolt]")
     JoltWorldAccessScope access;
     const JPH::BodyID floor = addFloor(scene.world);
     const Brawler target = bind(scene, 0, 5);
-    scene.world.applyOccupancy(occupancyOf({ 0 }));
+    scene.world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 0 }));
     spreadOut(scene, target);
     place(scene, target.body(kRadialDeclaration), glm::vec3(0.f, 0.f, 60.f));
     place(scene, target.root, glm::vec3(80.f, 0.f, 120.f));
@@ -391,7 +391,7 @@ TEST_CASE("JoltSpatialQuery.ASweepReportsTheFirstHitAndItsFraction", "[Jolt]")
     JoltWorldAccessScope access;
     const JPH::BodyID floor = addFloor(scene.world);
     const Brawler target = bind(scene, 1, 7);
-    scene.world.applyOccupancy(occupancyOf({ 1 }));
+    scene.world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 1 }));
     spreadOut(scene, target);
 
     const QueryVolumeDescriptor probe{ SphereGeometry{ 10.f }, CollisionCategories{ bit(kWorld) | bit(kBody) }, glm::mat4(1.f), kQueryRouting };
@@ -428,7 +428,7 @@ TEST_CASE("JoltSpatialQuery.ASweepThatStartsInsideATargetReportsItAtFractionZero
     JoltWorldAccessScope access;
     const JPH::BodyID floor = addFloor(scene.world);
     const Brawler target = bind(scene, 0, 3);
-    scene.world.applyOccupancy(occupancyOf({ 0 }));
+    scene.world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 0 }));
     spreadOut(scene, target);
 
     const QueryVolumeDescriptor probe{ SphereGeometry{ 10.f }, CollisionCategories{ bit(kWorld) | bit(kBody) }, glm::mat4(1.f), kQueryRouting };
@@ -466,7 +466,7 @@ TEST_CASE("JoltSpatialQuery.DisabledShapesDoNotHit", "[Jolt]")
     QueryWorld scene(lease.runtime);
     JoltWorldAccessScope access;
     const Brawler target = bind(scene, 4, 44);
-    scene.world.applyOccupancy(occupancyOf({ 4 }));
+    scene.world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 4 }));
     spreadOut(scene, target);
     place(scene, target.body(kGuardDeclaration), glm::vec3(0.f));
 
@@ -496,7 +496,7 @@ TEST_CASE("JoltSpatialQuery.AfterRestoreTickTheFirstOverlapSeesTheRestoredEnable
     QueryWorld scene(lease.runtime, queryWorldConfig(8));
     JoltWorldAccessScope access;
     const Brawler target = bind(scene, 0, 1);
-    scene.world.applyOccupancy(occupancyOf({ 0 }));
+    scene.world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 0 }));
     spreadOut(scene, target);
     place(scene, target.body(kGuardDeclaration), glm::vec3(0.f));
     const QueryVolumeId volume = volumeAt(scene, sphereVolume(20.f, bit(kGuard)), glm::vec3(0.f));
@@ -532,10 +532,10 @@ TEST_CASE("JoltSpatialQuery.ParkedAndUnboundSlotBodiesAreNeverReturned", "[Jolt]
     const Brawler boundButVacant = bind(scene, 1, 11);
     CHECK(nothingFound());
 
-    scene.world.applyOccupancy(occupancyOf({ 2 }));
+    scene.world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 2 }));
     CHECK(nothingFound());
 
-    scene.world.applyOccupancy(occupancyOf({ 1, 2 }));
+    scene.world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 1, 2 }));
     CHECK(scene.query.overlap({ everythingAtTheParkingPoint }).size() == boundButVacant.bodies.size());
     for (const SpatialQueryHit& hit : scene.query.overlap({ traceAtTheParkingPoint }))
     {
@@ -564,7 +564,7 @@ TEST_CASE("JoltSpatialQuery.HitsAreSortedByAPeerStableKeyUnderADifferentSlotAssi
             place(scene, brawler.body(kRadialDeclaration), bodyPositions[index]);
             place(scene, brawler.body(kGuardDeclaration), bodyPositions[index] + glm::vec3(0.f, 0.f, 50.f));
         }
-        scene.world.applyOccupancy(occupancy);
+        scene.world.applyBodySlotOccupancy(occupancy);
         const QueryVolumeId volume = volumeAt(scene, sphereVolume(300.f, bit(kBody) | bit(kGuard)), glm::vec3(0.f));
         const SpatialQueryReport report = scene.query.overlap({ volume });
         std::vector<BodyId> bodies = bodiesOf(report);
@@ -602,7 +602,7 @@ TEST_CASE("JoltSpatialQuery.IdenticalHitListsAcrossASaveRestoreCycleAndAShuffled
                 place(scene, brawler.body(declaration), glm::vec3(150.f * float(slot) - 150.f, 40.f * float(declaration), 150.f + 20.f * float(declaration)));
             }
         }
-        scene.world.applyOccupancy(occupancy);
+        scene.world.applyBodySlotOccupancy(occupancy);
     };
 
     const std::vector<JoltLayerKey> staticLayers = staticLayerKeysOf(description);
@@ -687,7 +687,7 @@ TEST_CASE("JoltSpatialQuery.PhysicsOnlyStaticsAreNotFoundButStillCollide", "[Jol
     const Brawler faller = bind(scene, 0, 1);
     spreadOut(scene, faller);
     place(scene, faller.root, glm::vec3(1000.f, 0.f, 150.f));
-    scene.world.applyOccupancy(occupancyOf({ 0 }));
+    scene.world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 0 }));
     for (int tick = 0; tick < 120; ++tick)
     {
         scene.world.step(kDt);
@@ -702,7 +702,7 @@ TEST_CASE("JoltSpatialQuery.OverlapReportsOnlyTheLastVolumeAsTheChaosAdapterDoes
     QueryWorld scene(lease.runtime);
     JoltWorldAccessScope access;
     const Brawler target = bind(scene, 0, 1);
-    scene.world.applyOccupancy(occupancyOf({ 0 }));
+    scene.world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 0 }));
     spreadOut(scene, target);
     place(scene, target.body(kRadialDeclaration), glm::vec3(0.f));
     place(scene, target.body(kGuardDeclaration), glm::vec3(500.f, 0.f, 0.f));
@@ -723,7 +723,7 @@ TEST_CASE("JoltSpatialQuery.TheQueryPoseIgnoresTheVolumeRotationAsTheChaosAdapte
     QueryWorld scene(lease.runtime);
     JoltWorldAccessScope access;
     const Brawler target = bind(scene, 0, 1);
-    scene.world.applyOccupancy(occupancyOf({ 0 }));
+    scene.world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 0 }));
     spreadOut(scene, target);
     place(scene, target.body(kRadialDeclaration), glm::vec3(150.f, 0.f, 0.f));
 

@@ -40,7 +40,7 @@ namespace legacyFrameHost
         return out;
     }
 
-    struct OccupancyCommandUImpl
+    struct BodySlotOccupancyCommandUImpl
     {
         uint32_t slot     = 0;
         bool     occupied = false;
@@ -82,7 +82,7 @@ namespace legacyFrameHost
     {
     public:
         static constexpr uint32_t kMaxStepsPerFrame = 240u;
-        static constexpr size_t   kOccupancyCommandCapacity = 64u;
+        static constexpr size_t   kBodySlotOccupancyCommandCapacity = 64u;
         static constexpr size_t   kStepCostSampleCapacity   = 256u;
         static constexpr double   kWindowSeconds            = 10.0;
         static constexpr uint32_t kMaxWindowSamples         = 16384u;
@@ -192,11 +192,11 @@ namespace legacyFrameHost
             m_blockingSteps = Handle{};
         }
 
-        void pushOccupancy_GameThread(uint32_t slot, bool occupied)
+        void pushBodySlotOccupancy_GameThread(uint32_t slot, bool occupied)
         {
-            [[maybe_unused]] const bool pushed = m_occupancyCommands.tryPush(OccupancyCommandUImpl{ slot, occupied });
+            [[maybe_unused]] const bool pushed = m_bodySlotOccupancyCommands.tryPush(BodySlotOccupancyCommandUImpl{ slot, occupied });
             OG_CHECK(pushed,
-                "SimulationFrameHostUImpl::pushOccupancy_GameThread: the occupancy ring (J1) is full.");
+                "SimulationFrameHostUImpl::pushBodySlotOccupancy_GameThread: the occupancy ring (J1) is full.");
         }
 
         void noteWorldMutexWait_GameThread(double waitSeconds)
@@ -221,12 +221,12 @@ namespace legacyFrameHost
             return m_begun && m_worlds->threadContext().isStepRunningOnThisThread();
         }
 
-        void applyOccupancyCommands_Step()
+        void applyBodySlotOccupancyCommands_Step()
         {
             OG_CHECK(isStepRunningOnThisThread(),
-                "SimulationFrameHostUImpl::applyOccupancyCommands_Step: called outside a step of this manager.");
-            while (std::optional<OccupancyCommandUImpl> command = m_occupancyCommands.tryPop())
-                m_stepDriver->noteOccupancy(command->slot, command->occupied);
+                "SimulationFrameHostUImpl::applyBodySlotOccupancyCommands_Step: called outside a step of this manager.");
+            while (std::optional<BodySlotOccupancyCommandUImpl> command = m_bodySlotOccupancyCommands.tryPop())
+                m_stepDriver->noteBodySlotOccupancy(command->slot, command->occupied);
         }
 
         void publishTickOffset_Step(int64_t offset)
@@ -325,7 +325,7 @@ namespace legacyFrameHost
         public:
             explicit FrameHostDoors(LegacyFrameHostModel& host) : m_host(&host) {}
 
-            void applyOccupancyCommands_Step() { m_host->applyOccupancyCommands_Step(); }
+            void applyBodySlotOccupancyCommands_Step() { m_host->applyBodySlotOccupancyCommands_Step(); }
             void publishTickOffset_Step(int64_t offset) { m_host->publishTickOffset_Step(offset); }
             void pushStepCost_Step(const StepCostSample& sample) { m_host->pushStepCost_Step(sample); }
             bool isStepRunningOnThisThread() const { return m_host->isStepRunningOnThisThread(); }
@@ -510,7 +510,7 @@ namespace legacyFrameHost
             m_windowCounts.startSeconds   = nowSeconds;
             m_windowCounts.lostAtStart    = scheduler.lostTime();
             m_windowCounts.ignoredAtStart = scheduler.ignoredTimeSamples();
-            m_windowCounts.j1DropsAtStart = m_occupancyCommands.drops();
+            m_windowCounts.j1DropsAtStart = m_bodySlotOccupancyCommands.drops();
             m_windowCounts.j6DropsAtStart = m_stepCosts.drops();
             for (WindowSamplesUImpl* samples : m_windowSamples.all())
             {
@@ -556,7 +556,7 @@ namespace legacyFrameHost
                 static_cast<unsigned long long>(lost.steps - counts.lostAtStart.steps),
                 lost.seconds - counts.lostAtStart.seconds,
                 static_cast<unsigned long long>(scheduler.ignoredTimeSamples() - counts.ignoredAtStart),
-                static_cast<unsigned long long>(m_occupancyCommands.drops() - counts.j1DropsAtStart),
+                static_cast<unsigned long long>(m_bodySlotOccupancyCommands.drops() - counts.j1DropsAtStart),
                 counts.j2Waits,
                 formatPercentiles(samples.j2WaitUs.values, false).c_str(),
                 costSamples,
@@ -602,7 +602,7 @@ namespace legacyFrameHost
         double                             m_hostTimeSeconds = 0.0;
         double                             m_lastFrameStartSeconds = 0.0;
         std::optional<SimulationScheduler> m_scheduler;
-        SpscRing<OccupancyCommandUImpl, kOccupancyCommandCapacity> m_occupancyCommands;
+        SpscRing<BodySlotOccupancyCommandUImpl, kBodySlotOccupancyCommandCapacity> m_bodySlotOccupancyCommands;
         SpscRing<StepCostSample, kStepCostSampleCapacity>          m_stepCosts;
         std::atomic<int64_t>               m_tickOffset{0};
         HostWindowCountsUImpl              m_windowCounts;

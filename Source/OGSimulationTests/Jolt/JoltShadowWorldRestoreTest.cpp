@@ -149,7 +149,7 @@ namespace
     uint32_t runStepWorld(TwoWorldScene& scene, uint32_t ticks)
     {
         CountingContactListener listener;
-        scene.world.applyOccupancy(allOccupied());
+        scene.world.applyBodySlotOccupancy(allOccupied());
         placeAllBrawlers(scene.world);
         scene.world.saveTick(0);
         for (uint32_t tick = 1; tick <= ticks; ++tick)
@@ -168,7 +168,7 @@ namespace
 
     void giveTheShadowAState(JoltWorld& world)
     {
-        world.applyOccupancy(occupancyOf({ 0, 1, 2 }));
+        world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 0, 1, 2 }));
         for (uint32_t slot = 0; slot < 3; ++slot)
         {
             for (uint32_t index = 0; index < world.bodiesPerSlot(); ++index)
@@ -238,13 +238,13 @@ namespace
         giveTheShadowAState(shadow.world);
         const uint64_t hashBefore = shadow.world.liveStateHash();
         const std::vector<uint8_t> bytesBefore = fullState(shadow.world);
-        const BodySlotOccupancy occupancyBefore = shadow.world.appliedOccupancy();
+        const BodySlotOccupancy occupancyBefore = shadow.world.appliedBodySlotOccupancy();
 
         Refusal refusal;
         refusal.restored = shadow.world.restoreFromSnapshot(slot);
         refusal.hashUnchanged = shadow.world.liveStateHash() == hashBefore;
         refusal.bytesUnchanged = sameBytes(fullState(shadow.world), bytesBefore);
-        refusal.occupancyUnchanged = shadow.world.appliedOccupancy() == occupancyBefore;
+        refusal.occupancyUnchanged = shadow.world.appliedBodySlotOccupancy() == occupancyBefore;
         refusal.refusalLines = linesContaining(shadow.lines, "[Warning] JoltWorld: restoreFromSnapshot(" + std::to_string(slot.tick) + ") refused");
         refusal.allLines = shadow.lines.size();
         return refusal;
@@ -282,7 +282,7 @@ TEST_CASE("JoltShadowWorld.RestoreFromTheStepWorldsNewestSlotMatchesItsStateAndI
     CHECK(shadow.lines.empty());
     CHECK(shadow.world.liveStateHash() == step.world.liveStateHash());
     CHECK(shadow.world.liveStateHash() == newest->stateHash);
-    CHECK(shadow.world.appliedOccupancy() == step.world.appliedOccupancy());
+    CHECK(shadow.world.appliedBodySlotOccupancy() == step.world.appliedBodySlotOccupancy());
     CHECK(shadow.world.shapeEnables().bits() == step.world.shapeEnables().bits());
     CHECK(shadow.world.physicsStepCount() == 0u);
     CHECK(shadow.world.ring().heldTickCount() == 0u);

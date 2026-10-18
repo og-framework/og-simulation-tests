@@ -243,7 +243,7 @@ namespace
         std::vector<uint32_t> published;
     };
 
-    struct OccupancyRecorder
+    struct BodySlotOccupancyRecorder
     {
         void operator()(uint32_t slot, bool occupied) { pushes.emplace_back(slot, occupied); }
 
@@ -487,7 +487,7 @@ TEST_CASE("JoltTickWorldHost.Bind.BindReleaseAndRebindLeaveTheTwoBindTablesEqual
     CHECK(first.getPhysicsComposite().get<HostRadialDeclaration>().bindings.parentBodyId
         == first.getPhysicsComposite().get<HostCapsuleDeclaration>().bindings.ownBodyId);
 
-    OccupancyRecorder occupancy;
+    BodySlotOccupancyRecorder occupancy;
     CHECK(rig.host.release(101u, 7u, std::ref(occupancy)) == std::optional<uint32_t>(2u));
     CHECK(occupancy.pushes == std::vector<std::pair<uint32_t, bool>>{ { 2u, false } });
     CHECK(bindTablesAgree(rig));
@@ -637,7 +637,7 @@ TEST_CASE("JoltTickWorldHost.Contacts.OneRunTickWithAFiveTickReplayRecordsSixCon
 
     HostSim sim;
     bindAt(rig, sim, 5u, "pawn", 0u, 3u, false);
-    driver.noteOccupancy(0u, true);
+    driver.noteBodySlotOccupancy(0u, true);
     const BodyId capsule = sim.getPhysicsComposite().get<HostCapsuleDeclaration>().bindings.ownBodyId;
     const BodyId radial = sim.getPhysicsComposite().get<HostRadialDeclaration>().bindings.ownBodyId;
     {
@@ -736,7 +736,7 @@ TEST_CASE("JoltTickWorldHost.Lines.MatchTheGoldens", "[JoltTickWorldHost]")
         HostRig<FakeEngine> rig(configOf(/*isAuthority=*/true, /*runInline=*/false));
         HostSim sim;
         bindAt(rig, sim, 21u, "BP_Brawler_C_0", 0u, 4u, true);
-        OccupancyRecorder occupancy;
+        BodySlotOccupancyRecorder occupancy;
         rig.host.release(21u, 4u, std::ref(occupancy));
         REQUIRE(rig.texts() == std::vector<std::string>{
             "[SimHost.Mode] role=Authority stepping=inline viz=stepWorld",

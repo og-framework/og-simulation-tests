@@ -56,7 +56,7 @@ namespace
 
     struct FakeFrameHost
     {
-        void pushOccupancy_GameThread(uint32_t slot, bool occupied)
+        void pushBodySlotOccupancy_GameThread(uint32_t slot, bool occupied)
         {
             events.push_back("occupancy:" + std::to_string(slot) + ":" + (occupied ? "1" : "0"));
         }
@@ -259,7 +259,7 @@ namespace
                 return;
 
             const uint32 slot = found->second;
-            m_frameHost.pushOccupancy_GameThread(slot, false);
+            m_frameHost.pushBodySlotOccupancy_GameThread(slot, false);
             m_owner.m_physAdapter->bindTable().releaseSlot(slot);
             m_worlds.m_joltSlotByOwner.erase(found);
 
@@ -309,7 +309,7 @@ namespace
             if (!slot.has_value())
                 return;
 
-            frameHost.pushOccupancy_GameThread(*slot, false);
+            frameHost.pushBodySlotOccupancy_GameThread(*slot, false);
             physAdapter.bindTable().releaseSlot(*slot);
             engine.log(HostLogLevel::Warning, formatHostLine(m_line, "[SimHost.Bind] release id=%u slot=%u boundBodies=%u slotsInUse=%d",
                 id, *slot, physAdapter.table.boundBodies(), static_cast<int32_t>(m_table.size())));

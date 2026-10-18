@@ -352,7 +352,7 @@ namespace
         void registerTrackedCharacter()
         {
             manager.registerCharacter(kCharacter);
-            driver.noteOccupancy(kCharacterSlot, true);
+            driver.noteBodySlotOccupancy(kCharacterSlot, true);
         }
 
         std::set<SimTick> ring() const { return world.heldTicks(present() + 2u); }
@@ -430,7 +430,7 @@ TEST_CASE("StepDriver.CallOrder.AResimOfDepthOneFiveAndTwelve", "[StepDriver]")
 
         requireGrantedResim(rig, anchor);
 
-        // The whole interleaving: beforeTick -> restore -> applyOccupancy -> prepare -> push ->
+        // The whole interleaving: beforeTick -> restore -> applyBodySlotOccupancy -> prepare -> push ->
         // N x (occupancy, sim, step, post, save) -> beforeSimulate -> scratch -> sim -> beforePhysics -> step ->
         // post -> save -> afterTick.
         REQUIRE(rig.events == resimThenNormalTick(anchor, present));
@@ -619,7 +619,7 @@ TEST_CASE("StepDriver.Anchors.AlwaysModeRunsAThousandTicksWithNoFailedRestore", 
     CHECK(rig.driver.getDiagnostics().grantedResims() == 1000u - (kDepth + 1u));
     CHECK(rig.driver.getDiagnostics().replayedTicks() == uint64_t{ 1000u - (kDepth + 1u) } * kDepth);
     CHECK(rig.manager.applyEdges == 1000u - (kDepth + 1u));
-    CHECK(rig.driver.getDiagnostics().occupancyTimelineMisses() == 0u);
+    CHECK(rig.driver.getDiagnostics().bodySlotOccupancyTimelineMisses() == 0u);
     // Always never asks the manager.
     CHECK(rig.manager.checks == 0u);
     REQUIRE(rig.ring() == rig.manager.frontier(kCharacter));
@@ -707,7 +707,7 @@ TEST_CASE("StepDriver.Clock.AWorldChangeInBeforeSimulateIsInsideTheSkipBackfill"
     std::optional<MockWorldState> afterJoin;
     rig.hooks.onBeforeSimulate = [&](const UpcomingTick&)
     {
-        rig.driver.noteOccupancy(kJoinSlot, true);
+        rig.driver.noteBodySlotOccupancy(kJoinSlot, true);
         afterJoin = rig.world.inner().live();
     };
     REQUIRE_FALSE(rig.world.inner().live().occupancy.occupied.test(kJoinSlot));
@@ -722,8 +722,8 @@ TEST_CASE("StepDriver.Clock.AWorldChangeInBeforeSimulateIsInsideTheSkipBackfill"
     // The backfilled tick is the world as the hook left it: the scratch was taken after the hook.
     REQUIRE(rig.world.hasTick(6u));
     REQUIRE(rig.world.inner().heldState(6u) == afterJoin);
-    REQUIRE(rig.driver.getDiagnostics().occupancyAt(6u).has_value());
-    CHECK(rig.driver.getDiagnostics().occupancyAt(6u)->occupied.test(kJoinSlot));
+    REQUIRE(rig.driver.getDiagnostics().bodySlotOccupancyAt(6u).has_value());
+    CHECK(rig.driver.getDiagnostics().bodySlotOccupancyAt(6u)->occupied.test(kJoinSlot));
 }
 
 TEST_CASE("StepDriver.Clock.HardResyncInvalidatesAndAnOlderAnchorIsRefused", "[StepDriver]")
@@ -806,7 +806,7 @@ TEST_CASE("StepDriver.Occupancy.AJoinAtJIsOccupiedFromJAndALeaveAtLClearsEveryHe
 
     // The join is applied in beforeTick of the tick that simulates J.
     const SimTick join = rig.present() + 1u;
-    rig.hooks.onBeforeTick = [&](const UpcomingTick&) { rig.driver.noteOccupancy(kSlot, true); };
+    rig.hooks.onBeforeTick = [&](const UpcomingTick&) { rig.driver.noteBodySlotOccupancy(kSlot, true); };
     rig.tick();
     rig.hooks.onBeforeTick = nullptr;
     rig.ticks(4u);
@@ -814,22 +814,22 @@ TEST_CASE("StepDriver.Occupancy.AJoinAtJIsOccupiedFromJAndALeaveAtLClearsEveryHe
     for (SimTick tick = 1u; tick <= rig.present(); ++tick)
     {
         INFO("tick " << tick);
-        const std::optional<BodySlotOccupancy> held = rig.driver.getDiagnostics().occupancyAt(tick);
+        const std::optional<BodySlotOccupancy> held = rig.driver.getDiagnostics().bodySlotOccupancyAt(tick);
         REQUIRE(held.has_value());
         CHECK(held->occupied.test(kSlot) == (tick >= join));
     }
 
     // A leave at L clears the slot in every held tick, not just from L on.
     const SimTick leave = rig.present() + 1u;
-    rig.hooks.onBeforeTick = [&](const UpcomingTick&) { rig.driver.noteOccupancy(kSlot, false); };
+    rig.hooks.onBeforeTick = [&](const UpcomingTick&) { rig.driver.noteBodySlotOccupancy(kSlot, false); };
     rig.tick();
     rig.hooks.onBeforeTick = nullptr;
     REQUIRE(rig.present() == leave);
-    REQUIRE(rig.driver.getDiagnostics().occupancyTimelineSize() == rig.ring().size());
+    REQUIRE(rig.driver.getDiagnostics().bodySlotOccupancyTimelineSize() == rig.ring().size());
     for (const SimTick tick : rig.ring())
     {
         INFO("tick " << tick);
-        CHECK_FALSE(rig.driver.getDiagnostics().occupancyAt(tick)->occupied.test(kSlot));
+        CHECK_FALSE(rig.driver.getDiagnostics().bodySlotOccupancyAt(tick)->occupied.test(kSlot));
     }
     CHECK_FALSE(rig.world.inner().live().occupancy.occupied.test(kSlot));
 
@@ -837,7 +837,7 @@ TEST_CASE("StepDriver.Occupancy.AJoinAtJIsOccupiedFromJAndALeaveAtLClearsEveryHe
     rig.ticks(2u);
     rig.world.inner().clearCalls();
     requireGrantedResim(rig, join - 2u);
-    for (const MockWorldCall& call : rig.world.inner().callsOf(MockWorldCallKind::ApplyOccupancy))
+    for (const MockWorldCall& call : rig.world.inner().callsOf(MockWorldCallKind::ApplyBodySlotOccupancy))
     {
         CHECK_FALSE(call.occupancy.occupied.test(kSlot));
     }
@@ -851,13 +851,13 @@ TEST_CASE("StepDriver.Occupancy.AJoinInTheSameTickAsAResimIsParkedInTheReplayAnd
     const SimTick present = rig.present();
 
     // beforeTick applies the join, then the same tick resims across older ticks.
-    rig.hooks.onBeforeTick = [&](const UpcomingTick&) { rig.driver.noteOccupancy(kSlot, true); };
+    rig.hooks.onBeforeTick = [&](const UpcomingTick&) { rig.driver.noteBodySlotOccupancy(kSlot, true); };
     rig.world.inner().clearCalls();
     requireGrantedResim(rig, present - 3u);
     rig.hooks.onBeforeTick = nullptr;
 
     // Every replay step ran with the slot parked (the restore and each replayed tick)...
-    const std::vector<MockWorldCall> applied = rig.world.inner().callsOf(MockWorldCallKind::ApplyOccupancy);
+    const std::vector<MockWorldCall> applied = rig.world.inner().callsOf(MockWorldCallKind::ApplyBodySlotOccupancy);
     REQUIRE(applied.size() == 1u + 1u + 3u + 1u);
     for (std::size_t i = 1; i + 1 < applied.size(); ++i)
     {
@@ -866,8 +866,8 @@ TEST_CASE("StepDriver.Occupancy.AJoinInTheSameTickAsAResimIsParkedInTheReplayAnd
     }
     // ...and the normal step after the replay ran with it live, and saved it live.
     CHECK(applied.back().occupancy.occupied.test(kSlot));
-    CHECK(rig.driver.getDiagnostics().occupancyAt(present + 1u)->occupied.test(kSlot));
-    CHECK_FALSE(rig.driver.getDiagnostics().occupancyAt(present)->occupied.test(kSlot));
+    CHECK(rig.driver.getDiagnostics().bodySlotOccupancyAt(present + 1u)->occupied.test(kSlot));
+    CHECK_FALSE(rig.driver.getDiagnostics().bodySlotOccupancyAt(present)->occupied.test(kSlot));
 }
 
 TEST_CASE("StepDriver.Occupancy.AReplayedCharacterIsParkedAndUnintegratedExactlyUntilItsFirstCacheSlot",
@@ -902,7 +902,7 @@ TEST_CASE("StepDriver.Occupancy.AReplayedCharacterIsParkedAndUnintegratedExactly
         rig.hooks.onBeforeTick = [&](const UpcomingTick&)
         {
             rig.manager.registerCharacter(kCharacter);
-            rig.driver.noteOccupancy(kCharacterSlot, true);
+            rig.driver.noteBodySlotOccupancy(kCharacterSlot, true);
         };
         rig.tick();
         rig.hooks.onBeforeTick = nullptr;

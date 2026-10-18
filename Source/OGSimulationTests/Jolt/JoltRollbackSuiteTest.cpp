@@ -45,7 +45,7 @@ TEST_CASE("JoltSuite.AlwaysResimForAThousandTicksMatchesTheOneStepPerTickReferen
     REQUIRE(totals.granted == 1000u - (config.depthTicks + 1u));
     REQUIRE(totals.refused == 0u);
     REQUIRE(run.driver.getDiagnostics().replayedTicks() == totals.granted * config.depthTicks);
-    REQUIRE(run.driver.getDiagnostics().occupancyTimelineMisses() == 0u);
+    REQUIRE(run.driver.getDiagnostics().bodySlotOccupancyTimelineMisses() == 0u);
     REQUIRE(run.observed.failedRestores == 0u);
     REQUIRE(reference.failedRestores == 0u);
     REQUIRE(run.present() == 1000u);

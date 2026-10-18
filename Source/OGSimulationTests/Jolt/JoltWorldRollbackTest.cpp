@@ -32,7 +32,7 @@ namespace
     RecordedRun runEightBrawlers(JoltWorld& world, uint32_t ticks)
     {
         addFloor(world);
-        world.applyOccupancy(allOccupied());
+        world.applyBodySlotOccupancy(allOccupied());
         placeAllBrawlers(world);
 
         RecordedRun run;
@@ -141,7 +141,7 @@ TEST_CASE("JoltWorld.RingHoldsEvictsOverwritesAndInvalidates", "[Jolt]")
     RuntimeLease lease;
     JoltWorld world(lease.runtime, brawlerWorldConfig(4), nullptr);
     addFloor(world);
-    world.applyOccupancy(allOccupied());
+    world.applyBodySlotOccupancy(allOccupied());
     placeAllBrawlers(world);
 
     for (uint32_t tick = 1; tick <= 6; ++tick)
@@ -268,7 +268,7 @@ TEST_CASE("JoltWorld.ParkedBodiesMakeNoContactsAndKeepZeroVelocity", "[Jolt]")
 
     JoltWorld live(lease.runtime, config, nullptr);
     addFloor(live);
-    live.applyOccupancy(allOccupied());
+    live.applyBodySlotOccupancy(allOccupied());
     CountingContactListener liveContacts;
     live.physics().SetContactListener(&liveContacts);
     for (uint32_t index = 0; index < 100; ++index)
@@ -303,10 +303,10 @@ TEST_CASE("JoltWorld.VacantSlotIsInvisibleToAWorldCollideShape", "[Jolt]")
 
     CHECK(countSlotHits() == 0u);
 
-    world.applyOccupancy(occupancyOf({ 3 }));
+    world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 3 }));
     CHECK(countSlotHits() == kBodiesPerBrawler);
 
-    world.applyOccupancy(BodySlotOccupancy{});
+    world.applyBodySlotOccupancy(BodySlotOccupancy{});
     CHECK(countSlotHits() == 0u);
 }
 
@@ -316,11 +316,11 @@ TEST_CASE("JoltWorld.JoinAcrossARollbackReplaysByteIdentically", "[Jolt]")
     constexpr uint32_t kJoiningSlot = 1;
     const auto occupancyAt = [](uint32_t tick)
     {
-        return tick >= kJoinTick ? occupancyOf({ 0, 2, kJoiningSlot }) : occupancyOf({ 0, 2 });
+        return tick >= kJoinTick ? bodySlotOccupancyOf({ 0, 2, kJoiningSlot }) : bodySlotOccupancyOf({ 0, 2 });
     };
     const auto runTick = [&occupancyAt](JoltWorld& world, uint32_t tick)
     {
-        world.applyOccupancy(occupancyAt(tick));
+        world.applyBodySlotOccupancy(occupancyAt(tick));
         if (tick == kJoinTick)
         {
             placeBrawler(world, kJoiningSlot, 0.3f, 0.2f, 1.4f);
@@ -333,7 +333,7 @@ TEST_CASE("JoltWorld.JoinAcrossARollbackReplaysByteIdentically", "[Jolt]")
     RuntimeLease lease;
     JoltWorld world(lease.runtime, brawlerWorldConfig(64), nullptr);
     addFloor(world);
-    world.applyOccupancy(occupancyAt(0));
+    world.applyBodySlotOccupancy(occupancyAt(0));
     placeBrawler(world, 0, -0.5f, 0.f, 1.0f);
     placeBrawler(world, 2, 0.9f, 0.4f, 1.2f);
 
@@ -350,10 +350,10 @@ TEST_CASE("JoltWorld.JoinAcrossARollbackReplaysByteIdentically", "[Jolt]")
     REQUIRE(world.bodies().GetObjectLayer(joiningCapsule) == world.templateLayer(kTemplateCapsule));
 
     REQUIRE(world.restoreTick(kJoinTick - 5u));
-    world.applyOccupancy(occupancyAt(kJoinTick - 5u));
+    world.applyBodySlotOccupancy(occupancyAt(kJoinTick - 5u));
     CHECK(sameBytes(fullState(world), original[kJoinTick - 5u]));
     CHECK(world.bodies().GetObjectLayer(joiningCapsule) == world.layers().parkedLayer());
-    CHECK_FALSE(world.appliedOccupancy().occupied.test(kJoiningSlot));
+    CHECK_FALSE(world.appliedBodySlotOccupancy().occupied.test(kJoiningSlot));
 
     for (uint32_t tick = kJoinTick - 4u; tick <= kJoinTick + 5u; ++tick)
     {
@@ -391,13 +391,13 @@ TEST_CASE("JoltWorld.OccupancyRestoresWithTheTick", "[Jolt]")
 {
     RuntimeLease lease;
     JoltWorld world(lease.runtime, brawlerWorldConfig(8), nullptr);
-    world.applyOccupancy(occupancyOf({ 1, 4 }));
+    world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 1, 4 }));
     world.saveTick(3);
-    world.applyOccupancy(occupancyOf({ 4, 6 }));
+    world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 4, 6 }));
     world.saveTick(4);
 
     REQUIRE(world.restoreTick(3));
-    CHECK(world.appliedOccupancy() == occupancyOf({ 1, 4 }));
+    CHECK(world.appliedBodySlotOccupancy() == bodySlotOccupancyOf({ 1, 4 }));
     CHECK(world.bodies().GetObjectLayer(world.slotBodyId(6, kTemplateCapsule)) == world.layers().parkedLayer());
     CHECK(world.bodies().GetObjectLayer(world.slotBodyId(1, kTemplateCapsule)) == world.templateLayer(kTemplateCapsule));
     CHECK(world.bodies().GetGravityFactor(world.slotBodyId(1, kTemplateCapsule)) == 1.f);
@@ -418,13 +418,13 @@ TEST_CASE("JoltWorld.RestoreOfAMismatchedBodySetIsRefusedAndLeavesTheWorldUntouc
     const std::vector<uint8_t> before = fullState(world);
     const JPH::RVec3 removedPosition = world.bodies().GetCenterOfMassPosition(removed);
     const JPH::Vec3 removedVelocity = world.bodies().GetLinearVelocity(removed);
-    const BodySlotOccupancy occupancyBefore = world.appliedOccupancy();
+    const BodySlotOccupancy occupancyBefore = world.appliedBodySlotOccupancy();
 
     CHECK_FALSE(world.restoreTick(10));
     CHECK(sameBytes(fullState(world), before));
     CHECK(world.bodies().GetCenterOfMassPosition(removed) == removedPosition);
     CHECK(world.bodies().GetLinearVelocity(removed) == removedVelocity);
-    CHECK(world.appliedOccupancy() == occupancyBefore);
+    CHECK(world.appliedBodySlotOccupancy() == occupancyBefore);
     REQUIRE(lines.size() == 1u);
     CHECK(lines.front().find("restoreTick(10) refused") != std::string::npos);
 

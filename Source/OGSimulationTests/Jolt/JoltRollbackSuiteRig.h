@@ -605,7 +605,7 @@ namespace joltSuite
         void invalidateAllTicks() { m_world.invalidateAllTicks(); }
         void saveScratch() { m_world.saveScratch(); }
         void commitScratch(SimTick tick) { m_world.commitScratch(tick); }
-        void applyOccupancy(const BodySlotOccupancy& occupancy) { m_world.applyOccupancy(occupancy); }
+        void applyBodySlotOccupancy(const BodySlotOccupancy& occupancy) { m_world.applyBodySlotOccupancy(occupancy); }
         std::optional<uint64_t> stateHash(SimTick tick) const { return m_world.stateHash(tick); }
 
         std::function<void(std::optional<SimTick>, uint32_t)> beforeStep;
@@ -774,7 +774,7 @@ namespace joltSuite
             registerSimulatable<ProbeSim>(storage, reconciliation, resolution, netSync, id, std::move(sim), owners[slot],
                 [id](const SimulationTimeStep& step, const LocalInputCache<ProbeInput>&) { return scriptedInput(step, id); });
             manager.notifyCharacterRegistered(id);
-            driver.noteOccupancy(slot, true);
+            driver.noteBodySlotOccupancy(slot, true);
             idOfSlot[slot] = id;
         }
 
@@ -783,7 +783,7 @@ namespace joltSuite
             const uint32_t id = idOfSlot[slot];
             manager.notifyCharacterUnregistered(id);
             unregisterSimulatable<ProbeSim>(storage, reconciliation, resolution, netSync, id, &owners[slot]);
-            driver.noteOccupancy(slot, false);
+            driver.noteBodySlotOccupancy(slot, false);
             scene.bodies.bindTable().releaseSlot(slot);
             idOfSlot[slot] = 0;
         }
@@ -851,7 +851,7 @@ namespace joltSuite
             , scene(runtime, rigConfig.scene)
             , executor(storage, staticData, scene.bodies, scene.query)
         {
-            scene.world.applyOccupancy(live);
+            scene.world.applyBodySlotOccupancy(live);
             applied = live;
         }
 
@@ -859,7 +859,7 @@ namespace joltSuite
         {
             storage.add<ProbeSim>(id, scene.bindProbe(slot, id));
             live.occupied.set(slot);
-            applyOccupancy(live);
+            applyBodySlotOccupancy(live);
             idOfSlot[slot] = id;
         }
 
@@ -870,7 +870,7 @@ namespace joltSuite
             live.occupied.reset(slot);
             for (auto& [tick, occupancy] : timeline)
                 occupancy.occupied.reset(slot);
-            applyOccupancy(live);
+            applyBodySlotOccupancy(live);
             scene.bodies.bindTable().releaseSlot(slot);
             idOfSlot[slot] = 0;
         }
@@ -882,13 +882,13 @@ namespace joltSuite
                 it->second[idOfSlot[slot]] = corrected;
         }
 
-        void applyOccupancy(const BodySlotOccupancy& occupancy)
+        void applyBodySlotOccupancy(const BodySlotOccupancy& occupancy)
         {
-            scene.world.applyOccupancy(occupancy);
+            scene.world.applyBodySlotOccupancy(occupancy);
             applied = occupancy;
         }
 
-        BodySlotOccupancy occupancyAt(SimTick tick) const
+        BodySlotOccupancy bodySlotOccupancyAt(SimTick tick) const
         {
             const auto it = timeline.find(tick);
             return it != timeline.end() ? it->second : live;
@@ -968,7 +968,7 @@ namespace joltSuite
                     const bool restored = scene.world.restoreTick(anchor);
                     if (!restored)
                         ++failedRestores;
-                    applyOccupancy(occupancyAt(anchor));
+                    applyBodySlotOccupancy(bodySlotOccupancyAt(anchor));
                     const auto anchorStates = states.find(anchor);
                     storage.forEachSimulatable([&](unsigned int id, auto& sim) {
                         if (anchorStates == states.end())
@@ -980,8 +980,8 @@ namespace joltSuite
                     executor.pushCorrectedBodyStatesAll();
                     for (SimTick replayTick = anchor + 1u; replayTick <= present; ++replayTick)
                     {
-                        const BodySlotOccupancy replayOccupancy = occupancyAt(replayTick);
-                        applyOccupancy(replayOccupancy);
+                        const BodySlotOccupancy replayOccupancy = bodySlotOccupancyAt(replayTick);
+                        applyBodySlotOccupancy(replayOccupancy);
                         std::set<uint32_t> withSlot;
                         if (const auto it = states.find(replayTick); it != states.end())
                         {
@@ -1011,7 +1011,7 @@ namespace joltSuite
             }
 
             if (applied != live)
-                applyOccupancy(live);
+                applyBodySlotOccupancy(live);
             scene.world.saveScratch();
 
             if (hardResync)

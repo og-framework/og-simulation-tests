@@ -182,11 +182,11 @@ namespace
         options.maxShapesPerChunk = 3;
         StaticRig rig(description, options);
         JoltWorld& world = *rig.world;
-        world.applyOccupancy(allOccupied());
+        world.applyBodySlotOccupancy(allOccupied());
         placeAllBrawlers(world);
         for (uint32_t tick = 1; tick <= 300; ++tick)
         {
-            world.applyOccupancy(allOccupied());
+            world.applyBodySlotOccupancy(allOccupied());
             world.step(kDt);
         }
         RestingRun run;

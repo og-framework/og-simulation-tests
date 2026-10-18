@@ -105,7 +105,7 @@ namespace
             {
                 bodies.push_back(factory.createPhysicalObject(slotTemplate.descriptor, "declaration").bodyId);
             }
-            world.applyOccupancy(occupancyOf({ 0 }));
+            world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 0 }));
         }
     };
 
@@ -411,7 +411,7 @@ TEST_CASE("JoltPhysicsFactory.EveryBrawlerDeclarationBindsAChaosParityBody", "[J
     CHECK(factory.boundBodyCount() == declarations.size());
     CHECK(joltBodyDefaults::kMaxAngularVelocityRadiansPerSecond == Catch::Approx(62.8318530718));
 
-    world.applyOccupancy(occupancyOf({ kSlot }));
+    world.applyBodySlotOccupancy(bodySlotOccupancyOf({ kSlot }));
     for (uint32_t index = 0; index < declarations.size(); ++index)
     {
         CHECK(world.bodies().GetObjectLayer(world.slotBodyId(kSlot, index)) == world.templateLayer(index));
@@ -472,7 +472,7 @@ TEST_CASE("JoltBodyAdapter.ResolvableMeansBoundNeverOccupied", "[Jolt]")
     const BodyId slot1Capsule = JoltPhysicsBodyAdapter::bodyIdOf(world.slotBodyId(1, kCapsule));
     const BodyId slot3Capsule = JoltPhysicsBodyAdapter::bodyIdOf(world.slotBodyId(3, kCapsule));
 
-    world.applyOccupancy(occupancyOf({ 3 }));
+    world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 3 }));
     CHECK_FALSE(adapter.isBodyResolvable(slot3Capsule));
     CHECK_FALSE(reader.isBodyResolvable(slot3Capsule));
 
@@ -481,7 +481,7 @@ TEST_CASE("JoltBodyAdapter.ResolvableMeansBoundNeverOccupied", "[Jolt]")
     {
         (void)factory.createPhysicalObject(slotTemplate.descriptor, "declaration");
     }
-    CHECK_FALSE(world.appliedOccupancy().occupied.test(1));
+    CHECK_FALSE(world.appliedBodySlotOccupancy().occupied.test(1));
     CHECK(adapter.isBodyResolvable(slot1Capsule));
     CHECK(reader.isBodyResolvable(slot1Capsule));
 

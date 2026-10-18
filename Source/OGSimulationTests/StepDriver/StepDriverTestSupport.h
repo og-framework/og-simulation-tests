@@ -89,9 +89,9 @@ namespace stepDriverTestSupport
             log(tickEvent("commit", tick));
         }
 
-        void applyOccupancy(const BodySlotOccupancy& occupancy)
+        void applyBodySlotOccupancy(const BodySlotOccupancy& occupancy)
         {
-            m_inner.applyOccupancy(occupancy);
+            m_inner.applyBodySlotOccupancy(occupancy);
             log("occ");
         }
 

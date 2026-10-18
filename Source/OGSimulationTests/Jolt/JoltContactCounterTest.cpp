@@ -124,7 +124,7 @@ namespace joltContactCounterTest
             {
                 addFloor(world);
             }
-            world.applyOccupancy(allOccupied());
+            world.applyBodySlotOccupancy(allOccupied());
             for (uint32_t slot = 0; slot < world.simulatableSlots(); ++slot)
             {
                 bindSlot(world, slot, 7u + 2u * slot);
@@ -185,7 +185,7 @@ namespace joltContactCounterTest
     void prepareBusyWorld(JoltWorld& world)
     {
         addFloor(world);
-        world.applyOccupancy(allOccupied());
+        world.applyBodySlotOccupancy(allOccupied());
         placeAllBrawlers(world);
         for (uint32_t slot = 0; slot < world.simulatableSlots(); ++slot)
         {

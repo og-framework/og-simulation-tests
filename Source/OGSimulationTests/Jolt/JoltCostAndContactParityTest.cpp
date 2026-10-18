@@ -64,7 +64,7 @@ namespace
         JoltScene scene(runtime, sceneConfig);
         for (uint32_t slot = 0; slot < kSlots; ++slot)
             (void)scene.bindProbe(slot, 101u + slot);
-        scene.world.applyOccupancy(allOccupied());
+        scene.world.applyBodySlotOccupancy(allOccupied());
 
         CostResult result;
         result.staticBodies = scene.staticBodies.size();
@@ -143,7 +143,7 @@ namespace
             for (const SlotBodyTemplate& slotTemplate : brawlerSlotTemplate())
                 declarationBodies.push_back(factory.createPhysicalObject(slotTemplate.descriptor, "probe").bodyId);
             capsule = factory.parentBodyId();
-            world.applyOccupancy(occupancyOf({ 0u }));
+            world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 0u }));
             for (uint32_t index = 0; index + 1u < declarationBodies.size(); ++index)
                 bodies.setBodyTransform(declarationBodies[index], glm::translate(glm::mat4(1.f), glm::vec3(-3000.f, 300.f * float(index), 2000.f)));
         }
@@ -311,7 +311,7 @@ namespace
             JoltPhysicsFactory factory(bodies, contactSlotTemplate(), 0u, 1u);
             for (const SlotBodyTemplate& slotTemplate : contactSlotTemplate())
                 declarationBodies.push_back(factory.createPhysicalObject(slotTemplate.descriptor, "contact").bodyId);
-            world.applyOccupancy(occupancyOf({ 0u }));
+            world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 0u }));
         }
 
         static JoltWorldConfig configOf(const StaticWorldDescription& statics)

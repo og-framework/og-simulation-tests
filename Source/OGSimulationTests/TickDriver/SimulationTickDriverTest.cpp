@@ -292,7 +292,7 @@ namespace
         void startFrame(float deltaSeconds) { m_driver.startFrame(static_cast<double>(deltaSeconds)); }
         void endFrame(FakeCompletion* completion, int32_t blockMode) { m_driver.endFrame(completion, blockMode); }
         void stop() { m_driver.stop(); }
-        void pushOccupancy(uint32_t slot, bool occupied) { m_driver.pushOccupancy(slot, occupied); }
+        void pushBodySlotOccupancy(uint32_t slot, bool occupied) { m_driver.pushBodySlotOccupancy(slot, occupied); }
         void noteWorldLockWait(double seconds) { m_driver.noteWorldLockWait(seconds); }
         void noteShadowRestore(double seconds, bool refused) { m_driver.noteShadowRestore(seconds, refused); }
         double hostNowSeconds() const { return m_driver.hostNowSeconds(); }
@@ -331,7 +331,7 @@ namespace
             m_model.waitForOutstandingSteps();
         }
 
-        void pushOccupancy(uint32_t slot, bool occupied) { m_model.pushOccupancy_GameThread(slot, occupied); }
+        void pushBodySlotOccupancy(uint32_t slot, bool occupied) { m_model.pushBodySlotOccupancy_GameThread(slot, occupied); }
         void noteWorldLockWait(double seconds) { m_model.noteWorldMutexWait_GameThread(seconds); }
         void noteShadowRestore(double seconds, bool refused) { m_model.noteShadowRestore_GameThread(seconds, refused); }
         double hostNowSeconds() const { return m_model.hostNowSeconds_GameThread(); }
@@ -491,7 +491,7 @@ namespace
             deltas.push_back(delta);
             run.engine.advance(static_cast<double>(delta));
             if (frame % 50u == 7u)
-                run.pipeline.pushOccupancy(frame % 4u, frame % 100u < 50u);
+                run.pipeline.pushBodySlotOccupancy(frame % 4u, frame % 100u < 50u);
             if (frame % 97u == 3u)
                 run.pipeline.noteWorldLockWait(0.0002 + 0.00001 * static_cast<double>(frame));
             run.pipeline.startFrame(delta);
@@ -513,7 +513,7 @@ namespace
             if (frame % 23u == 11u && run.side.manager.predictionTick() > 6u)
                 run.side.manager.pendingAnchor = run.side.manager.predictionTick() - 3u;
             if (frame % 31u == 5u)
-                run.pipeline.pushOccupancy(1u + frame % 3u, frame % 62u < 31u);
+                run.pipeline.pushBodySlotOccupancy(1u + frame % 3u, frame % 62u < 31u);
             if (frame % 13u == 2u)
                 run.pipeline.noteShadowRestore(0.00005 * static_cast<double>(1u + frame % 4u), frame % 26u == 2u);
 

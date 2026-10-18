@@ -115,7 +115,7 @@ namespace joltTestRig
         return id;
     }
 
-    inline BodySlotOccupancy occupancyOf(std::initializer_list<uint32_t> slots)
+    inline BodySlotOccupancy bodySlotOccupancyOf(std::initializer_list<uint32_t> slots)
     {
         BodySlotOccupancy occupancy;
         for (const uint32_t slot : slots)
@@ -161,7 +161,7 @@ namespace joltTestRig
         JPH::BodyInterface& bodies = world.bodies();
         for (uint32_t slot = 0; slot < world.simulatableSlots(); ++slot)
         {
-            if (!world.appliedOccupancy().occupied.test(slot))
+            if (!world.appliedBodySlotOccupancy().occupied.test(slot))
             {
                 continue;
             }

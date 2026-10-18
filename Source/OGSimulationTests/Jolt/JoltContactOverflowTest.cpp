@@ -44,7 +44,7 @@ TEST_CASE("JoltWorld.ContactOverflowIsLoggedOncePerFlagPerSecond", "[Jolt]")
     std::vector<std::string> lines;
     JoltWorld world(lease.runtime, config, [&lines](const char* line) { lines.emplace_back(line); });
     addFloor(world);
-    world.applyOccupancy(allOccupied());
+    world.applyBodySlotOccupancy(allOccupied());
     for (uint32_t slot = 0; slot < world.simulatableSlots(); ++slot)
     {
         world.bodies().SetPosition(world.slotBodyId(slot, kTemplateCapsule), JPH::RVec3(0.05f * float(slot), 0.f, 0.9f), JPH::EActivation::Activate);

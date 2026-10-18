@@ -160,7 +160,7 @@ TEST_CASE("JoltSuite.JoinAcrossCorrectionResimsMatchesTheReferenceAndIsParkedBef
     REQUIRE(joinedResimIntegrations == 4u + 9u);
     REQUIRE(lockstep.totals.granted == 2u);
     REQUIRE(run.observed.failedRestores == 0u);
-    REQUIRE(run.driver.getDiagnostics().occupancyTimelineMisses() == 0u);
+    REQUIRE(run.driver.getDiagnostics().bodySlotOccupancyTimelineMisses() == 0u);
     REQUIRE(run.pushProbe.check.mismatches == 0u);
     printSummary("E join across correction resims", lockstep.totals, run);
 }
@@ -193,7 +193,7 @@ TEST_CASE("JoltSuite.LeaveIsRetroactiveAndNoReplayTouchesTheDepartedSlot", "[Jol
     {
         if (!run.scene.world.hasTick(tick))
             continue;
-        const std::optional<BodySlotOccupancy> occupancy = run.driver.getDiagnostics().occupancyAt(tick);
+        const std::optional<BodySlotOccupancy> occupancy = run.driver.getDiagnostics().bodySlotOccupancyAt(tick);
         REQUIRE(occupancy.has_value());
         REQUIRE_FALSE(occupancy->occupied.test(kLeavingSlot));
         REQUIRE(occupancy->occupied.count() == kSlots - 1u);
@@ -230,7 +230,7 @@ TEST_CASE("JoltSuite.LeaveIsRetroactiveAndNoReplayTouchesTheDepartedSlot", "[Jol
         REQUIRE(run.log[index].id != leavingId);
     REQUIRE(slotIsParked(run.scene.world, kLeavingSlot));
     REQUIRE(run.observed.failedRestores == 0u);
-    REQUIRE(run.driver.getDiagnostics().occupancyTimelineMisses() == 0u);
+    REQUIRE(run.driver.getDiagnostics().bodySlotOccupancyTimelineMisses() == 0u);
     printSummary("E leave under always depth 12", lockstep.totals, run);
 }
 

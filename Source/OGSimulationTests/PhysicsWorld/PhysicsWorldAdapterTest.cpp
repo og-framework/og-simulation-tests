@@ -13,7 +13,7 @@
 
 namespace
 {
-BodySlotOccupancy physicsWorldOccupancyOf(std::initializer_list<uint32_t> slots)
+BodySlotOccupancy physicsWorldBodySlotOccupancyOf(std::initializer_list<uint32_t> slots)
 {
     BodySlotOccupancy occupancy;
     for (const uint32_t slot : slots)
@@ -67,7 +67,7 @@ TEST_CASE("PhysicsWorld restoreTick is false after eviction and leaves the world
 {
     MockPhysicsWorld world(2);
     physicsWorldSaveTicks(world, 1, 3);
-    world.applyOccupancy(physicsWorldOccupancyOf({ 5 }));
+    world.applyBodySlotOccupancy(physicsWorldBodySlotOccupancyOf({ 5 }));
     world.setLiveValue(999);
     const MockWorldState before = world.live();
 
@@ -85,7 +85,7 @@ TEST_CASE("PhysicsWorld saveTick overwrites a held tick without evicting another
     physicsWorldSaveTicks(world, 1, 3);
 
     world.setLiveValue(777);
-    world.applyOccupancy(physicsWorldOccupancyOf({ 0, 7 }));
+    world.applyBodySlotOccupancy(physicsWorldBodySlotOccupancyOf({ 0, 7 }));
     world.saveTick(2);
 
     CHECK(world.heldTickCount() == 3);
@@ -93,7 +93,7 @@ TEST_CASE("PhysicsWorld saveTick overwrites a held tick without evicting another
     CHECK(world.hasTick(3));
     REQUIRE(world.heldState(2).has_value());
     CHECK(world.heldState(2)->value == 777);
-    CHECK(world.heldState(2)->occupancy == physicsWorldOccupancyOf({ 0, 7 }));
+    CHECK(world.heldState(2)->occupancy == physicsWorldBodySlotOccupancyOf({ 0, 7 }));
     CHECK(world.heldState(1)->value == 10);
 }
 
@@ -133,23 +133,23 @@ TEST_CASE("PhysicsWorld commitScratch makes the tick held with the scratch value
 {
     MockPhysicsWorld world(4);
     world.setLiveValue(50);
-    world.applyOccupancy(physicsWorldOccupancyOf({ 2 }));
+    world.applyBodySlotOccupancy(physicsWorldBodySlotOccupancyOf({ 2 }));
 
     world.saveScratch();
     world.step(1.f / 60.f);
-    world.applyOccupancy(physicsWorldOccupancyOf({ 2, 3 }));
+    world.applyBodySlotOccupancy(physicsWorldBodySlotOccupancyOf({ 2, 3 }));
     REQUIRE(world.live().value == 51);
     REQUIRE_FALSE(world.hasTick(6));
 
     world.commitScratch(6);
 
     REQUIRE(world.hasTick(6));
-    CHECK(world.heldState(6) == std::optional<MockWorldState>(MockWorldState{ 50, physicsWorldOccupancyOf({ 2 }) }));
+    CHECK(world.heldState(6) == std::optional<MockWorldState>(MockWorldState{ 50, physicsWorldBodySlotOccupancyOf({ 2 }) }));
     CHECK(world.live().value == 51);
 
     REQUIRE(world.restoreTick(6));
     CHECK(world.live().value == 50);
-    CHECK(world.live().occupancy == physicsWorldOccupancyOf({ 2 }));
+    CHECK(world.live().occupancy == physicsWorldBodySlotOccupancyOf({ 2 }));
 }
 
 TEST_CASE("PhysicsWorld commitScratch obeys overwrite and eviction like saveTick", "[PhysicsWorld]")
@@ -171,26 +171,26 @@ TEST_CASE("PhysicsWorld commitScratch obeys overwrite and eviction like saveTick
 TEST_CASE("PhysicsWorld applyOccupancy is recorded in call order", "[PhysicsWorld]")
 {
     MockPhysicsWorld world(4);
-    const BodySlotOccupancy joined = physicsWorldOccupancyOf({ 1 });
-    const BodySlotOccupancy both = physicsWorldOccupancyOf({ 1, 4 });
+    const BodySlotOccupancy joined = physicsWorldBodySlotOccupancyOf({ 1 });
+    const BodySlotOccupancy both = physicsWorldBodySlotOccupancyOf({ 1, 4 });
 
     world.saveScratch();
-    world.applyOccupancy(joined);
+    world.applyBodySlotOccupancy(joined);
     world.step(0.5f);
     world.saveTick(7);
     REQUIRE(world.restoreTick(7));
-    world.applyOccupancy(both);
+    world.applyBodySlotOccupancy(both);
     world.step(0.25f);
     world.commitScratch(8);
     world.invalidateAllTicks();
 
     const std::vector<MockWorldCallKind> expected = {
         MockWorldCallKind::SaveScratch,
-        MockWorldCallKind::ApplyOccupancy,
+        MockWorldCallKind::ApplyBodySlotOccupancy,
         MockWorldCallKind::Step,
         MockWorldCallKind::SaveTick,
         MockWorldCallKind::RestoreTick,
-        MockWorldCallKind::ApplyOccupancy,
+        MockWorldCallKind::ApplyBodySlotOccupancy,
         MockWorldCallKind::Step,
         MockWorldCallKind::CommitScratch,
         MockWorldCallKind::InvalidateAllTicks,
@@ -211,7 +211,7 @@ TEST_CASE("PhysicsWorld applyOccupancy is recorded in call order", "[PhysicsWorl
     CHECK(calls[4].result);
     CHECK(calls[7].tick == 8);
 
-    const std::vector<MockWorldCall> occupancyCalls = world.callsOf(MockWorldCallKind::ApplyOccupancy);
+    const std::vector<MockWorldCall> occupancyCalls = world.callsOf(MockWorldCallKind::ApplyBodySlotOccupancy);
     REQUIRE(occupancyCalls.size() == 2);
     CHECK(occupancyCalls[0].occupancy == joined);
     CHECK(occupancyCalls[1].occupancy == both);
@@ -242,10 +242,10 @@ TEST_CASE("PhysicsWorld stateHash is empty for an unheld tick and the held value
     CHECK(world.stateHash(1) == std::nullopt);
 
     world.setLiveValue(123);
-    world.applyOccupancy(physicsWorldOccupancyOf({ 6 }));
+    world.applyBodySlotOccupancy(physicsWorldBodySlotOccupancyOf({ 6 }));
     world.saveTick(1);
 
-    const MockWorldState held{ 123, physicsWorldOccupancyOf({ 6 }) };
+    const MockWorldState held{ 123, physicsWorldBodySlotOccupancyOf({ 6 }) };
     REQUIRE(world.stateHash(1).has_value());
     CHECK(*world.stateHash(1) == MockPhysicsWorld::hashOf(held));
     CHECK(world.stateHash(2) == std::nullopt);
@@ -254,10 +254,10 @@ TEST_CASE("PhysicsWorld stateHash is empty for an unheld tick and the held value
     CHECK(*world.stateHash(1) == MockPhysicsWorld::hashOf(held));
 
     world.saveTick(1);
-    CHECK(*world.stateHash(1) == MockPhysicsWorld::hashOf(MockWorldState{ 456, physicsWorldOccupancyOf({ 6 }) }));
+    CHECK(*world.stateHash(1) == MockPhysicsWorld::hashOf(MockWorldState{ 456, physicsWorldBodySlotOccupancyOf({ 6 }) }));
     CHECK(*world.stateHash(1) != MockPhysicsWorld::hashOf(held));
 
-    world.applyOccupancy(physicsWorldOccupancyOf({}));
+    world.applyBodySlotOccupancy(physicsWorldBodySlotOccupancyOf({}));
     world.saveTick(2);
     CHECK(*world.stateHash(2) != *world.stateHash(1));
 }

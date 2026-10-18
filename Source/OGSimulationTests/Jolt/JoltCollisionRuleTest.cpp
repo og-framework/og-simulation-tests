@@ -76,7 +76,7 @@ namespace
         addFloor(world, staticKey);
         if (occupied)
         {
-            world.applyOccupancy(occupancyOf({ 0 }));
+            world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 0 }));
         }
 
         CountingContactListener contacts;

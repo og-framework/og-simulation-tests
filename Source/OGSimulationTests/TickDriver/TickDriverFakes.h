@@ -536,8 +536,8 @@ namespace tickDriverFakes
             onWorldLockWait(bindLockWaitSeconds);
         }
 
-        template <typename PushOccupancyF>
-        std::optional<uint32_t> release(uint64_t key, unsigned int id, PushOccupancyF&& pushOccupancy)
+        template <typename PushBodySlotOccupancyF>
+        std::optional<uint32_t> release(uint64_t key, unsigned int id, PushBodySlotOccupancyF&& pushBodySlotOccupancy)
         {
             const auto held = m_slots.find(key);
             if (held == m_slots.end())
@@ -545,7 +545,7 @@ namespace tickDriverFakes
             const uint32_t slot = held->second;
             m_slots.erase(held);
             m_events->push_back("release:" + std::to_string(key) + ":" + std::to_string(slot) + ":" + std::to_string(id));
-            pushOccupancy(slot, false);
+            pushBodySlotOccupancy(slot, false);
             return slot;
         }
 
