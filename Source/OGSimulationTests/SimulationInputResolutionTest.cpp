@@ -1167,8 +1167,8 @@ TEST_CASE("SimulationInputResolution.CollectThenAllocateMixedAuthorityAndPredict
     // production configuration because a manager that calls it
     // (`onGameSimulationPrediction`'s caller) never shares its storage with
     // authority-only ids — a listen server runs the prediction role and the
-    // authority role on SEPARATE `ASimulationManagerUImpl` instances, each
-    // with its own storage/reconciliation (`SimulationManagerUImpl.cpp`'s
+    // authority role on SEPARATE `AOGBrawlerSimulationManager` instances, each
+    // with its own storage/reconciliation (`OGBrawlerSimulationManager.cpp`'s
     // `s_instances[0]`/authority vs the prediction-role instance). This
     // TEST's rig deliberately mixes both id classes in ONE storage to pin the
     // ALLOCATION filter in isolation — a configuration production never

@@ -488,7 +488,7 @@ TEST_CASE("TierDelayDeltaTicksIsAntisymmetric", "[Network][ConnectionTierTable]"
 // no-tier fallback instead. Feeding that 0 into `tierDelayDeltaTicks` as if
 // it were a real prior tier requests a spurious multi-tick client prediction
 // stall, in the WRONG DIRECTION, on every first-ever tier except 0 (see the
-// worked table in SimulationManagerUImpl.cpp's PRESERVED QUIRK note and in
+// worked table in OGBrawlerSimulationManager.cpp's PRESERVED QUIRK note and in
 // Backlog.md item 69). `shouldStallForTierTransition`'s `hadAnyTier`
 // parameter is what a caller uses to tell "0 is the wire default, nothing
 // arrived yet" from "0 is a genuine prior tier" — the property value alone

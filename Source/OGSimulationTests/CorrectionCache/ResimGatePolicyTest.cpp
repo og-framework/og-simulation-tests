@@ -33,7 +33,7 @@
 //
 // WHAT THIS SUITE DELIBERATELY DOES NOT COVER: the ini intake and the
 // `[ResimGate]` proof line, which are UE-side composition-root code
-// (SimulationManagerUImpl) and invisible to a pure-C++ target; the per-character
+// (OGBrawlerSimulationManager) and invisible to a pure-C++ target; the per-character
 // depth-skip sweep inside `checkDivergenceAll`, which needs a real storage and a
 // real simulatable and therefore lives in og-brawler-tests'
 // SimulationReconciliationTest; and the anchor semantics themselves.

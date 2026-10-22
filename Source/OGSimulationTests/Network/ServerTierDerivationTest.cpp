@@ -22,7 +22,7 @@
 // adapter reads the RAW FNetPing RoundTrip value and forwards it to
 // ServerReceptionCoordinator::noteRttSample (T20/T21), which feeds a
 // ConnectionTierTable and, on a tier change, drives the send through the
-// ConnectionTierSink (T23) — USimmableUpdateComponent, whose implementation writes
+// ConnectionTierSink (T23) — UOGBrawlerSimulatableComponent, whose implementation writes
 // a COND_OwnerOnly replicated uint8.
 //
 // The FNetPing read and the replication itself are ENGINE surface: this suite
