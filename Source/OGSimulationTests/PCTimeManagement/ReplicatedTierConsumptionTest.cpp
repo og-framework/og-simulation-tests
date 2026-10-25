@@ -37,7 +37,7 @@
 //      the TimeConfig arrays out of bounds.
 //
 // WHAT IT DELIBERATELY DOES NOT COVER. The UE transport itself — the
-// COND_OwnerOnly UPROPERTY and OnRep_ConnectionTier on USimmableUpdateComponent
+// COND_OwnerOnly UPROPERTY and OnRep_ConnectionTier on UOGBrawlerSimulatableComponent
 // — is engine surface this suite links none of. That is PIE-only. This suite
 // pins the contract that sits UNDER the transport.
 //

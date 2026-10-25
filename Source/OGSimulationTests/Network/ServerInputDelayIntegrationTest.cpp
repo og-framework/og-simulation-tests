@@ -40,7 +40,7 @@
 // itself, and the ChaosTickMapper step->tick conversion, are UE-side and cannot
 // be linked from this engine-free suite. The mapper's off-by-one is verified by
 // derivation and documented on
-// ASimulationManagerUImpl::releaseDelayedInputsForStep; it is provable only in
+// AOGBrawlerSimulationManager::releaseDelayedInputsForStep; it is provable only in
 // the PIE smoke test. Do NOT read a green run here as evidence of tick
 // alignment in the real engine — this suite fixes the DELAY, not the EPOCH.
 // ---------------------------------------------------------------------------
@@ -79,7 +79,7 @@ namespace
 
     // The server, reduced to the two hops that matter and nothing else.
     //
-    // Mirrors ASimulationManagerUImpl::releaseDelayedInputsForStep +
+    // Mirrors AOGBrawlerSimulationManager::releaseDelayedInputsForStep +
     // SimulationInputResolution::collectInputAll. Under the T26 due-or-overdue release the
     // delivered captureTick is the entry's STORED tick, surfaced by
     // tryDequeueForTick's out-param (F1) — NOT reconstructed as `simTick - delay`,
@@ -351,7 +351,7 @@ TEST_CASE("OverdueEntriesReleaseInCaptureOrderNotStranded", "[Network][InputDela
 // An unknown connection must still be served. This is the fallback the task
 // requires so no player input is silently dropped during rollout — here at the
 // policy level (baseline delay), with the UE-side "deliver on the legacy path"
-// half living in ASimulationManagerUImpl::tryEnqueueDelayedRemoteInput.
+// half living in AOGBrawlerSimulationManager::tryEnqueueDelayedRemoteInput.
 TEST_CASE("UnknownConnectionUsesBaselineAndStillDelivers", "[Network][InputDelayIntegration]")
 {
     const TimeConfig cfg;
@@ -425,7 +425,7 @@ TEST_CASE("TierEscalationShiftsParkedInputDueTick", "[Network][InputDelayIntegra
 // while both stay on the single shared per-wire delay.
 //
 // Note the RemoteMoveQueue here is deliberately ONE queue, matching production —
-// each character has its own USimmableUpdateComponent and therefore its own
+// each character has its own UOGBrawlerSimulatableComponent and therefore its own
 // RemoteMoveQueue, but modelling them as one and draining in order is the
 // STRICTER test: if the two streams were conflated anywhere upstream, the
 // interleaving below would show it as a wrong value or a wrong captureTick.

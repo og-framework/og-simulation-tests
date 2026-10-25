@@ -31,7 +31,7 @@
 //
 // WHAT THIS SUITE DELIBERATELY DOES NOT COVER: the ini intake and the
 // `[StateRotation]` proof line, both of which are UE-side composition-root code
-// (SimulationManagerUImpl) and invisible to a pure-C++ target; and the packet
+// (OGBrawlerSimulationManager) and invisible to a pure-C++ target; and the packet
 // arithmetic that motivated the cadence, which is the round-vs-packet LLT in
 // og-brawler-tests.
 // ---------------------------------------------------------------------------

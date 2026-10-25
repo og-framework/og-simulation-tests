@@ -527,7 +527,7 @@ TEST_CASE("RelayDelayFloor: a dominating floor collapses tier-transition deltas 
 TEST_CASE("RelayDelayFloor: a floor CHANGE produces the delta the client stalls by",
           "[Network][RelayDelayFloor]")
 {
-    // This is the quantity ASimulationManagerUImpl's shared recompute returns and
+    // This is the quantity AOGBrawlerSimulationManager's shared recompute returns and
     // hands to requestInputDelayIncreaseStall: the change in EFFECTIVE delay, not
     // the change in the floor. The two differ exactly when the other input
     // dominates — which is why the manager cannot compute it from the floor alone.

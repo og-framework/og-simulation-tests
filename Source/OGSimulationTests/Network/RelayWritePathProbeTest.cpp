@@ -74,7 +74,7 @@ namespace
     // 8 mirrors `relayedInputRing::kMaxDepth`. Written as a literal because this
     // file is deliberately free of the codec header (the probe is STL-only, which
     // is what makes it testable without a simulatable); the production wiring in
-    // SimulationManagerUImpl.h passes the real constant, and the ring suite pins
+    // OGBrawlerSimulationManager.h passes the real constant, and the ring suite pins
     // the constant's value.
     constexpr RelayStageCapacity kFlushStage{ 8u };
 } // namespace
