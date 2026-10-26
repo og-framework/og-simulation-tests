@@ -6,6 +6,7 @@
 #include "OGSimulation/CorrectionStateBufferCodec.h"
 #include "OGSimulation/SimulationComposite.h"
 #include "OGSimulation/SimulationFieldDescriptors.h"
+#include "OGSimulation/SimulationFrame.h"
 
 #include <cstdint>
 #include <cstring>
@@ -254,7 +255,9 @@ TEST_CASE("CorrectionStateBuffer.LayoutAndVersionFence",
     // brawler radial InitialConditions' dead `activeRootBodyId` (4 B) was REMOVED from the
     // composite's first slice, and the radial State gained its 3 B synced hit ledger. Seen RED
     // on the edit (`6 == 5`). No `!= 5u`, for task 17's reason above.
-    REQUIRE(correctionStateBuffer::kWireFormatVersion == 6u);
+    REQUIRE(correctionStateBuffer::kLegacyFrameWireFormatVersion == 6u);
+    REQUIRE(correctionStateBuffer::kWireFormatVersion
+        == correctionStateBuffer::wireFormatVersionFor(kAxisFrame, kUnitsPerMetre));
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 3u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 2u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 1u);

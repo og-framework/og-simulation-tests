@@ -6,6 +6,8 @@
 
 #include <Jolt/Physics/Collision/Shape/OffsetCenterOfMassShape.h>
 
+#include "OGSimulation/SimulationFrame.h"
+
 #include <cstdio>
 #include <random>
 
@@ -293,7 +295,7 @@ TEST_CASE("JoltSuite.EveryBodyEqualsItsPushedStateBeforeTheFirstReplayStep", "[J
         REQUIRE(dropped.tick().replayedTicks == 12u);
         REQUIRE(dropped.pushProbe.check.pushes == 1u);
         REQUIRE(dropped.pushProbe.check.mismatches >= 1u);
-        REQUIRE(dropped.pushProbe.check.maxPositionErrorCm >= 4.f);
+        REQUIRE(dropped.pushProbe.check.maxPositionError >= 0.04f);
     }
 }
 
@@ -302,7 +304,7 @@ namespace
     struct PushFidelity
     {
         int firstDifferingTick = -1;
-        float maxCapsuleDifferenceCm = 0.f;
+        float maxCapsuleDifference = 0.f;
         uint64_t movedByPush = 0;
     };
 
@@ -334,7 +336,7 @@ namespace
             {
                 const glm::vec3 a = run.simOf(kFirstId + slot)->getAllState().getState().capsule.bodyState.position;
                 const glm::vec3 b = quiet.simOf(kFirstId + slot)->getAllState().getState().capsule.bodyState.position;
-                fidelity.maxCapsuleDifferenceCm = std::max(fidelity.maxCapsuleDifferenceCm, maxAbs(a - b));
+                fidelity.maxCapsuleDifference = std::max(fidelity.maxCapsuleDifference, maxAbs(a - b));
             }
         }
         fidelity.movedByPush = run.pushProbe.check.declarationsMovedByPush;
@@ -348,24 +350,24 @@ TEST_CASE("JoltSuite.AlwaysResimsReproduceTheUnreplayedRunByteForByte", "[Jolt]"
     RuntimeLease lease;
     const PushFidelity withoutPush = alwaysAgainstUnreplayed(lease.runtime, true, 300);
     REQUIRE(withoutPush.firstDifferingTick == -1);
-    REQUIRE(withoutPush.maxCapsuleDifferenceCm == 0.f);
+    REQUIRE(withoutPush.maxCapsuleDifference == 0.f);
     REQUIRE(withoutPush.movedByPush == 0u);
 
     const PushFidelity withPush = alwaysAgainstUnreplayed(lease.runtime, false, 300);
     REQUIRE(withPush.firstDifferingTick == -1);
     REQUIRE(withPush.movedByPush == 0u);
-    REQUIRE(withPush.maxCapsuleDifferenceCm == 0.f);
-    std::printf("[JoltSuite] push fidelity, always depth 8 vs an unreplayed run over 300 ticks: without push firstDiff=%d maxCapsuleDiffCm=%g; "
-                "with push firstDiff=%d maxCapsuleDiffCm=%g movedByPush=%llu\n",
-        withoutPush.firstDifferingTick, double(withoutPush.maxCapsuleDifferenceCm), withPush.firstDifferingTick,
-        double(withPush.maxCapsuleDifferenceCm), (unsigned long long)withPush.movedByPush);
+    REQUIRE(withPush.maxCapsuleDifference == 0.f);
+    std::printf("[JoltSuite] push fidelity, always depth 8 vs an unreplayed run over 300 ticks: without push firstDiff=%d maxCapsuleDiff%s=%g; "
+                "with push firstDiff=%d maxCapsuleDiff%s=%g movedByPush=%llu\n",
+        withoutPush.firstDifferingTick, simFrame::kLengthFieldSuffix, double(withoutPush.maxCapsuleDifference), withPush.firstDifferingTick,
+        simFrame::kLengthFieldSuffix, double(withPush.maxCapsuleDifference), (unsigned long long)withPush.movedByPush);
 }
 
 TEST_CASE("JoltSuite.Finding.AResimWithoutACorrectionReproducesTheUnreplayedRun", "[Jolt]")
 {
     RuntimeLease lease;
     const PushFidelity withPush = alwaysAgainstUnreplayed(lease.runtime, false, 60);
-    INFO("first differing tick " << withPush.firstDifferingTick << ", max capsule difference " << withPush.maxCapsuleDifferenceCm << " cm");
+    INFO("first differing tick " << withPush.firstDifferingTick << ", max capsule difference " << withPush.maxCapsuleDifference << " m");
     REQUIRE(withPush.firstDifferingTick == -1);
 }
 
@@ -385,9 +387,9 @@ namespace
         "The simulations are planned to move to metres, with Jolt's centre-of-mass convention. When that lands, the write is exact and "
         "this test fails.\n"
         "When it fails: remove the restore-skip comparison from pushCorrectedBodyStatesAll (keep setBodyPose), then delete this test. "
-        "To keep the skip on purpose instead, delete only this test and record why in og-simulation-jolt's docs/JoltUnits-rationale.md "
+        "To keep the skip on purpose instead, delete only this test and record why in og-simulation-jolt's docs/JoltPhysicsBodyAdapter-rationale.md "
         "\xC2\xA7"
-        "5.";
+        "9.";
 
     void offsetCentreOfMass(JoltWorld& world, JPH::BodyID body)
     {
@@ -447,30 +449,21 @@ namespace
         return states;
     }
 
-    bool centimetresRoundTripExactly(float centimetres)
-    {
-        const float metres = joltUnits::centimetresToMetres(centimetres);
-        return metres * joltSeamUnits::kCentimetresPerMetre == centimetres;
-    }
-
     std::vector<PhysicsBodyState> exactSeamStates(uint32_t seed)
     {
-        std::vector<float> exactCentimetres;
+        std::vector<float> exactValues;
         for (int32_t step = 1; step <= 400; ++step)
         {
-            for (const float centimetres : { 25.f * float(step), -25.f * float(step) })
-            {
-                if (centimetresRoundTripExactly(centimetres))
-                    exactCentimetres.push_back(centimetres);
-            }
+            for (const float value : { 25.f * float(step), -25.f * float(step) })
+                exactValues.push_back(value);
         }
-        REQUIRE(exactCentimetres.size() > 100u);
+        REQUIRE(exactValues.size() > 100u);
         SeamRandom random(seed);
         std::vector<PhysicsBodyState> states(kSeamWriteSamples);
         for (PhysicsBodyState& state : states)
         {
-            const uint32_t count = uint32_t(exactCentimetres.size());
-            state.position = glm::vec3(exactCentimetres[random.index(count)], exactCentimetres[random.index(count)], exactCentimetres[random.index(count)]);
+            const uint32_t count = uint32_t(exactValues.size());
+            state.position = glm::vec3(exactValues[random.index(count)], exactValues[random.index(count)], exactValues[random.index(count)]);
             state.rotation = random.unitQuaternion();
         }
         return states;
@@ -550,7 +543,7 @@ TEST_CASE("JoltSuite.SetBodyPoseWritesTheQuaternionBitForBitAndTheMatrixPathDoes
     for (uint32_t sample = 0; sample < kSeamWriteSamples; ++sample)
     {
         const glm::quat rotation = random.unitQuaternion();
-        const glm::vec3 position = random.vector(1000.f);
+        const glm::vec3 position = random.vector(10.f);
 
         scene.bodies.setBodyPose(body, position, rotation);
         const glm::quat poseCaptured = scene.bodies.captureBodyState(body).rotation;
@@ -665,12 +658,12 @@ TEST_CASE("JoltSuite.AResimWithNoBodyCorrectionMidSwingReproducesTheUnreplayedRu
     RuntimeLease lease;
     const SwingFidelity fidelity = resimMidSwingAgainstUnreplayed(lease.runtime);
     std::printf("[JoltSuite] mid-swing resim vs an unreplayed run over %u ticks: granted=%llu firstDiff=%d differingTicks=%u movedByPush=%llu "
-                "anchorAngularSpeed=%g maxCapsuleSpeedCmPerS=%g\n",
+                "anchorAngularSpeed=%g maxCapsuleSpeed%sPerS=%g\n",
         kSwingComparedTicks, (unsigned long long)fidelity.granted, fidelity.firstDifferingTick, fidelity.differingTicks,
-        (unsigned long long)fidelity.movedByPush, double(fidelity.anchorAngularSpeed), double(fidelity.maxCapsuleSpeed));
+        (unsigned long long)fidelity.movedByPush, double(fidelity.anchorAngularSpeed), simFrame::kLengthFieldSuffix, double(fidelity.maxCapsuleSpeed));
     REQUIRE(fidelity.granted == 1u);
     REQUIRE(fidelity.anchorAngularSpeed > 1.f);
-    REQUIRE(fidelity.maxCapsuleSpeed > 10.f);
+    REQUIRE(fidelity.maxCapsuleSpeed > 0.1f);
     REQUIRE(fidelity.movedByPush == 0u);
     REQUIRE(fidelity.firstDifferingTick == -1);
     REQUIRE(fidelity.differingTicks == 0u);

@@ -7,6 +7,7 @@
 #include "OGSimulation/Mailbox.h"
 #include "OGSimulation/RenderInterpolation.h"
 #include "OGSimulation/RenderSnapshot.h"
+#include "OGSimulation/SimulationFrame.h"
 #include "OGSimulation/SimulationTimeContext.h"
 
 #include <algorithm>
@@ -33,7 +34,7 @@ namespace
         body.simulatableId = id;
         body.declarationIndex = declaration;
         body.hasRotation = hasRotation ? uint8_t{ 1 } : uint8_t{ 0 };
-        body.positionCm = position;
+        body.position = position;
         body.rotation = rotation;
         return body;
     }
@@ -53,7 +54,10 @@ namespace
         std::sort(snapshot.bodies.begin(), snapshot.bodies.begin() + snapshot.bodyCount, &renderSnapshotDetail::keyLess);
     }
 
-    glm::vec3 positionAtStep(uint64_t step) { return glm::vec3(10.f * static_cast<float>(step), -3.f, 100.f + static_cast<float>(step)); }
+    glm::vec3 positionAtStep(uint64_t step)
+    {
+        return glm::vec3(-0.03f, 1.f + 0.01f * static_cast<float>(step), -(0.1f * static_cast<float>(step)));
+    }
 
     template <typename ChannelT>
     void publishStep(ChannelT& channel, uint64_t step, StepKind kind = StepKind::Normal)
@@ -128,7 +132,7 @@ namespace
     {
         INFO("actual (" << actual.x << ", " << actual.y << ", " << actual.z << ") expected (" << expected.x << ", " << expected.y
             << ", " << expected.z << ")");
-        REQUIRE(glm::distance(actual, expected) < 1e-3f);
+        REQUIRE(glm::distance(actual, expected) < 1.0000001e-5f);
     }
 
     void requireNear(glm::quat actual, glm::quat expected)
@@ -140,7 +144,7 @@ namespace
     {
         const RenderBody* body = findRenderBody(poses, 1u, 0u);
         REQUIRE(body != nullptr);
-        requireNear(body->positionCm, expected);
+        requireNear(body->position, expected);
     }
 }
 
@@ -314,7 +318,7 @@ TEST_CASE("RenderInterpolation.Alpha.FromTheTwoDeadlinesClampedToTheBracket", "[
     fillSnapshot(*slot, 10u, 0.100, { makeBody(1u, 0u, false, glm::vec3(0.f)) }, StepKind::Stall);
     channel.commit();
     slot = channel.beginWrite();
-    fillSnapshot(*slot, 11u, 0.130, { makeBody(1u, 0u, false, glm::vec3(30.f, 0.f, 0.f)) }, StepKind::Skip);
+    fillSnapshot(*slot, 11u, 0.130, { makeBody(1u, 0u, false, glm::vec3(0.f, 0.f, -0.3f)) }, StepKind::Skip);
     channel.commit();
     Snapshot poses;
     const RenderInterpolationFrame frame = interpolateAt(channel, 0.106, poses);
@@ -325,22 +329,22 @@ TEST_CASE("RenderInterpolation.Alpha.FromTheTwoDeadlinesClampedToTheBracket", "[
 
 TEST_CASE("RenderInterpolation.Blend.PositionLerpRotationSlerpOnlyWhenTheBodyCarriesOne", "[RenderInterpolation]")
 {
-    const glm::quat prevRotation = glm::angleAxis(0.2f, glm::vec3(0.f, 0.f, 1.f));
-    const glm::quat nextRotation = glm::angleAxis(1.4f, glm::vec3(0.f, 0.f, 1.f));
-    const glm::quat linearPrevRotation = glm::angleAxis(0.7f, glm::vec3(1.f, 0.f, 0.f));
-    const glm::quat linearNextRotation = glm::angleAxis(-0.9f, glm::vec3(1.f, 0.f, 0.f));
+    const glm::quat prevRotation = glm::angleAxis(0.2f, glm::vec3(-0.f, -1.f, 0.f));
+    const glm::quat nextRotation = glm::angleAxis(1.4f, glm::vec3(-0.f, -1.f, 0.f));
+    const glm::quat linearPrevRotation = glm::angleAxis(0.7f, glm::vec3(-0.f, -0.f, 1.f));
+    const glm::quat linearNextRotation = glm::angleAxis(-0.9f, glm::vec3(-0.f, -0.f, 1.f));
 
     Snapshot prev;
     fillSnapshot(prev, 1u, 1.0, {
         makeBody(1u, 0u, true, glm::vec3(0.f, 0.f, 0.f), prevRotation),
-        makeBody(1u, 1u, false, glm::vec3(10.f, 20.f, 30.f), linearPrevRotation),
-        makeBody(3u, 0u, false, glm::vec3(5.f)),
+        makeBody(1u, 1u, false, glm::vec3(0.2f, 0.3f, -0.1f), linearPrevRotation),
+        makeBody(3u, 0u, false, glm::vec3(0.05f, 0.05f, -0.05f)),
     });
     Snapshot next;
     fillSnapshot(next, 2u, 2.0, {
-        makeBody(1u, 0u, true, glm::vec3(100.f, -50.f, 8.f), nextRotation),
-        makeBody(1u, 1u, false, glm::vec3(20.f, 40.f, 60.f), linearNextRotation),
-        makeBody(2u, 0u, true, glm::vec3(-7.f, 7.f, 7.f), nextRotation),
+        makeBody(1u, 0u, true, glm::vec3(-0.5f, 0.08f, -1.f), nextRotation),
+        makeBody(1u, 1u, false, glm::vec3(0.4f, 0.6f, -0.2f), linearNextRotation),
+        makeBody(2u, 0u, true, glm::vec3(0.07f, 0.07f, 0.07f), nextRotation),
     });
 
     Snapshot poses;
@@ -352,55 +356,57 @@ TEST_CASE("RenderInterpolation.Blend.PositionLerpRotationSlerpOnlyWhenTheBodyCar
 
     const RenderBody* full = findRenderBody(poses, 1u, 0u);
     REQUIRE(full != nullptr);
-    requireNear(full->positionCm, glm::vec3(30.f, -15.f, 2.4f));
+    requireNear(full->position, glm::vec3(-0.15f, 0.024f, -0.3f));
     requireNear(full->rotation, glm::slerp(prevRotation, nextRotation, bodyAlpha));
     REQUIRE(std::abs(glm::angle(full->rotation) - (0.2f + 1.2f * bodyAlpha)) < 1e-5f);
 
     const RenderBody* linear = findRenderBody(poses, 1u, 1u);
     REQUIRE(linear != nullptr);
     REQUIRE(linear->hasRotation == 0u);
-    requireNear(linear->positionCm, glm::vec3(13.f, 26.f, 39.f));
+    requireNear(linear->position, glm::vec3(0.26f, 0.39f, -0.13f));
     REQUIRE(linear->rotation == linearNextRotation);
 
     const RenderBody* joined = findRenderBody(poses, 2u, 0u);
     REQUIRE(joined != nullptr);
-    REQUIRE(joined->positionCm == glm::vec3(-7.f, 7.f, 7.f));
+    REQUIRE(joined->position == glm::vec3(0.07f, 0.07f, 0.07f));
     REQUIRE(joined->rotation == nextRotation);
     REQUIRE(findRenderBody(poses, 3u, 0u) == nullptr);
 
     REQUIRE(blendRenderPoses(prev, next, 0.0, std::numeric_limits<float>::infinity(), poses) == 0u);
-    REQUIRE(findRenderBody(poses, 1u, 0u)->positionCm == glm::vec3(0.f));
+    REQUIRE(findRenderBody(poses, 1u, 0u)->position == glm::vec3(0.f));
     REQUIRE(findRenderBody(poses, 1u, 0u)->rotation == prevRotation);
     REQUIRE(blendRenderPoses(prev, next, 1.0, std::numeric_limits<float>::infinity(), poses) == 0u);
-    REQUIRE(findRenderBody(poses, 1u, 0u)->positionCm == glm::vec3(100.f, -50.f, 8.f));
+    REQUIRE(findRenderBody(poses, 1u, 0u)->position == glm::vec3(-0.5f, 0.08f, -1.f));
     REQUIRE(findRenderBody(poses, 1u, 0u)->rotation == nextRotation);
 }
 
 TEST_CASE("RenderInterpolation.Blend.ABodyFartherThanTheSnapDistanceTakesNextUnblended", "[RenderInterpolation]")
 {
-    constexpr float kSnapCm = 50000.f;
+    constexpr float kSnapDistance = 500.f;
+    constexpr float kJustUnderSnapDistance = kSnapDistance - 0.01f;
     Snapshot prev;
     fillSnapshot(prev, 1u, 1.0, {
         makeBody(1u, 0u, false, glm::vec3(0.f, 0.f, 0.f)),
         makeBody(1u, 1u, false, glm::vec3(0.f, 0.f, 0.f)),
-        makeBody(1u, 2u, true, glm::vec3(0.f, 0.f, -100000.f), glm::angleAxis(0.5f, glm::vec3(0.f, 1.f, 0.f))),
+        makeBody(1u, 2u, true, glm::vec3(0.f, -1000.f, -0.f), glm::angleAxis(0.5f, glm::vec3(-1.f, -0.f, 0.f))),
     });
     Snapshot next;
     fillSnapshot(next, 2u, 2.0, {
-        makeBody(1u, 0u, false, glm::vec3(kSnapCm, 0.f, 0.f)),
-        makeBody(1u, 1u, false, glm::vec3(0.f, kSnapCm - 1.f, 0.f)),
-        makeBody(1u, 2u, true, glm::vec3(30.f, 0.f, 120.f), glm::angleAxis(1.5f, glm::vec3(0.f, 1.f, 0.f))),
+        makeBody(1u, 0u, false, glm::vec3(0.f, 0.f, -kSnapDistance)),
+        makeBody(1u, 1u, false, glm::vec3(kJustUnderSnapDistance, 0.f, -0.f)),
+        makeBody(1u, 2u, true, glm::vec3(0.f, 1.2f, -0.3f), glm::angleAxis(1.5f, glm::vec3(-1.f, -0.f, 0.f))),
     });
 
     Snapshot poses;
-    REQUIRE(blendRenderPoses(prev, next, 0.5, kSnapCm, poses) == 1u);
-    requireNear(findRenderBody(poses, 1u, 0u)->positionCm, glm::vec3(0.5f * kSnapCm, 0.f, 0.f));
-    requireNear(findRenderBody(poses, 1u, 1u)->positionCm, glm::vec3(0.f, 0.5f * (kSnapCm - 1.f), 0.f));
-    REQUIRE(findRenderBody(poses, 1u, 2u)->positionCm == glm::vec3(30.f, 0.f, 120.f));
-    REQUIRE(findRenderBody(poses, 1u, 2u)->rotation == glm::angleAxis(1.5f, glm::vec3(0.f, 1.f, 0.f)));
+    REQUIRE(blendRenderPoses(prev, next, 0.5, kSnapDistance, poses) == 1u);
+    requireNear(findRenderBody(poses, 1u, 0u)->position, glm::vec3(0.f, 0.f, -(0.5f * kSnapDistance)));
+    requireNear(findRenderBody(poses, 1u, 1u)->position, glm::vec3(0.5f * kJustUnderSnapDistance, 0.f, -0.f));
+    REQUIRE(findRenderBody(poses, 1u, 2u)->position == glm::vec3(0.f, 1.2f, -0.3f));
+    REQUIRE(findRenderBody(poses, 1u, 2u)->rotation == glm::angleAxis(1.5f, glm::vec3(-1.f, -0.f, 0.f)));
 
     REQUIRE(blendRenderPoses(prev, next, 0.5, std::numeric_limits<float>::infinity(), poses) == 0u);
-    REQUIRE(findRenderBody(poses, 1u, 2u)->positionCm.z == Catch::Approx(-49940.0).margin(1e-2));
+    REQUIRE(simFrame::height(findRenderBody(poses, 1u, 2u)->position)
+        == Catch::Approx(-499.4).margin(0.0001));
 
     Channel channel;
     *channel.beginWrite() = prev;
@@ -409,12 +415,12 @@ TEST_CASE("RenderInterpolation.Blend.ABodyFartherThanTheSnapDistanceTakesNextUnb
     channel.commit();
     RenderInterpolationParams params;
     params.renderTimeSeconds = 1.5;
-    params.snapDistanceCm = kSnapCm;
+    params.snapDistance = kSnapDistance;
     RenderInterpolationFrame frame;
     REQUIRE(interpolateRenderPoses(channel, params, poses, frame));
     REQUIRE(frame.hasPrev);
     REQUIRE(frame.snaps == 1u);
-    REQUIRE(findRenderBody(poses, 1u, 2u)->positionCm == glm::vec3(30.f, 0.f, 120.f));
+    REQUIRE(findRenderBody(poses, 1u, 2u)->position == glm::vec3(0.f, 1.2f, -0.3f));
 }
 
 TEST_CASE("RenderInterpolation.Slots.AtMostTwoHeldAndAllReleasedOnEveryPath", "[RenderInterpolation]")
@@ -536,7 +542,7 @@ TEST_CASE("RenderInterpolation.NoAllocation.ThePoseSetAndTheFrameAreFlatCallerOw
     REQUIRE(interpolateRenderPoses(channel, params, poses, frame, &nextCopy));
     REQUIRE(poses.bodies.data() == posesStorage);
     REQUIRE(nextCopy.physicsStep == 3u);
-    REQUIRE(findRenderBody(nextCopy, 1u, 0u)->positionCm == positionAtStep(3));
+    REQUIRE(findRenderBody(nextCopy, 1u, 0u)->position == positionAtStep(3));
     REQUIRE(frame.nextStep == 3u);
 }
 

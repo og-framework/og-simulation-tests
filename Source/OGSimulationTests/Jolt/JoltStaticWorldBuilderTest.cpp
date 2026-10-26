@@ -11,6 +11,7 @@
 #include <Jolt/Physics/Collision/Shape/StaticCompoundShape.h>
 
 #include "glm/gtc/matrix_transform.hpp"
+#include "OGSimulation/SimulationFrame.h"
 
 #include <algorithm>
 #include <cmath>
@@ -27,11 +28,11 @@ namespace
 {
     constexpr uint32_t kWorldBlockingCharacterOnly = bit(kCharacter);
 
-    glm::mat4 placed(const glm::vec3& positionCm, float yawDegrees = 0.f, float rollDegrees = 0.f)
+    glm::mat4 placed(const glm::vec3& position, float yawDegrees = 0.f, float rollDegrees = 0.f)
     {
-        glm::mat4 transform = glm::translate(glm::mat4(1.f), positionCm);
-        transform = glm::rotate(transform, glm::radians(yawDegrees), glm::vec3(0.f, 0.f, 1.f));
-        transform = glm::rotate(transform, glm::radians(rollDegrees), glm::vec3(1.f, 0.f, 0.f));
+        glm::mat4 transform = glm::translate(glm::mat4(1.f), position);
+        transform = glm::rotate(transform, glm::radians(yawDegrees), glm::vec3(-0.f, -1.f, 0.f));
+        transform = glm::rotate(transform, glm::radians(rollDegrees), glm::vec3(-0.f, -0.f, 1.f));
         return transform;
     }
 
@@ -54,22 +55,23 @@ namespace
         return (index + 1u) * 0x9E3779B97F4A7C15ull;
     }
 
-    StaticConvexHull boxHull(const glm::vec3& halfExtents)
+    StaticConvexHull boxHull(const glm::vec3& extents)
     {
         StaticConvexHull hull;
         for (int corner = 0; corner < 8; ++corner)
         {
-            hull.points.push_back(glm::vec3((corner & 1) ? halfExtents.x : -halfExtents.x, (corner & 2) ? halfExtents.y : -halfExtents.y,
-                (corner & 4) ? halfExtents.z : -halfExtents.z));
+            hull.points.push_back(glm::vec3((corner & 1) ? extents.x : -extents.x, (corner & 2) ? extents.y : -extents.y,
+                (corner & 4) ? extents.z : -extents.z));
         }
         return hull;
     }
 
-    StaticTriangleMesh quadFacingUp(float halfSizeCm)
+    StaticTriangleMesh quadFacingUp(float halfSize)
     {
         StaticTriangleMesh mesh;
-        mesh.vertices = { { -halfSizeCm, -halfSizeCm, 0.f }, { halfSizeCm, -halfSizeCm, 0.f }, { halfSizeCm, halfSizeCm, 0.f }, { -halfSizeCm, halfSizeCm, 0.f } };
-        mesh.indices = { 0, 1, 2, 0, 2, 3 };
+        mesh.vertices = { glm::vec3(-halfSize, 0.f, halfSize), glm::vec3(-halfSize, 0.f, -halfSize),
+            glm::vec3(halfSize, 0.f, -halfSize), glm::vec3(halfSize, 0.f, halfSize) };
+        mesh.indices = { 0, 2, 1, 0, 3, 2 };
         return mesh;
     }
 
@@ -117,22 +119,23 @@ namespace
         const JoltLayerTable& m_table;
     };
 
-    std::optional<glm::vec3> castRayCm(const JoltWorld& world, const glm::vec3& fromCm, const glm::vec3& toCm)
+    std::optional<glm::vec3> castRay(const JoltWorld& world, const glm::vec3& from, const glm::vec3& to)
     {
-        const JPH::RRayCast ray{ joltUnits::centimetresToMetres(fromCm), joltUnits::centimetresToMetres(toCm - fromCm) };
+        const glm::vec3 direction = to - from;
+        const JPH::RRayCast ray{ JPH::RVec3(from.x, from.y, from.z), JPH::Vec3(direction.x, direction.y, direction.z) };
         JPH::ClosestHitCollisionCollector<JPH::CastRayCollector> collector;
         world.query().CastRay(ray, JPH::RayCastSettings(), collector, {}, StaticClassOnly(world.layers()));
         if (!collector.HadHit())
         {
             return std::nullopt;
         }
-        return fromCm + (toCm - fromCm) * collector.mHit.mFraction;
+        return from + (to - from) * collector.mHit.mFraction;
     }
 
-    std::optional<float> topZCm(const JoltWorld& world, float xCm, float yCm)
+    std::optional<float> topHeight(const JoltWorld& world, const glm::vec3& column)
     {
-        const std::optional<glm::vec3> hit = castRayCm(world, { xCm, yCm, 5000.f }, { xCm, yCm, -5000.f });
-        return hit.has_value() ? std::optional<float>(hit->z) : std::nullopt;
+        const std::optional<glm::vec3> hit = castRay(world, glm::vec3(column.x, 50.f, column.z), glm::vec3(column.x, -50.f, column.z));
+        return hit.has_value() ? std::optional<float>(simFrame::height(*hit)) : std::nullopt;
     }
 
     uint32_t subShapeCountOf(const JPH::Shape& shape)
@@ -148,21 +151,21 @@ namespace
     {
         StaticWorldDescription description;
         uint64_t index = 0;
-        description.shapes.push_back(element(boxHull({ 2000.f, 2000.f, 50.f }), placed({ 0.f, 0.f, -50.f }), keyOf(index++)));
-        description.shapes.push_back(element(StaticSphere{ 40.f }, placed({ -225.f, -75.f, 20.f }), keyOf(index++)));
-        description.shapes.push_back(element(StaticBox{ { 60.f, 40.f, 25.f } }, placed({ -75.f, -75.f, 25.f }, 20.f), keyOf(index++)));
-        description.shapes.push_back(element(StaticCapsuleZ{ 30.f, 60.f }, placed({ 75.f, -75.f, 60.f }), keyOf(index++)));
-        StaticTriangleMesh ramp = quadFacingUp(80.f);
-        description.shapes.push_back(element(ramp, placed({ 225.f, -75.f, 40.f }, 0.f, 25.f), keyOf(index++)));
-        description.shapes.push_back(element(boxHull({ 50.f, 50.f, 15.f }), placed({ -225.f, 75.f, 15.f }, 45.f), keyOf(index++), bit(kWorld),
+        description.shapes.push_back(element(boxHull(glm::vec3(20.f, 0.5f, 20.f)), placed(glm::vec3(0.f, -0.5f, -0.f)), keyOf(index++)));
+        description.shapes.push_back(element(StaticSphere{ 0.4f }, placed(glm::vec3(-0.75f, 0.2f, 2.25f)), keyOf(index++)));
+        description.shapes.push_back(element(StaticBox{ glm::vec3(0.4f, 0.25f, 0.6f) }, placed(glm::vec3(-0.75f, 0.25f, 0.75f), 20.f), keyOf(index++)));
+        description.shapes.push_back(element(StaticCapsule{ 0.3f, 0.6f }, placed(glm::vec3(-0.75f, 0.6f, -0.75f)), keyOf(index++)));
+        StaticTriangleMesh ramp = quadFacingUp(0.8f);
+        description.shapes.push_back(element(ramp, placed(glm::vec3(-0.75f, 0.4f, -2.25f), 0.f, 25.f), keyOf(index++)));
+        description.shapes.push_back(element(boxHull(glm::vec3(0.5f, 0.15f, 0.5f)), placed(glm::vec3(0.75f, 0.15f, 2.25f), 45.f), keyOf(index++), bit(kWorld),
             kWorldBlockingCharacterOnly, 0.5f, 0.1f));
-        description.shapes.push_back(element(StaticBox{ { 30.f, 30.f, 10.f } }, placed({ -75.f, 75.f, 10.f }, -15.f), keyOf(index++), bit(kWorld),
+        description.shapes.push_back(element(StaticBox{ glm::vec3(0.3f, 0.1f, 0.3f) }, placed(glm::vec3(0.75f, 0.1f, 0.75f), -15.f), keyOf(index++), bit(kWorld),
             kWorldBlockingCharacterOnly));
-        description.shapes.push_back(element(StaticSphere{ 25.f }, placed({ 75.f, 75.f, 0.f }), keyOf(index++), bit(kWorld), kAllMappedCategories, 0.f, 0.f));
+        description.shapes.push_back(element(StaticSphere{ 0.25f }, placed(glm::vec3(0.75f, 0.f, -0.75f)), keyOf(index++), bit(kWorld), kAllMappedCategories, 0.f, 0.f));
         for (int peg = 0; peg < 12; ++peg)
         {
             const float angle = 0.5236f * float(peg);
-            description.shapes.push_back(element(StaticBox{ { 10.f, 10.f, 40.f } }, placed({ 450.f * std::cos(angle), 450.f * std::sin(angle), 40.f }, 7.f * float(peg)),
+            description.shapes.push_back(element(StaticBox{ glm::vec3(0.1f, 0.4f, 0.1f) }, placed(glm::vec3(4.5f * std::sin(angle), 0.4f, -(4.5f * std::cos(angle))), 7.f * float(peg)),
                 keyOf(index++), bit(kWorld), peg % 2 == 0 ? kAllMappedCategories : kWorldBlockingCharacterOnly, peg % 3 == 0 ? 0.5f : 0.7f, 0.3f));
         }
         return description;
@@ -172,7 +175,7 @@ namespace
     {
         std::vector<uint8_t> bytes;
         uint64_t hash = 0;
-        std::vector<float> capsuleZMetres;
+        std::vector<float> capsuleHeights;
         JoltStaticBuildStats stats;
     };
 
@@ -194,7 +197,7 @@ namespace
         run.hash = world.liveStateHash();
         for (uint32_t slot = 0; slot < world.simulatableSlots(); ++slot)
         {
-            run.capsuleZMetres.push_back(float(world.bodies().GetCenterOfMassPosition(world.slotBodyId(slot, kTemplateCapsule)).GetZ()));
+            run.capsuleHeights.push_back(joltHeight(world.bodies().GetCenterOfMassPosition(world.slotBodyId(slot, kTemplateCapsule))));
         }
         run.stats = rig.builder->stats();
         return run;
@@ -207,20 +210,30 @@ namespace
         std::uniform_real_distribution<float> unit(0.f, 1.f);
         for (uint32_t index = 0; index < count; ++index)
         {
-            const glm::mat4 transform = placed({ 4000.f * unit(random) - 2000.f, 4000.f * unit(random) - 2000.f, 300.f * unit(random) }, 360.f * unit(random),
-                30.f * unit(random));
+            const float forward = 40.f * unit(random) - 20.f;
+            const float right = 40.f * unit(random) - 20.f;
+            const float up = 3.f * unit(random);
+            const float yawDegrees = 360.f * unit(random);
+            const float rollDegrees = 30.f * unit(random);
+            const glm::mat4 transform = placed(glm::vec3(right, up, -forward), yawDegrees, rollDegrees);
             StaticShape shape;
             switch (index % 5)
             {
-            case 0: shape = StaticBox{ { 20.f + 80.f * unit(random), 20.f + 80.f * unit(random), 10.f + 40.f * unit(random) } }; break;
-            case 1: shape = StaticSphere{ 10.f + 50.f * unit(random) }; break;
-            case 2: shape = StaticCapsuleZ{ 15.f, 30.f + 60.f * unit(random) }; break;
+            case 0:
+            {
+                const glm::vec3 forwardRightUp{ 0.2f + 0.8f * unit(random), 0.2f + 0.8f * unit(random), 0.1f + 0.4f * unit(random) };
+                shape = StaticBox{ glm::vec3(forwardRightUp.y, forwardRightUp.z, forwardRightUp.x) };
+                break;
+            }
+            case 1: shape = StaticSphere{ 0.1f + 0.5f * unit(random) }; break;
+            case 2: shape = StaticCapsule{ 0.15f, 0.3f + 0.6f * unit(random) }; break;
             case 3:
             {
                 StaticConvexHull hull;
                 for (int point = 0; point < 16; ++point)
                 {
-                    hull.points.push_back({ 100.f * unit(random) - 50.f, 100.f * unit(random) - 50.f, 60.f * unit(random) - 30.f });
+                    const glm::vec3 forwardRightUp{ unit(random) - 0.5f, unit(random) - 0.5f, 0.6f * unit(random) - 0.3f };
+                    hull.points.push_back(glm::vec3(forwardRightUp.y, forwardRightUp.z, -forwardRightUp.x));
                 }
                 shape = hull;
                 break;
@@ -232,7 +245,7 @@ namespace
                 {
                     for (int x = 0; x < 5; ++x)
                     {
-                        mesh.vertices.push_back({ 40.f * float(x), 40.f * float(y), 10.f * unit(random) });
+                        mesh.vertices.push_back(glm::vec3(0.4f * float(y), 0.1f * unit(random), -(0.4f * float(x))));
                     }
                 }
                 for (uint32_t y = 0; y < 4; ++y)
@@ -240,7 +253,7 @@ namespace
                     for (uint32_t x = 0; x < 4; ++x)
                     {
                         const uint32_t corner = y * 5u + x;
-                        mesh.indices.insert(mesh.indices.end(), { corner, corner + 1u, corner + 6u, corner, corner + 6u, corner + 5u });
+                        mesh.indices.insert(mesh.indices.end(), { corner, corner + 6u, corner + 1u, corner, corner + 5u, corner + 6u });
                     }
                 }
                 shape = mesh;
@@ -257,57 +270,59 @@ namespace
 TEST_CASE("JoltStaticWorldBuilder.EachShapeTypeIsQueryableAtTheExpectedPlace", "[Jolt][StaticGeometry]")
 {
     StaticWorldDescription description;
-    description.shapes.push_back(element(StaticBox{ { 200.f, 50.f, 30.f } }, placed({ 1000.f, 0.f, 100.f }, 90.f), keyOf(0)));
-    description.shapes.push_back(element(StaticSphere{ 50.f }, placed({ 0.f, 1000.f, 200.f }), keyOf(1)));
-    description.shapes.push_back(element(StaticCapsuleZ{ 40.f, 120.f }, placed({ -1000.f, 0.f, 200.f }), keyOf(2)));
+    description.shapes.push_back(element(StaticBox{ glm::vec3(0.5f, 0.3f, 2.f) }, placed(glm::vec3(0.f, 1.f, -10.f), 90.f), keyOf(0)));
+    description.shapes.push_back(element(StaticSphere{ 0.5f }, placed(glm::vec3(10.f, 2.f, -0.f)), keyOf(1)));
+    description.shapes.push_back(element(StaticCapsule{ 0.4f, 1.2f }, placed(glm::vec3(0.f, 2.f, 10.f)), keyOf(2)));
     StaticConvexHull pyramid;
-    pyramid.points = { { -100.f, -100.f, 0.f }, { 100.f, -100.f, 0.f }, { 100.f, 100.f, 0.f }, { -100.f, 100.f, 0.f }, { 0.f, 0.f, 150.f } };
-    description.shapes.push_back(element(pyramid, placed({ 0.f, -1000.f, 50.f }, 0.f, 180.f), keyOf(3)));
-    description.shapes.push_back(element(quadFacingUp(100.f), placed({ 1000.f, 1000.f, 75.f }, 45.f), keyOf(4)));
+    pyramid.points = { glm::vec3(-1.f, 0.f, 1.f), glm::vec3(-1.f, 0.f, -1.f),
+        glm::vec3(1.f, 0.f, -1.f), glm::vec3(1.f, 0.f, 1.f), glm::vec3(0.f, 1.5f, -0.f) };
+    description.shapes.push_back(element(pyramid, placed(glm::vec3(-10.f, 0.5f, -0.f), 0.f, 180.f), keyOf(3)));
+    description.shapes.push_back(element(quadFacingUp(1.f), placed(glm::vec3(10.f, 0.75f, -10.f), 45.f), keyOf(4)));
 
     StaticRig rig(description);
     const JoltWorld& world = *rig.world;
     REQUIRE(rig.builder->stats().shapesBuilt == 5);
-    for (const size_t typeIndex : { kStaticShapeIndex<StaticBox>, kStaticShapeIndex<StaticSphere>, kStaticShapeIndex<StaticCapsuleZ>,
+    for (const size_t typeIndex : { kStaticShapeIndex<StaticBox>, kStaticShapeIndex<StaticSphere>, kStaticShapeIndex<StaticCapsule>,
              kStaticShapeIndex<StaticConvexHull>, kStaticShapeIndex<StaticTriangleMesh> })
     {
         CHECK(rig.report.shapeCountByType[typeIndex] == 1);
     }
 
-    constexpr float kToleranceCm = 0.05f;
+    constexpr float kTolerance = 0.0005f;
 
-    SECTION("box: yawed 90 degrees, so its long axis runs along world Y")
+    SECTION("box: yawed 90 degrees, so its long axis runs along the frame's right")
     {
-        CHECK(topZCm(world, 1000.f, 0.f).value_or(-1.f) == Catch::Approx(130.f).margin(kToleranceCm));
-        CHECK(topZCm(world, 1000.f, 150.f).value_or(-1.f) == Catch::Approx(130.f).margin(kToleranceCm));
-        CHECK_FALSE(topZCm(world, 1150.f, 0.f).has_value());
+        CHECK(topHeight(world, glm::vec3(0.f, 0.f, -10.f)).value_or(-0.01f) == Catch::Approx(1.3f).margin(kTolerance));
+        CHECK(topHeight(world, glm::vec3(1.5f, 0.f, -10.f)).value_or(-0.01f) == Catch::Approx(1.3f).margin(kTolerance));
+        CHECK_FALSE(topHeight(world, glm::vec3(0.f, 0.f, -11.5f)).has_value());
     }
     SECTION("sphere: top at centre + radius, and the curve off-centre")
     {
-        CHECK(topZCm(world, 0.f, 1000.f).value_or(-1.f) == Catch::Approx(250.f).margin(kToleranceCm));
-        CHECK(topZCm(world, 0.f, 1030.f).value_or(-1.f) == Catch::Approx(240.f).margin(kToleranceCm));
-        CHECK_FALSE(topZCm(world, 0.f, 1060.f).has_value());
+        CHECK(topHeight(world, glm::vec3(10.f, 0.f, -0.f)).value_or(-0.01f) == Catch::Approx(2.5f).margin(kTolerance));
+        CHECK(topHeight(world, glm::vec3(10.3f, 0.f, -0.f)).value_or(-0.01f) == Catch::Approx(2.4f).margin(kTolerance));
+        CHECK_FALSE(topHeight(world, glm::vec3(10.6f, 0.f, -0.f)).has_value());
     }
-    SECTION("capsule: Z-up, totalHalfHeight to the tip, radius on the side")
+    SECTION("capsule: along up, totalHalfHeight to the tip, radius on the side")
     {
-        CHECK(topZCm(world, -1000.f, 0.f).value_or(-1.f) == Catch::Approx(320.f).margin(kToleranceCm));
-        const std::optional<glm::vec3> side = castRayCm(world, { -500.f, 0.f, 250.f }, { -1500.f, 0.f, 250.f });
+        CHECK(topHeight(world, glm::vec3(0.f, 0.f, 10.f)).value_or(-0.01f) == Catch::Approx(3.2f).margin(kTolerance));
+        const std::optional<glm::vec3> side =
+            castRay(world, glm::vec3(0.f, 2.5f, 5.f), glm::vec3(0.f, 2.5f, 15.f));
         REQUIRE(side.has_value());
-        CHECK(side->x == Catch::Approx(-960.f).margin(kToleranceCm));
-        CHECK_FALSE(topZCm(world, -950.f, 0.f).has_value());
+        CHECK(simFrame::forwardRight(*side).x == Catch::Approx(-9.6f).margin(kTolerance));
+        CHECK_FALSE(topHeight(world, glm::vec3(0.f, 0.f, 9.5f)).has_value());
     }
     SECTION("convex: an upside-down pyramid, so its flat base is the top face")
     {
-        CHECK(topZCm(world, 0.f, -1000.f).value_or(-1.f) == Catch::Approx(50.f).margin(kToleranceCm));
-        CHECK(topZCm(world, 80.f, -1080.f).value_or(-1.f) == Catch::Approx(50.f).margin(kToleranceCm));
-        CHECK_FALSE(topZCm(world, 120.f, -1000.f).has_value());
+        CHECK(topHeight(world, glm::vec3(-10.f, 0.f, -0.f)).value_or(-0.01f) == Catch::Approx(0.5f).margin(kTolerance));
+        CHECK(topHeight(world, glm::vec3(-10.8f, 0.f, -0.8f)).value_or(-0.01f) == Catch::Approx(0.5f).margin(kTolerance));
+        CHECK_FALSE(topHeight(world, glm::vec3(-10.f, 0.f, -1.2f)).has_value());
     }
     SECTION("triangle mesh: yawed 45 degrees, front face up, back face ignored by a default ray")
     {
-        CHECK(topZCm(world, 1000.f, 1000.f).value_or(-1.f) == Catch::Approx(75.f).margin(kToleranceCm));
-        CHECK(topZCm(world, 1130.f, 1000.f).value_or(-1.f) == Catch::Approx(75.f).margin(kToleranceCm));
-        CHECK_FALSE(topZCm(world, 1150.f, 1000.f).has_value());
-        CHECK_FALSE(castRayCm(world, { 1000.f, 1000.f, -500.f }, { 1000.f, 1000.f, 500.f }).has_value());
+        CHECK(topHeight(world, glm::vec3(10.f, 0.f, -10.f)).value_or(-0.01f) == Catch::Approx(0.75f).margin(kTolerance));
+        CHECK(topHeight(world, glm::vec3(10.f, 0.f, -11.3f)).value_or(-0.01f) == Catch::Approx(0.75f).margin(kTolerance));
+        CHECK_FALSE(topHeight(world, glm::vec3(10.f, 0.f, -11.5f)).has_value());
+        CHECK_FALSE(castRay(world, glm::vec3(10.f, -5.f, -10.f), glm::vec3(10.f, 5.f, -10.f)).has_value());
     }
 }
 
@@ -316,16 +331,16 @@ TEST_CASE("JoltStaticWorldBuilder.GroupsByCollisionPairAndSurfaceIntoStaticBodie
     StaticWorldDescription description;
     for (uint64_t index = 0; index < 3; ++index)
     {
-        description.shapes.push_back(element(StaticBox{ { 20.f, 20.f, 20.f } }, placed({ 100.f * float(index), 0.f, 20.f }), keyOf(index)));
+        description.shapes.push_back(element(StaticBox{ glm::vec3(0.2f, 0.2f, 0.2f) }, placed(glm::vec3(0.f, 0.2f, -float(index))), keyOf(index)));
     }
     for (uint64_t index = 3; index < 5; ++index)
     {
-        description.shapes.push_back(element(StaticBox{ { 20.f, 20.f, 20.f } }, placed({ 100.f * float(index), 0.f, 20.f }), keyOf(index), bit(kWorld),
+        description.shapes.push_back(element(StaticBox{ glm::vec3(0.2f, 0.2f, 0.2f) }, placed(glm::vec3(0.f, 0.2f, -float(index))), keyOf(index), bit(kWorld),
             kAllMappedCategories, 0.5f, 0.1f));
     }
     for (uint64_t index = 5; index < 7; ++index)
     {
-        description.shapes.push_back(element(StaticSphere{ 20.f }, placed({ 100.f * float(index), 0.f, 20.f }), keyOf(index), bit(kWorld),
+        description.shapes.push_back(element(StaticSphere{ 0.2f }, placed(glm::vec3(0.f, 0.2f, -float(index))), keyOf(index), bit(kWorld),
             kWorldBlockingCharacterOnly));
     }
 
@@ -375,8 +390,8 @@ TEST_CASE("JoltStaticWorldBuilder.GroupsByCollisionPairAndSurfaceIntoStaticBodie
 TEST_CASE("JoltStaticWorldBuilder.ZeroFrictionAndRestitutionGetTheUnrealDefaultSurfaceAndAreLogged", "[Jolt][StaticGeometry]")
 {
     StaticWorldDescription description;
-    description.shapes.push_back(element(StaticBox{ { 20.f, 20.f, 20.f } }, placed({ 0.f, 0.f, 20.f }), keyOf(0), bit(kWorld), kAllMappedCategories, 0.f, 0.f));
-    description.shapes.push_back(element(StaticBox{ { 20.f, 20.f, 20.f } }, placed({ 100.f, 0.f, 20.f }), keyOf(1), bit(kWorld), kAllMappedCategories, 0.f, 0.4f));
+    description.shapes.push_back(element(StaticBox{ glm::vec3(0.2f, 0.2f, 0.2f) }, placed(glm::vec3(0.f, 0.2f, -0.f)), keyOf(0), bit(kWorld), kAllMappedCategories, 0.f, 0.f));
+    description.shapes.push_back(element(StaticBox{ glm::vec3(0.2f, 0.2f, 0.2f) }, placed(glm::vec3(0.f, 0.2f, -1.f)), keyOf(1), bit(kWorld), kAllMappedCategories, 0.f, 0.4f));
 
     SECTION("default options: the UE engine default material (friction 0.7, restitution 0.3)")
     {
@@ -409,14 +424,14 @@ TEST_CASE("JoltStaticWorldBuilder.ZeroFrictionAndRestitutionGetTheUnrealDefaultS
 TEST_CASE("JoltStaticWorldBuilder.ScaleIsAppliedOrApproximatedAndInvalidElementsAreSkipped", "[Jolt][StaticGeometry]")
 {
     StaticWorldDescription description;
-    description.shapes.push_back(element(StaticBox{ { 20.f, 20.f, 20.f } }, glm::scale(placed({ 0.f, 0.f, 40.f }), glm::vec3(2.f)), keyOf(0)));
-    description.shapes.push_back(element(StaticSphere{ 20.f }, glm::scale(placed({ 300.f, 0.f, 0.f }), glm::vec3(1.f, 1.f, 2.f)), keyOf(1)));
-    description.shapes.push_back(element(StaticConvexHull{}, placed({ 600.f, 0.f, 0.f }), keyOf(2)));
-    StaticTriangleMesh broken = quadFacingUp(50.f);
+    description.shapes.push_back(element(StaticBox{ glm::vec3(0.2f, 0.2f, 0.2f) }, glm::scale(placed(glm::vec3(0.f, 0.4f, -0.f)), glm::vec3(2.f)), keyOf(0)));
+    description.shapes.push_back(element(StaticSphere{ 0.2f }, glm::scale(placed(glm::vec3(0.f, 0.f, -3.f)), glm::vec3(1.f, 2.f, 1.f)), keyOf(1)));
+    description.shapes.push_back(element(StaticConvexHull{}, placed(glm::vec3(0.f, 0.f, -6.f)), keyOf(2)));
+    StaticTriangleMesh broken = quadFacingUp(0.5f);
     broken.indices.back() = 17;
-    description.shapes.push_back(element(broken, placed({ 900.f, 0.f, 0.f }), keyOf(3)));
-    description.shapes.push_back(element(StaticCapsuleZ{ 40.f, 30.f }, placed({ 1200.f, 0.f, 0.f }), keyOf(4)));
-    description.shapes.push_back(element(StaticBox{ { 20.f, 20.f, 20.f } }, glm::scale(placed({ 1500.f, 0.f, 0.f }), glm::vec3(0.f)), keyOf(5)));
+    description.shapes.push_back(element(broken, placed(glm::vec3(0.f, 0.f, -9.f)), keyOf(3)));
+    description.shapes.push_back(element(StaticCapsule{ 0.4f, 0.3f }, placed(glm::vec3(0.f, 0.f, -12.f)), keyOf(4)));
+    description.shapes.push_back(element(StaticBox{ glm::vec3(0.2f, 0.2f, 0.2f) }, glm::scale(placed(glm::vec3(0.f, 0.f, -15.f)), glm::vec3(0.f)), keyOf(5)));
 
     StaticRig rig(description);
     const JoltStaticBuildStats& stats = rig.builder->stats();
@@ -425,8 +440,8 @@ TEST_CASE("JoltStaticWorldBuilder.ScaleIsAppliedOrApproximatedAndInvalidElements
     CHECK(stats.approximatedScales == 1);
     CHECK(rig.log.countContaining("skipped an element") == 4);
     CHECK(rig.log.countContaining("approximated a scale (stableKey 0x") == 1);
-    CHECK(topZCm(*rig.world, 0.f, 0.f).value_or(-1.f) == Catch::Approx(80.f).margin(0.05f));
-    CHECK(topZCm(*rig.world, 300.f, 0.f).has_value());
+    CHECK(topHeight(*rig.world, glm::vec3(0.f, 0.f, -0.f)).value_or(-0.01f) == Catch::Approx(0.8f).margin(0.0005f));
+    CHECK(topHeight(*rig.world, glm::vec3(0.f, 0.f, -3.f)).has_value());
 }
 
 TEST_CASE("JoltStaticWorldBuilder.ShuffledDescriptionGivesIdenticalStateAfter300TicksOfRestingCapsules", "[Jolt][StaticGeometry]")
@@ -439,10 +454,10 @@ TEST_CASE("JoltStaticWorldBuilder.ShuffledDescriptionGivesIdenticalStateAfter300
     CHECK(reference.stats.groups >= 3);
     CHECK(reference.stats.chunks > reference.stats.groups);
     CHECK(reference.stats.zeroSurfaceElements == 1);
-    for (const float zMetres : reference.capsuleZMetres)
+    for (const float height : reference.capsuleHeights)
     {
-        CHECK(zMetres > 0.9f);
-        CHECK(zMetres < 2.5f);
+        CHECK(height > 0.9f);
+        CHECK(height < 2.5f);
     }
 
     std::vector<StaticWorldDescription> shuffled(3, original);

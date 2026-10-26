@@ -118,16 +118,17 @@ namespace
         OneDeclarationComposite composite;
     };
 
-    glm::vec3 fullPositionOf(uint32_t id) { return glm::vec3(float(id), 10.f + float(id), -5.f * float(id)); }
-    glm::vec3 linearPositionOf(uint32_t id) { return glm::vec3(-float(id), 0.5f * float(id), 300.f + float(id)); }
-    glm::quat fullRotationOf(uint32_t id) { return glm::quat(0.5f, -0.5f, 0.25f, float(id)); }
+    glm::vec3 fullPositionOf(uint32_t id) { return glm::vec3(0.1f + 0.01f * float(id), -0.05f * float(id), -0.01f * float(id)); }
+    glm::vec3 linearPositionOf(uint32_t id) { return glm::vec3(0.005f * float(id), 3.f + 0.01f * float(id), 0.01f * float(id)); }
+    glm::quat fullRotationOf(uint32_t id) { return glm::quat(0.5f, -0.25f, -float(id), -0.5f); }
 
     TwoBodySimulatable twoBodySimulatable(uint32_t id)
     {
         TwoBodySimulatable simulatable;
-        simulatable.allState.state.full.bodyState = PhysicsBodyState{ fullPositionOf(id), fullRotationOf(id), glm::vec3(1.f, 0.f, 0.f), glm::vec3(0.f, 0.f, 2.f) };
+        simulatable.allState.state.full.bodyState = PhysicsBodyState{ fullPositionOf(id), fullRotationOf(id),
+            glm::vec3(0.f, 0.f, -0.01f), glm::vec3(-0.f, -2.f, 0.f) };
         simulatable.allState.state.linear.bodyState.position = linearPositionOf(id);
-        simulatable.allState.state.linear.bodyState.linearVelocity = glm::vec3(0.f, 4.f, 0.f);
+        simulatable.allState.state.linear.bodyState.linearVelocity = glm::vec3(0.04f, 0.f, -0.f);
         return simulatable;
     }
 
@@ -190,7 +191,7 @@ TEST_CASE("RenderSnapshot.BodiesAreInKeyOrderOneEntryPerDeclaration", "[RenderSn
         INFO("entry " << index);
         CHECK(body.simulatableId == sortedIds[index / 2u]);
         CHECK(body.declarationIndex == uint8_t(index % 2u));
-        CHECK(body.positionCm == (index % 2u == 0u ? fullPositionOf(body.simulatableId) : linearPositionOf(body.simulatableId)));
+        CHECK(body.position == (index % 2u == 0u ? fullPositionOf(body.simulatableId) : linearPositionOf(body.simulatableId)));
     }
 }
 
@@ -198,7 +199,7 @@ TEST_CASE("RenderSnapshot.HasRotationOnlyForAFullBodyState", "[RenderSnapshot]")
 {
     TwoBodyStorage storage;
     TwoBodySimulatable simulatable = twoBodySimulatable(5u);
-    simulatable.allState.state.linear.bodyState.position = glm::vec3(7.f, 8.f, 9.f);
+    simulatable.allState.state.linear.bodyState.position = glm::vec3(0.08f, 0.09f, -0.07f);
     storage.add(5u, std::move(simulatable));
 
     Snapshot snapshot;
@@ -211,11 +212,11 @@ TEST_CASE("RenderSnapshot.HasRotationOnlyForAFullBodyState", "[RenderSnapshot]")
     CHECK(full.declarationIndex == 0u);
     CHECK(full.hasRotation == 1u);
     CHECK(full.rotation == fullRotationOf(5u));
-    CHECK(full.positionCm == fullPositionOf(5u));
+    CHECK(full.position == fullPositionOf(5u));
     CHECK(linear.declarationIndex == 1u);
     CHECK(linear.hasRotation == 0u);
     CHECK(isIdentity(linear.rotation));
-    CHECK(linear.positionCm == glm::vec3(7.f, 8.f, 9.f));
+    CHECK(linear.position == glm::vec3(0.08f, 0.09f, -0.07f));
 }
 
 TEST_CASE("RenderSnapshot.OutcomeFieldsAndTheDeadlineAreCopied", "[RenderSnapshot]")
@@ -293,8 +294,8 @@ TEST_CASE("RenderSnapshot.KeyOrderSpansSimulatableTypes", "[RenderSnapshot]")
         CHECK(snapshot.bodies[index].declarationIndex == expected[index].second);
         CHECK(snapshot.bodies[index].hasRotation == expectedRotation[index]);
     }
-    CHECK(snapshot.bodies[0].positionCm == linearPositionOf(1u));
-    CHECK(snapshot.bodies[3].positionCm == linearPositionOf(10u));
+    CHECK(snapshot.bodies[0].position == linearPositionOf(1u));
+    CHECK(snapshot.bodies[3].position == linearPositionOf(10u));
 }
 
 namespace

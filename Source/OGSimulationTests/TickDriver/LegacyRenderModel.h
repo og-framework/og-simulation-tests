@@ -28,6 +28,7 @@
 #include "OGSimulation/RenderCorrectionSmoothing.h"
 #include "OGSimulation/RenderInterpolation.h"
 #include "OGSimulation/RenderSnapshot.h"
+#include "OGSimulation/SimulationFrame.h"
 #include "OGSimulation/SimulationObjectStorage.h"
 #include "OGSimulation/SimulationTimeContext.h"
 #include "OGSimulation/StepHooks.h"
@@ -113,7 +114,7 @@ namespace legacyRenderUe
         ResetPhysics
     };
 
-    namespace uglm
+    namespace ueNative
     {
         inline FVector toFVector(const glm::vec3& value)
         {
@@ -121,7 +122,7 @@ namespace legacyRenderUe
         }
 
         inline FQuat toFQuat(const glm::quat& value) { return FQuat(value); }
-    } // namespace uglm
+    } // namespace ueNative
 
     template <typename CharacterT>
     struct TWeakObjectPtr
@@ -139,7 +140,7 @@ struct LegacyRenderCvars
     float InterpolationDelaySteps = 2.f;
     int32_t NewestSnapshot = 0;
     float ErrorCorrectionSeconds = 0.3f;
-    float ErrorCorrectionMaxCm = 250.f;
+    float ErrorCorrectionMax = 2.5f;
     float ErrorCorrectionDesyncSeconds = 0.6f;
     int32_t TraceFrames = 0;
 };
@@ -163,7 +164,7 @@ public:
 
     LegacyRenderModel(EngineT& engine, SourceT& source, ClockT& frameHost, ActorsT& actors, WorldT& worlds,
         const LegacyRenderCvars& cvars, bool runsPrediction, float renderCorrectionStepSeconds, uint8 joltRootDeclarationIndex,
-        float renderParkSnapCm)
+        float renderParkSnap)
         : m_engine(engine)
         , m_source(source)
         , m_frameHost(frameHost)
@@ -171,7 +172,7 @@ public:
         , m_worlds(worlds)
         , m_cvars(cvars)
         , m_runsPrediction(runsPrediction)
-        , kRenderParkSnapCm(renderParkSnapCm)
+        , kRenderParkSnap(renderParkSnap)
     {
         m_joltRootDeclarationIndex = joltRootDeclarationIndex;
         m_renderCorrectionStepSeconds = renderCorrectionStepSeconds;
@@ -257,8 +258,9 @@ public:
 
 private:
     static constexpr double kRenderMaxInterpolationDelaySteps = 2.0;
-    static constexpr double kRenderApplyToleranceCm  = 1.0e-6;
-    static constexpr double kShadowPoseToleranceCm   = 1.0e-3;
+    static constexpr double kRenderApplyTolerance    = 1e-8;
+    static constexpr double kShadowPoseTolerance     = 1e-5;
+    static constexpr double kRenderMatchTolerance    = 9.999999747378752e-7;
     static constexpr double kShadowPoseToleranceRad  = 1.0e-4;
     static constexpr uint32 kRenderApplyWindowFrames = 600u;
 
@@ -277,7 +279,7 @@ private:
     struct RenderTargetUImpl
     {
         legacyRenderUe::TWeakObjectPtr<AOGBrawlerUECharacter> character;
-        FVector                                               appliedCm = FVector::ZeroVector();
+        FVector                                               appliedLocation = FVector::ZeroVector();
         bool                                                  applied   = false;
     };
 
@@ -291,9 +293,9 @@ private:
         uint32 outOfTolerance  = 0u;
         uint32 held            = 0u;
         uint32 moved           = 0u;
-        double maxErrorCm      = 0.0;
-        double maxHeldDriftCm  = 0.0;
-        double pathCm          = 0.0;
+        double maxError        = 0.0;
+        double maxHeldDrift    = 0.0;
+        double pathLength          = 0.0;
         uint64 firstAppliedStep = 0u;
         uint64 lastAppliedStep  = 0u;
         uint32 interpolated    = 0u;
@@ -305,9 +307,9 @@ private:
         uint32 shadowBodies    = 0u;
         uint32 shadowExact     = 0u;
         uint32 shadowOutOfTolerance = 0u;
-        double shadowMaxErrorCm     = 0.0;
+        double shadowMaxError       = 0.0;
         double shadowMaxAngleRad    = 0.0;
-        std::vector<float> frameDisplacementCm;
+        std::vector<float> frameDisplacements;
     };
 
     struct RenderCorrectionWindowUImpl
@@ -321,11 +323,11 @@ private:
         uint64 finishedSteps     = 0u;
         uint32 maxFinishedSteps  = 0u;
         uint32 activeFrames      = 0u;
-        double maxErrorCm        = 0.0;
-        double maxAppliedCm      = 0.0;
+        double maxError          = 0.0;
+        double maxApplied        = 0.0;
         uint32 policySnaps       = 0u;
         uint32 rootFramedFrames  = 0u;
-        double maxPolicySnapCm   = 0.0;
+        double maxPolicySnap     = 0.0;
         double maxPolicySnapDeg  = 0.0;
         uint32 straddleSnaps     = 0u;
         uint64 resimsAtStart     = 0u;
@@ -379,7 +381,7 @@ private:
 
         RenderInterpolationParams params;
         params.newestOnly = m_cvars.NewestSnapshot != 0;
-        params.snapDistanceCm = kRenderParkSnapCm;
+        params.snapDistance = kRenderParkSnap;
         const double delaySteps = FMath::Clamp(static_cast<double>(m_cvars.InterpolationDelaySteps),
             0.0, kRenderMaxInterpolationDelaySteps);
         params.renderTimeSeconds =
@@ -390,7 +392,7 @@ private:
 
         RenderCorrectionParams correction;
         correction.correctionSeconds = m_cvars.ErrorCorrectionSeconds;
-        correction.maxCorrectionCm   = m_cvars.ErrorCorrectionMaxCm;
+        correction.maxCorrection     = m_cvars.ErrorCorrectionMax;
         correction.desyncSeconds     = m_cvars.ErrorCorrectionDesyncSeconds;
         correction.stepSeconds       = m_renderCorrectionStepSeconds;
         m_renderCorrectionSmoother.correctPoses(m_renderCorrections, m_renderFrame, correction, m_renderPoses,
@@ -408,11 +410,11 @@ private:
         window.finishedSteps    += corrected.finishedSteps;
         window.maxFinishedSteps  = FMath::Max(window.maxFinishedSteps, corrected.maxFinishedSteps);
         window.activeFrames     += corrected.active > 0u ? 1u : 0u;
-        window.maxErrorCm        = FMath::Max(window.maxErrorCm, corrected.maxErrorCm);
-        window.maxAppliedCm      = FMath::Max(window.maxAppliedCm, corrected.maxAppliedCm);
+        window.maxError          = FMath::Max(window.maxError, corrected.maxError);
+        window.maxApplied        = FMath::Max(window.maxApplied, corrected.maxApplied);
         window.policySnaps      += corrected.policySnaps;
         window.rootFramedFrames += corrected.rootFramed > 0u ? 1u : 0u;
-        window.maxPolicySnapCm   = FMath::Max(window.maxPolicySnapCm, corrected.maxPolicySnapCm);
+        window.maxPolicySnap     = FMath::Max(window.maxPolicySnap, corrected.maxPolicySnap);
         window.maxPolicySnapDeg  = FMath::Max(window.maxPolicySnapDeg, corrected.maxPolicySnapDeg);
         window.straddleSnaps    += corrected.straddleSnaps;
         if (corrected.late > 0u && window.late == 0u)
@@ -428,10 +430,11 @@ private:
         {
             ueLog(HostLogLevel::Log,
                 "[SimHost.RenderCorrection] event frame=%llu prev=%llu next=%llu alpha=%.4f corrections=%u smoothed=%u "
-                "snapped=%u maxErrorCm=%.4f durationSteps=%d policySnaps=%u rootFramed=%u",
+                "snapped=%u maxError%s=%.*f durationSteps=%d policySnaps=%u rootFramed=%u",
                 static_cast<unsigned long long>(m_engine.frameNumber()), static_cast<unsigned long long>(m_renderFrame.prevStep),
                 static_cast<unsigned long long>(m_renderFrame.nextStep), m_renderFrame.alpha, corrected.corrections,
-                corrected.smoothedBodies, corrected.snappedBodies, corrected.maxErrorCm,
+                corrected.smoothedBodies, corrected.snappedBodies, simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(4),
+                corrected.maxError,
                 renderCorrectionDurationSteps(correction.correctionSeconds, correction.stepSeconds), corrected.policySnaps,
                 corrected.rootFramed);
         }
@@ -458,8 +461,8 @@ private:
                 if (character == nullptr || body == nullptr)
                     continue;
 
-                const FVector location = legacyRenderUe::uglm::toFVector(body->positionCm);
-                const FQuat rotation = body->hasRotation != 0u ? legacyRenderUe::uglm::toFQuat(body->rotation) : character->GetActorQuat();
+                const FVector location = legacyRenderUe::ueNative::toFVector(body->position);
+                const FQuat rotation = body->hasRotation != 0u ? legacyRenderUe::ueNative::toFQuat(body->rotation) : character->GetActorQuat();
                 [[maybe_unused]] FVector before;
                 if constexpr (kNonShipping)
                 {
@@ -472,20 +475,23 @@ private:
                 {
                 if (target.applied)
                 {
-                    const double displacementCm = FVector::Dist(target.appliedCm, character->GetActorLocation());
-                    m_renderApplyWindow.pathCm += displacementCm;
-                    m_renderApplyWindow.frameDisplacementCm.push_back(static_cast<float>(displacementCm));
+                    const double displacementLength = FVector::Dist(target.appliedLocation, character->GetActorLocation());
+                    m_renderApplyWindow.pathLength += displacementLength;
+                    m_renderApplyWindow.frameDisplacements.push_back(static_cast<float>(displacementLength));
                 }
                 else
                 {
                     ueLog(HostLogLevel::Log,
-                        "[SimHost.RenderApply] first role=%s id=%u from=(%.3f,%.3f,%.3f) to=(%.3f,%.3f,%.3f) physicsStep=%llu tick=%u",
-                        m_runsPrediction ? "Client" : "Authority", id, before.X, before.Y, before.Z,
-                        location.X, location.Y, location.Z, static_cast<unsigned long long>(m_renderPoses.physicsStep),
+                        "[SimHost.RenderApply] first role=%s id=%u from=(%.*f,%.*f,%.*f) to=(%.*f,%.*f,%.*f) physicsStep=%llu tick=%u",
+                        m_runsPrediction ? "Client" : "Authority", id,
+                        simFrame::lengthDecimals(3), before.X, simFrame::lengthDecimals(3), before.Y,
+                        simFrame::lengthDecimals(3), before.Z,
+                        simFrame::lengthDecimals(3), location.X, simFrame::lengthDecimals(3), location.Y,
+                        simFrame::lengthDecimals(3), location.Z, static_cast<unsigned long long>(m_renderPoses.physicsStep),
                         static_cast<uint32>(m_renderPoses.tick));
                 }
                 }
-                target.appliedCm = character->GetActorLocation();
+                target.appliedLocation = character->GetActorLocation();
                 target.applied   = true;
             }
 
@@ -531,7 +537,7 @@ private:
                     return;
 
                 auto& bodyState = D::bodyStateOf(vizState.template edit<S>());
-                bodyState.position = pose->positionCm;
+                bodyState.position = pose->position;
                 if constexpr (std::is_same_v<std::remove_cvref_t<decltype(bodyState)>, PhysicsBodyState>)
                     bodyState.rotation = pose->rotation;
             });
@@ -567,14 +573,14 @@ private:
 
                 glm::mat4 transform = pose->hasRotation != 0u ? glm::mat4_cast(pose->rotation)
                                                               : m_worlds.shadowGetBodyTransform(body);
-                transform[3] = glm::vec4(pose->positionCm, 1.f);
+                transform[3] = glm::vec4(pose->position, 1.f);
                 m_worlds.shadowSetBodyTransform(body, transform);
 
                 if constexpr (kNonShipping)
                 {
                 RenderApplyWindowUImpl& window = m_renderApplyWindow;
                 const glm::mat4 queried = m_worlds.shadowReaderGetBodyTransform(body);
-                const double errorCm = glm::distance(glm::vec3(queried[3]), pose->positionCm);
+                const double errorDistance = glm::distance(glm::vec3(queried[3]), pose->position);
                 double angleRad = 0.0;
                 if (pose->hasRotation != 0u)
                 {
@@ -583,16 +589,20 @@ private:
                     angleRad = 2.0 * FMath::Atan2(glm::length(glm::dvec3(relative.x, relative.y, relative.z)), FMath::Abs(relative.w));
                 }
                 ++window.shadowBodies;
-                window.shadowExact += errorCm == 0.0 ? 1u : 0u;
-                window.shadowMaxErrorCm  = FMath::Max(window.shadowMaxErrorCm, errorCm);
+                window.shadowExact += errorDistance == 0.0 ? 1u : 0u;
+                window.shadowMaxError    = FMath::Max(window.shadowMaxError, errorDistance);
                 window.shadowMaxAngleRad = FMath::Max(window.shadowMaxAngleRad, angleRad);
-                if ((errorCm > kShadowPoseToleranceCm || angleRad > kShadowPoseToleranceRad) && window.shadowOutOfTolerance++ == 0u)
+                if ((errorDistance > kShadowPoseTolerance || angleRad > kShadowPoseToleranceRad) && window.shadowOutOfTolerance++ == 0u)
                 {
                     ueLog(HostLogLevel::Warning,
-                        "[SimHost.RenderSync] SHADOW id=%u declaration=%u queried=(%.6f,%.6f,%.6f) rendered=(%.6f,%.6f,%.6f) "
-                        "errorCm=%.9f angleRad=%.9f: the shadow world the visualizations query is not at the rendered pose",
-                        id, declarationIndex, queried[3].x, queried[3].y, queried[3].z, pose->positionCm.x, pose->positionCm.y,
-                        pose->positionCm.z, errorCm, angleRad);
+                        "[SimHost.RenderSync] SHADOW id=%u declaration=%u queried=(%.*f,%.*f,%.*f) rendered=(%.*f,%.*f,%.*f) "
+                        "error%s=%.*f angleRad=%.9f: the shadow world the visualizations query is not at the rendered pose",
+                        id, declarationIndex,
+                        simFrame::lengthDecimals(6), queried[3].x, simFrame::lengthDecimals(6), queried[3].y,
+                        simFrame::lengthDecimals(6), queried[3].z,
+                        simFrame::lengthDecimals(6), pose->position.x, simFrame::lengthDecimals(6), pose->position.y,
+                        simFrame::lengthDecimals(6), pose->position.z,
+                        simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(9), errorDistance, angleRad);
                 }
                 }
             }
@@ -608,16 +618,20 @@ private:
                 continue;
 
             const FVector planePoint = character->GetCapsuleComponent()->GetComponentTransform().GetTranslation();
-            const double driftCm = FVector::Dist(planePoint, target.appliedCm);
+            const double driftLength = FVector::Dist(planePoint, target.appliedLocation);
             ++m_renderApplyWindow.held;
-            m_renderApplyWindow.maxHeldDriftCm = FMath::Max(m_renderApplyWindow.maxHeldDriftCm, driftCm);
-            if (driftCm > kRenderApplyToleranceCm && m_renderApplyWindow.moved++ == 0u)
+            m_renderApplyWindow.maxHeldDrift = FMath::Max(m_renderApplyWindow.maxHeldDrift, driftLength);
+            if (driftLength > kRenderApplyTolerance && m_renderApplyWindow.moved++ == 0u)
             {
                 ueLog(HostLogLevel::Warning,
-                    "[SimHost.RenderApply] MOVED role=%s id=%u capsule=(%.6f,%.6f,%.6f) applied=(%.6f,%.6f,%.6f) driftCm=%.9f: "
+                    "[SimHost.RenderApply] MOVED role=%s id=%u capsule=(%.*f,%.*f,%.*f) applied=(%.*f,%.*f,%.*f) drift%s=%.*f: "
                     "something moved the capsule between the last render apply and this one",
-                    m_runsPrediction ? "Client" : "Authority", id, planePoint.X, planePoint.Y, planePoint.Z,
-                    target.appliedCm.X, target.appliedCm.Y, target.appliedCm.Z, driftCm);
+                    m_runsPrediction ? "Client" : "Authority", id,
+                    simFrame::lengthDecimals(6), planePoint.X, simFrame::lengthDecimals(6), planePoint.Y,
+                    simFrame::lengthDecimals(6), planePoint.Z,
+                    simFrame::lengthDecimals(6), target.appliedLocation.X, simFrame::lengthDecimals(6), target.appliedLocation.Y,
+                    simFrame::lengthDecimals(6), target.appliedLocation.Z,
+                    simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(9), driftLength);
             }
         }
     }
@@ -647,17 +661,21 @@ private:
             }
 
             const FVector planePoint = character->GetCapsuleComponent()->GetComponentTransform().GetTranslation();
-            const FVector pose = legacyRenderUe::uglm::toFVector(body->positionCm);
-            const double errorCm = FVector::Dist(planePoint, pose);
+            const FVector pose = legacyRenderUe::ueNative::toFVector(body->position);
+            const double errorDistance = FVector::Dist(planePoint, pose);
             ++window.applied;
             window.exact += planePoint == pose ? 1u : 0u;
-            window.maxErrorCm = FMath::Max(window.maxErrorCm, errorCm);
-            if (!planePoint.Equals(pose, legacyRenderUe::kUeKindaSmallNumber) && window.outOfTolerance++ == 0u)
+            window.maxError = FMath::Max(window.maxError, errorDistance);
+            if (!planePoint.Equals(pose, kRenderMatchTolerance) && window.outOfTolerance++ == 0u)
             {
                 ueLog(HostLogLevel::Warning,
-                    "[SimHost.RenderApply] MISMATCH role=%s id=%u capsule=(%.6f,%.6f,%.6f) rendered=(%.6f,%.6f,%.6f) errorCm=%.9f physicsStep=%llu",
-                    m_runsPrediction ? "Client" : "Authority", id, planePoint.X, planePoint.Y, planePoint.Z,
-                    pose.X, pose.Y, pose.Z, errorCm, static_cast<unsigned long long>(m_renderPoses.physicsStep));
+                    "[SimHost.RenderApply] MISMATCH role=%s id=%u capsule=(%.*f,%.*f,%.*f) rendered=(%.*f,%.*f,%.*f) error%s=%.*f physicsStep=%llu",
+                    m_runsPrediction ? "Client" : "Authority", id,
+                    simFrame::lengthDecimals(6), planePoint.X, simFrame::lengthDecimals(6), planePoint.Y,
+                    simFrame::lengthDecimals(6), planePoint.Z,
+                    simFrame::lengthDecimals(6), pose.X, simFrame::lengthDecimals(6), pose.Y, simFrame::lengthDecimals(6), pose.Z,
+                    simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(9), errorDistance,
+                    static_cast<unsigned long long>(m_renderPoses.physicsStep));
             }
         }
     }
@@ -673,18 +691,21 @@ private:
             const RenderBody* const nextBody = findRenderBody(m_renderNext, id, m_joltRootDeclarationIndex);
             if (!target.applied || nextBody == nullptr)
                 continue;
-            const glm::dvec3 errorCm = m_renderCorrectionSmoother.appliedErrorCm(bracket, id, m_joltRootDeclarationIndex);
+            const glm::dvec3 errorPosition = m_renderCorrectionSmoother.appliedErrorPosition(bracket, id, m_joltRootDeclarationIndex);
             ueLog(HostLogLevel::Log,
-                "[SimHost.RenderTrace] role=%s frame=%llu id=%u pos=(%.4f,%.4f,%.4f) nextPos=(%.4f,%.4f,%.4f) host=%.6f "
-                "render=%.6f mode=%s prev=%llu/%s next=%llu/%s back=%u alpha=%.4f newest=%llu err=(%.4f,%.4f,%.4f)",
+                "[SimHost.RenderTrace] role=%s frame=%llu id=%u pos=(%.*f,%.*f,%.*f) nextPos=(%.*f,%.*f,%.*f) host=%.6f "
+                "render=%.6f mode=%s prev=%llu/%s next=%llu/%s back=%u alpha=%.4f newest=%llu err=(%.*f,%.*f,%.*f)",
                 m_runsPrediction ? "Client" : "Authority", static_cast<unsigned long long>(m_engine.frameNumber()), id,
-                target.appliedCm.X, target.appliedCm.Y, target.appliedCm.Z,
-                nextBody->positionCm.x, nextBody->positionCm.y, nextBody->positionCm.z,
+                simFrame::lengthDecimals(4), target.appliedLocation.X, simFrame::lengthDecimals(4), target.appliedLocation.Y,
+                simFrame::lengthDecimals(4), target.appliedLocation.Z,
+                simFrame::lengthDecimals(4), nextBody->position.x, simFrame::lengthDecimals(4), nextBody->position.y,
+                simFrame::lengthDecimals(4), nextBody->position.z,
                 m_frameHost.hostNowSeconds(), bracket.renderTimeSeconds,
                 bracket.newestOnly ? "newest" : "interp",
                 static_cast<unsigned long long>(bracket.prevStep), bracket.hasPrev ? stepKindText(bracket.prevKind) : "-",
                 static_cast<unsigned long long>(bracket.nextStep), stepKindText(bracket.nextKind), bracket.nextBack,
-                bracket.alpha, static_cast<unsigned long long>(bracket.newestStep), errorCm.x, errorCm.y, errorCm.z);
+                bracket.alpha, static_cast<unsigned long long>(bracket.newestStep),
+                simFrame::lengthDecimals(4), errorPosition.x, simFrame::lengthDecimals(4), errorPosition.y, simFrame::lengthDecimals(4), errorPosition.z);
         }
     }
 
@@ -692,45 +713,48 @@ private:
     {
         RenderApplyWindowUImpl& window = m_renderApplyWindow;
         std::string displacement = "-";
-        if (!window.frameDisplacementCm.empty())
+        if (!window.frameDisplacements.empty())
         {
-            std::vector<float>& values = window.frameDisplacementCm;
+            std::vector<float>& values = window.frameDisplacements;
             std::sort(values.begin(), values.end());
             const uint32 n = static_cast<uint32>(values.size());
-            displacement = Printf("%.4f/%.4f/%.4f", values[latencyBudget::nearestRankIndex(n, 500u)],
-                values[latencyBudget::nearestRankIndex(n, 990u)], values.back());
+            displacement = Printf("%.*f/%.*f/%.*f", simFrame::lengthDecimals(4), values[latencyBudget::nearestRankIndex(n, 500u)],
+                simFrame::lengthDecimals(4), values[latencyBudget::nearestRankIndex(n, 990u)], simFrame::lengthDecimals(4), values.back());
         }
 
         ueLog(HostLogLevel::Log,
             "[SimHost.RenderApply] role=%s frames=%u appliedFrames=%u characters=%d applied=%u missing=%u exact=%u "
-            "outOfTolerance=%u maxErrorCm=%.9f held=%u moved=%u maxHeldDriftCm=%.9f pathCm=%.3f steps=[%llu,%llu] drops=%llu "
-            "mode=%s delaySteps=%.2f interpolated=%u atNewest=%u beyondOldest=%u snaps=%u maxNextBack=%u dispCm=%s",
+            "outOfTolerance=%u maxError%s=%.*f held=%u moved=%u maxHeldDrift%s=%.*f path%s=%.*f steps=[%llu,%llu] drops=%llu "
+            "mode=%s delaySteps=%.2f interpolated=%u atNewest=%u beyondOldest=%u snaps=%u maxNextBack=%u disp%s=%s",
             m_runsPrediction ? "Client" : "Authority", window.frames, window.appliedFrames,
             static_cast<int32>(m_renderTargetsById.size()), window.applied, window.missing, window.exact,
-            window.outOfTolerance, window.maxErrorCm, window.held, window.moved, window.maxHeldDriftCm, window.pathCm,
+            window.outOfTolerance, simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(9), window.maxError, window.held,
+            window.moved, simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(9), window.maxHeldDrift,
+            simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(3), window.pathLength,
             static_cast<unsigned long long>(window.firstAppliedStep), static_cast<unsigned long long>(window.lastAppliedStep),
             static_cast<unsigned long long>(m_renderSnapshots.drops()),
             window.newestMode > 0u ? "newest" : "interp",
             FMath::Clamp(static_cast<double>(m_cvars.InterpolationDelaySteps), 0.0,
                 kRenderMaxInterpolationDelaySteps),
-            window.interpolated, window.atNewest, window.beyondOldest, window.snaps, window.maxNextBack, displacement.c_str());
+            window.interpolated, window.atNewest, window.beyondOldest, window.snaps, window.maxNextBack, simFrame::kLengthFieldSuffix,
+            displacement.c_str());
 
         if (m_worlds.hasShadowWorld())
         {
             ueLog(HostLogLevel::Log,
                 "[SimHost.RenderSync] role=Client frames=%u shadowBodies=%u shadowExact=%u shadowOutOfTolerance=%u "
-                "shadowMaxErrorCm=%.6f shadowMaxAngleRad=%.6f",
-                window.frames, window.shadowBodies, window.shadowExact, window.shadowOutOfTolerance, window.shadowMaxErrorCm,
-                window.shadowMaxAngleRad);
+                "shadowMaxError%s=%.*f shadowMaxAngleRad=%.6f",
+                window.frames, window.shadowBodies, window.shadowExact, window.shadowOutOfTolerance, simFrame::kLengthFieldSuffix,
+                simFrame::lengthDecimals(6), window.shadowMaxError, window.shadowMaxAngleRad);
         }
 
         if (m_runsPrediction)
             logRenderCorrectionWindow_GameThread();
 
-        std::vector<float> samples = std::move(window.frameDisplacementCm);
+        std::vector<float> samples = std::move(window.frameDisplacements);
         samples.clear();
         window = RenderApplyWindowUImpl{};
-        window.frameDisplacementCm = std::move(samples);
+        window.frameDisplacements = std::move(samples);
     }
 
     void logRenderCorrectionWindow_GameThread()
@@ -748,20 +772,22 @@ private:
 
         ueLog(HostLogLevel::Log,
             "[SimHost.RenderCorrection] role=Client frames=%u resims=%llu captured=%llu withoutError=%llu tickMismatches=%llu "
-            "ringDrops=%llu corrections=%u smoothedBodies=%u snappedBodies=%u maxErrorCm=%.3f maxAppliedCm=%.3f decays=%u "
+            "ringDrops=%llu corrections=%u smoothedBodies=%u snappedBodies=%u maxError%s=%.*f maxApplied%s=%.*f decays=%u "
             "decayMeanS=%.3f decayMaxS=%.3f activeFrames=%u late=%u pendingDrops=%u seconds=%.3f durationSteps=%d "
-            "maxCm=%.1f desyncS=%.2f policySnaps=%u maxPolicySnapCm=%.3f maxPolicySnapDeg=%.1f rootFramedFrames=%u "
+            "max%s=%.*f desyncS=%.2f policySnaps=%u maxPolicySnap%s=%.*f maxPolicySnapDeg=%.1f rootFramedFrames=%u "
             "straddleSnaps=%u",
             m_renderApplyWindow.frames, static_cast<unsigned long long>(resims - window.resimsAtStart),
             static_cast<unsigned long long>(captured - window.capturedAtStart),
             static_cast<unsigned long long>(withoutError - window.withoutErrorAtStart),
             static_cast<unsigned long long>(tickMismatch - window.tickMismatchAtStart),
             static_cast<unsigned long long>(ringDrops - window.ringDropsAtStart), window.corrections, window.smoothedBodies,
-            window.snappedBodies, window.maxErrorCm, window.maxAppliedCm, window.finished, decayMeanS,
+            window.snappedBodies, simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(3), window.maxError,
+            simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(3), window.maxApplied, window.finished, decayMeanS,
             static_cast<double>(window.maxFinishedSteps) * stepSeconds, window.activeFrames, window.late, window.pendingDrops,
             seconds, renderCorrectionDurationSteps(seconds, m_renderCorrectionStepSeconds),
-            m_cvars.ErrorCorrectionMaxCm, m_cvars.ErrorCorrectionDesyncSeconds,
-            window.policySnaps, window.maxPolicySnapCm, window.maxPolicySnapDeg, window.rootFramedFrames, window.straddleSnaps);
+            simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(1), m_cvars.ErrorCorrectionMax, m_cvars.ErrorCorrectionDesyncSeconds,
+            window.policySnaps, simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(3), window.maxPolicySnap,
+            window.maxPolicySnapDeg, window.rootFramedFrames, window.straddleSnaps);
 
         window = RenderCorrectionWindowUImpl{};
         window.resimsAtStart       = resims;
@@ -778,7 +804,7 @@ private:
     WorldT& m_worlds;
     const LegacyRenderCvars& m_cvars;
     bool m_runsPrediction = false;
-    const float kRenderParkSnapCm;
+    const float kRenderParkSnap;
 
     SnapshotChannel<RenderSnapshot, 4>                   m_renderSnapshots;
     std::unordered_map<unsigned int, RenderTargetUImpl>  m_renderTargetsById;

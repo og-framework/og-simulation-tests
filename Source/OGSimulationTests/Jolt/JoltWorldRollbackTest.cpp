@@ -238,7 +238,7 @@ TEST_CASE("JoltWorld.ParkedBodiesMakeNoContactsAndKeepZeroVelocity", "[Jolt]")
     RuntimeLease lease;
     JoltWorldConfig config = brawlerWorldConfig(0);
     config.slotTemplate = brawlerSlotTemplate(bit(kProjectile));
-    config.parkingPositionCm = glm::vec3(0.f, 0.f, 1000.f);
+    config.parkingPosition = glm::vec3(0.f, 10.f, -0.f);
 
     JoltWorld parked(lease.runtime, config, nullptr);
     addFloor(parked);
@@ -258,7 +258,7 @@ TEST_CASE("JoltWorld.ParkedBodiesMakeNoContactsAndKeepZeroVelocity", "[Jolt]")
             const JPH::BodyID id = parked.slotBodyId(slot, index);
             CHECK(parked.bodies().GetLinearVelocity(id) == JPH::Vec3::sZero());
             CHECK(parked.bodies().GetAngularVelocity(id) == JPH::Vec3::sZero());
-            CHECK(parked.bodies().GetCenterOfMassPosition(id) == joltUnits::centimetresToMetres(config.parkingPositionCm));
+            CHECK(parked.bodies().GetCenterOfMassPosition(id) == JPH::RVec3(config.parkingPosition.x, config.parkingPosition.y, config.parkingPosition.z));
             CHECK(parked.bodies().GetObjectLayer(id) == parked.layers().parkedLayer());
             parkedProjectiles += (index >= kTemplateProjectileFirst && index < kTemplateCapsule) ? 1u : 0u;
         }
@@ -323,7 +323,7 @@ TEST_CASE("JoltWorld.JoinAcrossARollbackReplaysByteIdentically", "[Jolt]")
         world.applyBodySlotOccupancy(occupancyAt(tick));
         if (tick == kJoinTick)
         {
-            placeBrawler(world, kJoiningSlot, 0.3f, 0.2f, 1.4f);
+            placeBrawler(world, kJoiningSlot, 0.2f, 1.4f, -0.3f);
         }
         applyScriptedForces(world, tick);
         world.step(kDt);
@@ -334,8 +334,8 @@ TEST_CASE("JoltWorld.JoinAcrossARollbackReplaysByteIdentically", "[Jolt]")
     JoltWorld world(lease.runtime, brawlerWorldConfig(64), nullptr);
     addFloor(world);
     world.applyBodySlotOccupancy(occupancyAt(0));
-    placeBrawler(world, 0, -0.5f, 0.f, 1.0f);
-    placeBrawler(world, 2, 0.9f, 0.4f, 1.2f);
+    placeBrawler(world, 0, 0.f, 1.0f, 0.5f);
+    placeBrawler(world, 2, 0.4f, 1.2f, -0.9f);
 
     std::map<uint32_t, std::vector<uint8_t>> original;
     std::map<uint32_t, uint64_t> originalHash;

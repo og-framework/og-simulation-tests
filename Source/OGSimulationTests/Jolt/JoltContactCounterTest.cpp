@@ -11,6 +11,7 @@
 #include <Jolt/Core/TempAllocator.h>
 #include <Jolt/Physics/Body/Body.h>
 
+
 #include <array>
 #include <cstring>
 #include <map>
@@ -29,7 +30,7 @@ namespace joltContactCounterTest
 
     JoltWorldConfig sceneConfig()
     {
-        SlotBodyTemplate sphere = sphereTemplate(30.f, bit(kBody), kContactCategories, uint8_t(kSphere));
+        SlotBodyTemplate sphere = sphereTemplate(0.3f, bit(kBody), kContactCategories, uint8_t(kSphere));
         sphere.descriptor.body.enableGravity = true;
         JoltWorldConfig config;
         config.simulatableSlots = 4;
@@ -57,12 +58,12 @@ namespace joltContactCounterTest
     {
         const JPH::BodyID id = world.slotBodyId(slot, templateIndex);
         world.bodies().SetGravityFactor(id, 0.f);
-        place(world, slot, templateIndex, 12.f + 3.f * float(slot), 3.f * float(templateIndex), 6.f);
+        place(world, slot, templateIndex, 3.f * float(templateIndex), 6.f, -(12.f + 3.f * float(slot)));
     }
 
-    constexpr float kCapsuleRestZ = 0.96f - 0.005f;
-    constexpr float kSphereRestZ = 0.30f - 0.005f;
-    constexpr float kCapsuleSphereTouchX = 0.42f + 0.30f - 0.005f;
+    constexpr float kCapsuleRestHeight = 0.96f - 0.005f;
+    constexpr float kSphereRestHeight = 0.30f - 0.005f;
+    constexpr float kCapsuleSphereTouchDistance = 0.42f + 0.30f - 0.005f;
 
     struct Expected
     {
@@ -292,7 +293,7 @@ using namespace joltContactCounterTest;
 TEST_CASE("JoltContactCounter.ACapsuleRestingOnAStaticIsOneRootStaticManifold", "[Jolt]")
 {
     Scene scene(true);
-    place(scene.world, 0, kCapsule, 0.f, 0.f, kCapsuleRestZ);
+    place(scene.world, 0, kCapsule, 0.f, kCapsuleRestHeight, -0.f);
     scene.world.bodies().SetGravityFactor(scene.world.slotBodyId(0, kCapsule), 1.f);
 
     Expected expected;
@@ -309,8 +310,8 @@ TEST_CASE("JoltContactCounter.ACapsuleRestingOnAStaticIsOneRootStaticManifold", 
 TEST_CASE("JoltContactCounter.TwoTouchingCapsulesAreOneRootRootManifoldForEachId", "[Jolt]")
 {
     Scene scene(false);
-    place(scene.world, 0, kCapsule, 0.f, 0.f, 3.f);
-    place(scene.world, 1, kCapsule, 0.84f - 0.005f, 0.f, 3.f);
+    place(scene.world, 0, kCapsule, 0.f, 3.f, -0.f);
+    place(scene.world, 1, kCapsule, 0.f, 3.f, -(0.84f - 0.005f));
 
     Expected expected;
     expected.pairs = pairsOf(1, 0, 0, 0, 0, 0);
@@ -324,8 +325,8 @@ TEST_CASE("JoltContactCounter.TwoTouchingCapsulesAreOneRootRootManifoldForEachId
 TEST_CASE("JoltContactCounter.AChildTouchingACapsuleAndAStaticCarriesItsDeclaration", "[Jolt]")
 {
     Scene scene(true);
-    place(scene.world, 0, kCapsule, 0.f, 0.f, kCapsuleRestZ);
-    place(scene.world, 1, kSphere, kCapsuleSphereTouchX, 0.f, kSphereRestZ);
+    place(scene.world, 0, kCapsule, 0.f, kCapsuleRestHeight, -0.f);
+    place(scene.world, 1, kSphere, 0.f, kSphereRestHeight, -kCapsuleSphereTouchDistance);
     scene.world.bodies().SetGravityFactor(scene.world.slotBodyId(0, kCapsule), 1.f);
     scene.world.bodies().SetGravityFactor(scene.world.slotBodyId(1, kSphere), 1.f);
 
@@ -341,12 +342,12 @@ TEST_CASE("JoltContactCounter.AChildTouchingACapsuleAndAStaticCarriesItsDeclarat
 TEST_CASE("JoltContactCounter.ChildChildSameIdAndUnboundBodies", "[Jolt]")
 {
     Scene scene(true);
-    place(scene.world, 0, kSphere, -3.f, 0.f, 3.f);
-    place(scene.world, 1, kSphere, -3.f + 0.6f - 0.005f, 0.f, 3.f);
-    place(scene.world, 2, kCapsule, 3.f, 0.f, 3.f);
-    place(scene.world, 2, kSphere, 3.f + kCapsuleSphereTouchX, 0.f, 3.f);
-    place(scene.world, 3, kCapsule, 0.f, 3.f, kCapsuleRestZ);
-    place(scene.world, 3, kSphere, 0.f, -3.f, kSphereRestZ);
+    place(scene.world, 0, kSphere, 0.f, 3.f, 3.f);
+    place(scene.world, 1, kSphere, 0.f, 3.f, -(-3.f + 0.6f - 0.005f));
+    place(scene.world, 2, kCapsule, 0.f, 3.f, -3.f);
+    place(scene.world, 2, kSphere, 0.f, 3.f, -(3.f + kCapsuleSphereTouchDistance));
+    place(scene.world, 3, kCapsule, 3.f, kCapsuleRestHeight, -0.f);
+    place(scene.world, 3, kSphere, -3.f, kSphereRestHeight, -0.f);
     scene.world.bodies().SetUserData(scene.world.slotBodyId(3, kCapsule), joltBodyUserData::encodeUnbound(true));
     scene.world.bodies().SetUserData(scene.world.slotBodyId(3, kSphere), joltBodyUserData::encodeUnbound(false));
 

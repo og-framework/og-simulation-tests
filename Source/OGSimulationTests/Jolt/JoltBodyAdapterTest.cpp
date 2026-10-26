@@ -20,10 +20,13 @@
 #include "OGSimulation/PhysicsBodyAdapter.h"
 #include "OGSimulation/PhysicsBodyReaderAdapter.h"
 #include "OGSimulation/PhysicsObjectFactory.h"
+#include "OGSimulation/SimulationFrame.h"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <vector>
 
 using namespace joltTestRig;
@@ -42,6 +45,8 @@ namespace
 
     constexpr uint32_t kSimulatableId = 7;
 
+    constexpr glm::vec3 kSpinAxis = glm::vec3(-0.f, -1.f, 0.f);
+
     SlotBodyTemplate declaration(const BodyDescriptor& body, const QueryGeometry& geometry, uint32_t categories, uint32_t blocking, uint8_t index)
     {
         SlotBodyTemplate slotTemplate;
@@ -57,24 +62,29 @@ namespace
         const BodyDescriptor capsuleBody{ .simulatePhysics = true, .enableGravity = false, .isRoot = true, .lockRotation = true,
             .resimPolicy = BodyResimPolicy::Resimulate };
         return {
-            declaration(sphereBody, SphereGeometry{ 30.f }, bit(kCategoryBody), 0u, 0),
-            declaration(sphereBody, SphereGeometry{ 40.f }, bit(kCategoryGuard), 0u, 1),
-            declaration(sphereBody, SphereGeometry{ 30.f }, bit(kCategoryProjectile), 0u, 2),
-            declaration(sphereBody, SphereGeometry{ 30.f }, bit(kCategoryProjectile), 0u, 3),
-            declaration(sphereBody, SphereGeometry{ 30.f }, bit(kCategoryProjectile), 0u, 4),
-            declaration(capsuleBody, CapsuleGeometry{ 42.f, 96.f }, bit(kCategoryCharacter), bit(kCategoryWorld) | bit(kCategoryCharacter), 5)
+            declaration(sphereBody, SphereGeometry{ 0.3f }, bit(kCategoryBody), 0u, 0),
+            declaration(sphereBody, SphereGeometry{ 0.4f }, bit(kCategoryGuard), 0u, 1),
+            declaration(sphereBody, SphereGeometry{ 0.3f }, bit(kCategoryProjectile), 0u, 2),
+            declaration(sphereBody, SphereGeometry{ 0.3f }, bit(kCategoryProjectile), 0u, 3),
+            declaration(sphereBody, SphereGeometry{ 0.3f }, bit(kCategoryProjectile), 0u, 4),
+            declaration(capsuleBody, CapsuleGeometry{ 0.42f, 0.96f }, bit(kCategoryCharacter), bit(kCategoryWorld) | bit(kCategoryCharacter), 5)
         };
     }
 
     struct ChaosMass
     {
         double massKilograms;
-        std::array<double, 3> inertiaKilogramSquareCentimetres;
+        std::array<double, 3> inertiaKilogramSquareMetres;
     };
 
-    constexpr ChaosMass kChaosSphere30{ 34.6808138, { 12485.093, 12485.093, 12485.093 } };
-    constexpr ChaosMass kChaosSphere40{ 66.2523729, { 42401.5186, 42401.5186, 42401.5186 } };
-    constexpr ChaosMass kChaosCapsule42x96{ 165.527146, { 454866.174, 454866.174, 136024.556 } };
+    std::array<double, 3> inertiaDiagonal(const glm::vec3& inertia)
+    {
+        return { double(inertia.x), double(inertia.y), double(inertia.z) };
+    }
+
+    const ChaosMass kChaosSphere30{ 34.6808138, inertiaDiagonal(glm::vec3(1.2485093f, 1.2485093f, 1.2485093f)) };
+    const ChaosMass kChaosSphere40{ 66.2523729, inertiaDiagonal(glm::vec3(4.240152f, 4.240152f, 4.240152f)) };
+    const ChaosMass kChaosCapsule42x96{ 165.527146, inertiaDiagonal(glm::vec3(45.486618f, 13.602456f, 45.486618f)) };
 
     const std::array<ChaosMass, 6> kChaosMassPerDeclaration{ kChaosSphere30, kChaosSphere40, kChaosSphere30, kChaosSphere30, kChaosSphere30, kChaosCapsule42x96 };
 
@@ -182,13 +192,13 @@ namespace
         const AuthoredSequence sequence = leftToLeftSequence();
         const BodyId radial = rig.bodies[kRadial];
         const BodyId capsule = rig.bodies[kCapsule];
-        rig.adapter.setBodyTransform(capsule, glm::translate(glm::mat4(1.f), glm::vec3(500.f, 0.f, 200.f)));
-        rig.adapter.setBodyTransform(radial, glm::translate(glm::mat4(1.f), glm::vec3(500.f, 0.f, 200.f)));
+        rig.adapter.setBodyTransform(capsule, glm::translate(glm::mat4(1.f), glm::vec3(0.f, 2.f, -5.f)));
+        rig.adapter.setBodyTransform(radial, glm::translate(glm::mat4(1.f), glm::vec3(0.f, 2.f, -5.f)));
         rig.adapter.setBodyAngularVelocity(radial, glm::vec3(0.f));
 
         SpinRun run;
         double analyticOmega = 0.0;
-        const glm::vec4 localSequenceAxis(0.f, 0.f, 1.f, 0.f);
+        const glm::vec4 localSequenceAxis(kSpinAxis, 0.f);
         for (uint32_t tick = 0; tick < ticks; ++tick)
         {
             glm::mat4 childTransform = rig.adapter.getBodyTransform(radial);
@@ -199,16 +209,18 @@ namespace
             const double acceleration = sequence.accelerationAtTick(tick);
             const glm::vec3 worldAxis(rig.adapter.getBodyTransform(radial) * localSequenceAxis);
             const glm::vec3& inertia = rig.adapter.getBodyInertiaTensor(radial);
-            rig.adapter.addBodyTorque(radial, worldAxis * float(acceleration) * inertia.z);
+            rig.adapter.addBodyTorque(radial, worldAxis * float(acceleration) * simFrame::alongUp(inertia));
 
             rig.world.step(kDt);
             analyticOmega += acceleration * (1.0 / 60.0);
 
             const glm::vec3 omega = rig.adapter.captureBodyState(radial).angularVelocity;
-            run.maxAbsoluteError = std::max(run.maxAbsoluteError, std::abs(double(omega.z) - analyticOmega));
-            run.maxOffAxisOmega = std::max(run.maxOffAxisOmega, double(std::max(std::abs(omega.x), std::abs(omega.y))));
-            run.peakOmega = std::max(run.peakOmega, std::abs(double(omega.z)));
-            run.finalOmega = double(omega.z);
+            const float spin = glm::dot(omega, kSpinAxis);
+            const glm::vec2 offAxis = simFrame::forwardRight(omega);
+            run.maxAbsoluteError = std::max(run.maxAbsoluteError, std::abs(double(spin) - analyticOmega));
+            run.maxOffAxisOmega = std::max(run.maxOffAxisOmega, double(std::max(std::abs(offAxis.x), std::abs(offAxis.y))));
+            run.peakOmega = std::max(run.peakOmega, std::abs(double(spin)));
+            run.finalOmega = double(spin);
         }
         return run;
     }
@@ -221,62 +233,59 @@ TEST_CASE("JoltBodyAdapter.SatisfiesTheThreeSeamConcepts", "[Jolt]")
     STATIC_REQUIRE(PhysicsObjectFactory<JoltPhysicsFactory>);
 }
 
-TEST_CASE("JoltBodyAdapter.UnitAndQuaternionRoundTrips", "[Jolt]")
+TEST_CASE("JoltBodyAdapter.VectorAndQuaternionRoundTrips", "[Jolt]")
 {
-    const glm::vec3 centimetres(123.5f, -42.25f, 980.f);
-    const JPH::Vec3 metres = joltSeamUnits::centimetreVectorToJolt(centimetres);
-    CHECK(metres.GetX() == Catch::Approx(1.235f));
-    CHECK(metres.GetZ() == Catch::Approx(9.8f));
-    const glm::vec3 back = joltSeamUnits::metreVectorToSeam(metres);
-    CHECK_THAT(back.x, Catch::Matchers::WithinRel(centimetres.x, 1e-6f));
-    CHECK_THAT(back.y, Catch::Matchers::WithinRel(centimetres.y, 1e-6f));
-    CHECK_THAT(back.z, Catch::Matchers::WithinRel(centimetres.z, 1e-6f));
+    for (const glm::vec3& seam : { glm::vec3(-0.4225f, 9.8f, -1.235f), glm::vec3(4.240152f, 13.602456f, 1.2485093f), glm::vec3(-0.f, -5.f, 0.f) })
+    {
+        const JPH::Vec3 jolt = joltSeam::toJolt(seam);
+        const glm::vec3 back = joltSeam::toGlm(jolt);
+        for (int axis = 0; axis < 3; ++axis)
+        {
+            CHECK(std::bit_cast<uint32_t>(jolt[axis]) == std::bit_cast<uint32_t>(seam[axis]));
+            CHECK(std::bit_cast<uint32_t>(back[axis]) == std::bit_cast<uint32_t>(seam[axis]));
+        }
+    }
 
-    const glm::vec3 inertia(12485.093f, 42401.52f, 136024.56f);
-    const JPH::Vec3 inertiaJolt = joltSeamUnits::inertiaToJolt(inertia);
-    CHECK_THAT(inertiaJolt.GetX(), Catch::Matchers::WithinRel(1.2485093f, 1e-6f));
-    const glm::vec3 inertiaBack = joltSeamUnits::inertiaToSeam(inertiaJolt);
-    CHECK_THAT(inertiaBack.y, Catch::Matchers::WithinRel(inertia.y, 1e-6f));
-    CHECK_THAT(inertiaBack.z, Catch::Matchers::WithinRel(inertia.z, 1e-6f));
-    CHECK_THAT(joltSeamUnits::torqueToJolt(glm::vec3(0.f, 0.f, 50000.f)).GetZ(), Catch::Matchers::WithinRel(5.f, 1e-6f));
-
-    const glm::quat seamRotation = glm::normalize(glm::quat(0.9f, 0.1f, -0.3f, 0.2f));
-    const JPH::Quat joltRotation = joltSeamUnits::rotationToJolt(seamRotation);
+    const glm::quat seamRotation = glm::normalize(glm::quat(0.9f, 0.3f, -0.2f, 0.1f));
+    const JPH::Quat joltRotation = joltSeam::rotationToJolt(seamRotation);
     CHECK(joltRotation.GetW() == seamRotation.w);
     CHECK(joltRotation.GetX() == seamRotation.x);
     CHECK(joltRotation.GetY() == seamRotation.y);
     CHECK(joltRotation.GetZ() == seamRotation.z);
-    const glm::quat rotationBack = joltSeamUnits::rotationToSeam(joltRotation);
+    const glm::quat rotationBack = joltSeam::rotationToSeam(joltRotation);
     CHECK(rotationBack == seamRotation);
 
     RuntimeLease lease;
     BoundBrawler rig(lease.runtime);
     const BodyId radial = rig.bodies[kRadial];
-    const glm::vec3 positionCm(250.f, -75.5f, 130.f);
-    const glm::mat4 transform = glm::translate(glm::mat4(1.f), positionCm) * glm::mat4_cast(seamRotation);
+    const glm::vec3 position = glm::vec3(-0.755f, 1.3f, -2.5f);
+    const glm::mat4 transform = glm::translate(glm::mat4(1.f), position) * glm::mat4_cast(seamRotation);
     rig.adapter.setBodyTransform(radial, transform);
     const glm::mat4 read = rig.adapter.getBodyTransform(radial);
     for (int column = 0; column < 4; ++column)
     {
         for (int row = 0; row < 4; ++row)
         {
-            CHECK_THAT(read[column][row], Catch::Matchers::WithinAbs(transform[column][row], 1e-4f));
+            const float tolerance = column == 3 && row < 3 ? 1e-6f : 1e-4f;
+            CHECK_THAT(read[column][row], Catch::Matchers::WithinAbs(transform[column][row], tolerance));
         }
     }
     const PhysicsBodyState state = rig.adapter.captureBodyState(radial);
-    CHECK_THAT(state.position.x, Catch::Matchers::WithinAbs(positionCm.x, 1e-4f));
-    CHECK_THAT(state.position.y, Catch::Matchers::WithinAbs(positionCm.y, 1e-4f));
-    CHECK_THAT(state.position.z, Catch::Matchers::WithinAbs(positionCm.z, 1e-4f));
+    CHECK_THAT(state.position.x, Catch::Matchers::WithinAbs(position.x, 1e-6f));
+    CHECK_THAT(state.position.y, Catch::Matchers::WithinAbs(position.y, 1e-6f));
+    CHECK_THAT(state.position.z, Catch::Matchers::WithinAbs(position.z, 1e-6f));
     CHECK(std::abs(glm::dot(state.rotation, seamRotation)) == Catch::Approx(1.f).epsilon(1e-6f));
     CHECK(state.rotation.w == Catch::Approx(seamRotation.w).margin(1e-6f));
     CHECK(state.rotation.x == Catch::Approx(seamRotation.x).margin(1e-6f));
 
-    rig.adapter.setBodyLinearVelocity(radial, glm::vec3(300.f, -150.f, 25.f));
-    rig.adapter.setBodyAngularVelocity(radial, glm::vec3(1.5f, -2.f, 3.f));
+    const glm::vec3 linearVelocity = glm::vec3(-1.5f, 0.25f, -3.f);
+    const glm::vec3 angularVelocity = glm::vec3(2.f, -3.f, 1.5f);
+    rig.adapter.setBodyLinearVelocity(radial, linearVelocity);
+    rig.adapter.setBodyAngularVelocity(radial, angularVelocity);
     const PhysicsBodyState moving = rig.adapter.captureBodyState(radial);
-    CHECK_THAT(moving.linearVelocity.x, Catch::Matchers::WithinRel(300.f, 1e-6f));
-    CHECK_THAT(moving.linearVelocity.y, Catch::Matchers::WithinRel(-150.f, 1e-6f));
-    CHECK(moving.angularVelocity == glm::vec3(1.5f, -2.f, 3.f));
+    CHECK_THAT(moving.linearVelocity.x, Catch::Matchers::WithinRel(linearVelocity.x, 1e-6f));
+    CHECK_THAT(moving.linearVelocity.y, Catch::Matchers::WithinRel(linearVelocity.y, 1e-6f));
+    CHECK(moving.angularVelocity == angularVelocity);
 }
 
 TEST_CASE("JoltBodyAdapter.AnAccelerationOverOneStepYieldsTheExpectedVelocityChange", "[Jolt]")
@@ -286,7 +295,7 @@ TEST_CASE("JoltBodyAdapter.AnAccelerationOverOneStepYieldsTheExpectedVelocityCha
     const double c = joltBodyDefaults::kLinearDamping;
     const double dt = kDt;
 
-    const glm::vec3 acceleration(600.f, -300.f, 120.f);
+    const glm::vec3 acceleration = glm::vec3(-3.f, 1.2f, -6.f);
     for (const uint32_t declaration : { kRadial, kGuardBody, kCapsule })
     {
         const BodyId body = rig.bodies[declaration];
@@ -301,20 +310,20 @@ TEST_CASE("JoltBodyAdapter.AnAccelerationOverOneStepYieldsTheExpectedVelocityCha
         for (int axis = 0; axis < 3; ++axis)
         {
             const double expected = double(acceleration[axis]) * dt * (1.0 - c * dt);
-            CHECK_THAT(double(velocity[axis]), Catch::Matchers::WithinAbs(expected, 1e-5));
+            CHECK_THAT(double(velocity[axis]), Catch::Matchers::WithinAbs(expected, 1.0000000000000001e-7));
         }
     }
 
     const BodyId radial = rig.bodies[kRadial];
     const glm::vec3 before = rig.adapter.captureBodyState(radial).linearVelocity;
-    const glm::vec3 velocityChange(-40.f, 10.f, 5.f);
+    const glm::vec3 velocityChange = glm::vec3(0.1f, 0.05f, 0.4f);
     rig.adapter.addBodyVelocityChange(radial, velocityChange);
     rig.world.step(kDt);
     const glm::vec3 after = rig.adapter.captureBodyState(radial).linearVelocity;
     for (int axis = 0; axis < 3; ++axis)
     {
         const double expected = (double(before[axis]) + double(velocityChange[axis])) * (1.0 - c * dt);
-        CHECK_THAT(double(after[axis]), Catch::Matchers::WithinAbs(expected, 1e-5));
+        CHECK_THAT(double(after[axis]), Catch::Matchers::WithinAbs(expected, 1.0000000000000001e-7));
     }
 }
 
@@ -327,18 +336,18 @@ TEST_CASE("JoltBodyAdapter.ATorqueInSeamUnitsYieldsTauOverInertiaTimesDt", "[Jol
     const glm::vec3 inertia = rig.reader.getBodyInertiaTensor(radial);
     for (int axis = 0; axis < 3; ++axis)
     {
-        CHECK(withinRelative(inertia[axis], kChaosSphere30.inertiaKilogramSquareCentimetres[size_t(axis)], 1e-5));
+        CHECK(withinRelative(inertia[axis], kChaosSphere30.inertiaKilogramSquareMetres[size_t(axis)], 1e-5));
     }
     CHECK(rig.adapter.getBodyInertiaTensor(radial) == inertia);
 
-    const glm::vec3 torque(20000.f, -35000.f, 50000.f);
+    const glm::vec3 torque = glm::vec3(3.5f, -5.f, 2.f);
     rig.adapter.setBodyAngularVelocity(radial, glm::vec3(0.f));
     rig.adapter.addBodyTorque(radial, torque);
     rig.world.step(kDt);
     const glm::vec3 omega = rig.adapter.captureBodyState(radial).angularVelocity;
     for (int axis = 0; axis < 3; ++axis)
     {
-        const double expected = double(torque[axis]) / kChaosSphere30.inertiaKilogramSquareCentimetres[size_t(axis)] * double(kDt);
+        const double expected = double(torque[axis]) / kChaosSphere30.inertiaKilogramSquareMetres[size_t(axis)] * double(kDt);
         CHECK_THAT(double(omega[axis]), Catch::Matchers::WithinAbs(expected, 1e-5));
     }
 
@@ -385,7 +394,7 @@ TEST_CASE("JoltPhysicsFactory.EveryBrawlerDeclarationBindsAChaosParityBody", "[J
         const glm::vec3 inertia = reader.getBodyInertiaTensor(result.bodyId);
         for (int axis = 0; axis < 3; ++axis)
         {
-            CHECK(withinRelative(inertia[axis], chaos.inertiaKilogramSquareCentimetres[size_t(axis)], 1e-5));
+            CHECK(withinRelative(inertia[axis], chaos.inertiaKilogramSquareMetres[size_t(axis)], 1e-5));
         }
 
         JPH::BodyLockRead lock(world.physics().GetBodyLockInterfaceNoLock(), world.slotBodyId(kSlot, index));
@@ -456,8 +465,8 @@ TEST_CASE("JoltPhysicsFactory.DescriptorComparisonSeesEveryField", "[Jolt]")
     CHECK(differs([](PhysicalObjectDescriptor& d) { d.body.isRoot = false; }));
     CHECK(differs([](PhysicalObjectDescriptor& d) { d.body.lockRotation = false; }));
     CHECK(differs([](PhysicalObjectDescriptor& d) { d.body.resimPolicy = BodyResimPolicy::ReplayRecordedHistory; }));
-    CHECK(differs([](PhysicalObjectDescriptor& d) { d.shapes[0].geometry = CapsuleGeometry{ 42.f, 95.f }; }));
-    CHECK(differs([](PhysicalObjectDescriptor& d) { d.shapes[0].geometry = SphereGeometry{ 42.f }; }));
+    CHECK(differs([](PhysicalObjectDescriptor& d) { d.shapes[0].geometry = CapsuleGeometry{ 0.42f, 0.95f }; }));
+    CHECK(differs([](PhysicalObjectDescriptor& d) { d.shapes[0].geometry = SphereGeometry{ 0.42f }; }));
     CHECK(differs([](PhysicalObjectDescriptor& d) { d.shapes[0].categories = CollisionCategories{ bit(kCategoryBody) }; }));
     CHECK(differs([](PhysicalObjectDescriptor& d) { d.shapes[0].blockingCategories = CollisionCategories{ 0u }; }));
     CHECK(differs([](PhysicalObjectDescriptor& d) { d.shapes.push_back(d.shapes[0]); }));
@@ -505,17 +514,17 @@ TEST_CASE("JoltBodyAdapter.BoundBodyConfigurationSurvivesARestore", "[Jolt]")
     const float massBefore = rig.adapter.getBodyMass(radial);
     const glm::vec3 inertiaBefore = rig.adapter.getBodyInertiaTensor(radial);
 
-    rig.adapter.setBodyAngularVelocity(radial, glm::vec3(0.f, 0.f, 4.f));
+    rig.adapter.setBodyAngularVelocity(radial, glm::vec3(-0.f, -4.f, 0.f));
     rig.world.step(kDt);
     rig.world.saveTick(1);
-    rig.adapter.addBodyTorque(radial, glm::vec3(0.f, 0.f, 1.0e6f));
+    rig.adapter.addBodyTorque(radial, glm::vec3(-0.f, -100.f, 0.f));
     rig.world.step(kDt);
     rig.world.saveTick(2);
     REQUIRE(rig.world.restoreTick(1));
 
     CHECK(rig.adapter.getBodyMass(radial) == massBefore);
     CHECK(rig.adapter.getBodyInertiaTensor(radial) == inertiaBefore);
-    CHECK(rig.adapter.captureBodyState(radial).angularVelocity.z == Catch::Approx(4.f));
+    CHECK(glm::dot(rig.adapter.captureBodyState(radial).angularVelocity, kSpinAxis) == Catch::Approx(4.f));
     CHECK(rig.adapter.isBodyResolvable(radial));
     CHECK(rig.world.bodies().GetFriction(JoltPhysicsBodyAdapter::joltBodyIdOf(radial)) == joltBodyDefaults::kCreatedBodyMaterial.friction);
 }

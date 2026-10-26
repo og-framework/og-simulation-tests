@@ -139,9 +139,9 @@ namespace
     bool sameBody(const RenderCorrectionBody& first, const RenderCorrectionBody& second)
     {
         return first.simulatableId == second.simulatableId && first.declarationIndex == second.declarationIndex
-            && first.hasRotation == second.hasRotation && sameBytes(first.speedCmPerSecond, second.speedCmPerSecond)
-            && sameBytes(first.errorCm.x, second.errorCm.x) && sameBytes(first.errorCm.y, second.errorCm.y)
-            && sameBytes(first.errorCm.z, second.errorCm.z) && sameBytes(first.errorRotation.x, second.errorRotation.x)
+            && first.hasRotation == second.hasRotation && sameBytes(first.speed, second.speed)
+            && sameBytes(first.errorPosition.x, second.errorPosition.x) && sameBytes(first.errorPosition.y, second.errorPosition.y)
+            && sameBytes(first.errorPosition.z, second.errorPosition.z) && sameBytes(first.errorRotation.x, second.errorRotation.x)
             && sameBytes(first.errorRotation.y, second.errorRotation.y) && sameBytes(first.errorRotation.z, second.errorRotation.z)
             && sameBytes(first.errorRotation.w, second.errorRotation.w);
     }
@@ -287,22 +287,22 @@ namespace
             case 0:
                 break;
             case 1:
-                full.position += nudge(rng, 0.05f);
-                linear.position += nudge(rng, 0.05f);
+                full.position += nudge(rng, 0.0005f);
+                linear.position += nudge(rng, 0.0005f);
                 break;
             case 2:
-                full.position += nudge(rng, 40.f);
-                full.linearVelocity = nudge(rng, 900.f);
+                full.position += nudge(rng, 0.4f);
+                full.linearVelocity = nudge(rng, 9.f);
                 break;
             case 3:
-                full.rotation = glm::normalize(full.rotation * glm::angleAxis(angle(rng), glm::vec3(0.f, 0.f, 1.f)));
+                full.rotation = glm::normalize(full.rotation * glm::angleAxis(angle(rng), glm::vec3(-0.f, -1.f, 0.f)));
                 break;
             case 4:
-                full.rotation = glm::normalize(full.rotation * glm::angleAxis(0.01f, glm::vec3(1.f, 0.f, 0.f)));
+                full.rotation = glm::normalize(full.rotation * glm::angleAxis(0.01f, glm::vec3(-0.f, -0.f, 1.f)));
                 break;
             default:
-                linear.position += nudge(rng, 300.f);
-                linear.linearVelocity = nudge(rng, 50.f);
+                linear.position += nudge(rng, 3.f);
+                linear.linearVelocity = nudge(rng, 0.5f);
                 break;
             }
         }
@@ -315,8 +315,8 @@ namespace
             if (!present[id - 1u])
                 continue;
             TwoBodySimulatable& simulatable = storage.get<TwoBodySimulatable>(id);
-            simulatable.allState.state.full.bodyState.position += nudge(rng, 3.f);
-            simulatable.allState.state.linear.bodyState.position += nudge(rng, 3.f);
+            simulatable.allState.state.full.bodyState.position += nudge(rng, 0.03f);
+            simulatable.allState.state.linear.bodyState.position += nudge(rng, 0.03f);
         }
     }
 }
@@ -324,7 +324,7 @@ namespace
 TEST_CASE("RenderCorrection.CaptureObject.NoNewResimWhenTheGrantedCountHasNotMovedAndOutIsUntouched", "[RenderInterpolation]")
 {
     Storage storage;
-    storage.add(1u, makeSimulatable(glm::vec3(10.f), glm::vec3(20.f)));
+    storage.add(1u, makeSimulatable(glm::vec3(0.1f, 0.1f, -0.1f), glm::vec3(0.2f, 0.2f, -0.2f)));
     Snapshot published;
     publish(published, storage, 5u, 5u);
 
@@ -334,7 +334,7 @@ TEST_CASE("RenderCorrection.CaptureObject.NoNewResimWhenTheGrantedCountHasNotMov
     CHECK(capture.onStepAfterReplay(0u, 5u, 6u, storage, out) == Outcome::NoNewResim);
     CHECK(isSentinel(out));
 
-    fullBody(storage, 1u).position = glm::vec3(90.f);
+    fullBody(storage, 1u).position = glm::vec3(0.9f, 0.9f, -0.9f);
     REQUIRE(capture.onStepAfterReplay(3u, 5u, 6u, storage, out) == Outcome::Captured);
     out = sentinelCorrection();
     CHECK(capture.onStepAfterReplay(3u, 5u, 7u, storage, out) == Outcome::NoNewResim);
@@ -345,7 +345,7 @@ TEST_CASE("RenderCorrection.CaptureObject.NoNewResimWhenTheGrantedCountHasNotMov
 TEST_CASE("RenderCorrection.CaptureObject.NoShownHeadConsumesTheResimWithoutTouchingOut", "[RenderInterpolation]")
 {
     Storage storage;
-    storage.add(1u, makeSimulatable(glm::vec3(10.f), glm::vec3(20.f)));
+    storage.add(1u, makeSimulatable(glm::vec3(0.1f, 0.1f, -0.1f), glm::vec3(0.2f, 0.2f, -0.2f)));
 
     Capture capture;
     CHECK_FALSE(capture.hasShownSnapshot());
@@ -365,13 +365,13 @@ TEST_CASE("RenderCorrection.CaptureObject.NoShownHeadConsumesTheResimWithoutTouc
 TEST_CASE("RenderCorrection.CaptureObject.TickMismatchWhenTheIntegratedTickIsNotTheShownSnapshotsTick", "[RenderInterpolation]")
 {
     Storage storage;
-    storage.add(1u, makeSimulatable(glm::vec3(10.f), glm::vec3(20.f)));
+    storage.add(1u, makeSimulatable(glm::vec3(0.1f, 0.1f, -0.1f), glm::vec3(0.2f, 0.2f, -0.2f)));
     Snapshot published;
     publish(published, storage, 41u, 41u);
 
     Capture capture;
     capture.noteShownSnapshot(published);
-    fullBody(storage, 1u).position = glm::vec3(80.f);
+    fullBody(storage, 1u).position = glm::vec3(0.8f, 0.8f, -0.8f);
     Correction out = sentinelCorrection();
     CHECK(capture.onStepAfterReplay(1u, 44u, 42u, storage, out) == Outcome::TickMismatch);
     CHECK(isSentinel(out));
@@ -383,15 +383,15 @@ TEST_CASE("RenderCorrection.CaptureObject.TickMismatchWhenTheIntegratedTickIsNot
 TEST_CASE("RenderCorrection.CaptureObject.NoErrorWhenEveryBodyIsWithinTheThresholds", "[RenderInterpolation]")
 {
     Storage storage;
-    storage.add(1u, makeSimulatable(glm::vec3(10.f), glm::vec3(20.f)));
-    storage.add(2u, makeSimulatable(glm::vec3(-10.f), glm::vec3(-20.f)));
+    storage.add(1u, makeSimulatable(glm::vec3(0.1f, 0.1f, -0.1f), glm::vec3(0.2f, 0.2f, -0.2f)));
+    storage.add(2u, makeSimulatable(glm::vec3(-0.1f, -0.1f, 0.1f), glm::vec3(-0.2f, -0.2f, 0.2f)));
     Snapshot published;
     publish(published, storage, 9u, 9u);
 
     Capture capture;
     capture.noteShownSnapshot(published);
-    fullBody(storage, 1u).position += glm::vec3(0.0625f, 0.f, -0.0625f);
-    fullBody(storage, 2u).linearVelocity = glm::vec3(5000.f, 0.f, 0.f);
+    fullBody(storage, 1u).position += glm::vec3(0.f, -0.000625f, -0.000625f);
+    fullBody(storage, 2u).linearVelocity = glm::vec3(0.f, 0.f, -50.f);
     Correction out = sentinelCorrection();
     CHECK(capture.onStepAfterReplay(1u, 9u, 10u, storage, out) == Outcome::NoError);
     CHECK(out.bodyCount == 0u);
@@ -402,17 +402,17 @@ TEST_CASE("RenderCorrection.CaptureObject.NoErrorWhenEveryBodyIsWithinTheThresho
 TEST_CASE("RenderCorrection.CaptureObject.CapturedIsShownMinusCorrectedAtTheIntegratedTickWithTheCorrectedSpeeds", "[RenderInterpolation]")
 {
     Storage storage;
-    storage.add(4u, makeSimulatable(glm::vec3(100.f, 0.f, 0.f), glm::vec3(0.f, 0.f, 50.f)));
-    storage.add(7u, makeSimulatable(glm::vec3(0.f, 300.f, 0.f), glm::vec3(1.f)));
+    storage.add(4u, makeSimulatable(glm::vec3(0.f, 0.f, -1.f), glm::vec3(0.f, 0.5f, -0.f)));
+    storage.add(7u, makeSimulatable(glm::vec3(3.f, 0.f, -0.f), glm::vec3(0.01f, 0.01f, -0.01f)));
     Snapshot published;
     publish(published, storage, 120u, 130u);
 
     Capture capture;
     capture.noteShownSnapshot(published);
-    fullBody(storage, 4u).position = glm::vec3(97.f, 0.f, 0.f);
-    fullBody(storage, 4u).linearVelocity = glm::vec3(300.f, 400.f, 0.f);
-    storage.get<TwoBodySimulatable>(7u).allState.state.linear.bodyState.position = glm::vec3(1.f, 1.f, 11.f);
-    storage.get<TwoBodySimulatable>(7u).allState.state.linear.bodyState.linearVelocity = glm::vec3(0.f, 12.f, 0.f);
+    fullBody(storage, 4u).position = glm::vec3(0.f, 0.f, -0.97f);
+    fullBody(storage, 4u).linearVelocity = glm::vec3(4.f, 0.f, -3.f);
+    storage.get<TwoBodySimulatable>(7u).allState.state.linear.bodyState.position = glm::vec3(0.01f, 0.11f, -0.01f);
+    storage.get<TwoBodySimulatable>(7u).allState.state.linear.bodyState.linearVelocity = glm::vec3(0.12f, 0.f, -0.f);
 
     Correction out;
     REQUIRE(capture.onStepAfterReplay(1u, 120u, 131u, storage, out) == Outcome::Captured);
@@ -421,12 +421,12 @@ TEST_CASE("RenderCorrection.CaptureObject.CapturedIsShownMinusCorrectedAtTheInte
     REQUIRE(out.bodyCount == 2u);
     CHECK(out.bodies[0].simulatableId == 4u);
     CHECK(out.bodies[0].declarationIndex == 0u);
-    CHECK(out.bodies[0].errorCm.x == Catch::Approx(3.0));
-    CHECK(out.bodies[0].speedCmPerSecond == Catch::Approx(500.f));
+    CHECK(out.bodies[0].errorPosition.z == Catch::Approx(-0.03));
+    CHECK(out.bodies[0].speed == Catch::Approx(5.f));
     CHECK(out.bodies[1].simulatableId == 7u);
     CHECK(out.bodies[1].declarationIndex == 1u);
-    CHECK(out.bodies[1].errorCm.z == Catch::Approx(-10.0));
-    CHECK(out.bodies[1].speedCmPerSecond == Catch::Approx(12.f));
+    CHECK(out.bodies[1].errorPosition.y == Catch::Approx(-0.1));
+    CHECK(out.bodies[1].speed == Catch::Approx(0.12f));
 
     Correction direct;
     Snapshot corrected;
@@ -442,13 +442,13 @@ TEST_CASE("RenderCorrection.CaptureObject.CapturedIsShownMinusCorrectedAtTheInte
 TEST_CASE("RenderCorrection.CaptureObject.ResetForgetsTheShownSnapshotAndTheResimCount", "[RenderInterpolation]")
 {
     Storage storage;
-    storage.add(1u, makeSimulatable(glm::vec3(10.f), glm::vec3(20.f)));
+    storage.add(1u, makeSimulatable(glm::vec3(0.1f, 0.1f, -0.1f), glm::vec3(0.2f, 0.2f, -0.2f)));
     Snapshot published;
     publish(published, storage, 3u, 3u);
 
     Capture capture;
     capture.noteShownSnapshot(published);
-    fullBody(storage, 1u).position = glm::vec3(60.f);
+    fullBody(storage, 1u).position = glm::vec3(0.6f, 0.6f, -0.6f);
     Correction out;
     REQUIRE(capture.onStepAfterReplay(5u, 3u, 4u, storage, out) == Outcome::Captured);
 
@@ -489,7 +489,7 @@ TEST_CASE("RenderCorrection.CaptureObject.MatchesTheLooseMemberHostLogicOverRand
         {
             present[id - 1u] = id <= 3u;
             if (present[id - 1u])
-                storage.add(id, makeSimulatable(nudge(rng, 500.f), nudge(rng, 500.f)));
+                storage.add(id, makeSimulatable(nudge(rng, 5.f), nudge(rng, 5.f)));
         }
 
         LooseMemberHostReference reference;
@@ -511,7 +511,7 @@ TEST_CASE("RenderCorrection.CaptureObject.MatchesTheLooseMemberHostLogicOverRand
                     if (present[id - 1u])
                         storage.remove<TwoBodySimulatable>(id);
                     else
-                        storage.add(id, makeSimulatable(nudge(rng, 500.f), nudge(rng, 500.f)));
+                        storage.add(id, makeSimulatable(nudge(rng, 5.f), nudge(rng, 5.f)));
                     present[id - 1u] = !present[id - 1u];
                 }
                 correctStorage(rng, storage, present);

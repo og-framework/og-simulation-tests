@@ -121,27 +121,27 @@ TEST_CASE("JoltSuite.JoinAcrossCorrectionResimsMatchesTheReferenceAndIsParkedBef
     };
 
     const size_t logBeforeJoin = run.log.size();
-    std::vector<float> joinedJumpCm;
-    std::vector<float> otherJumpCm;
-    std::vector<float> joinedStepCm;
+    std::vector<float> joinedJump;
+    std::vector<float> otherJump;
+    std::vector<float> joinedStep;
     auto correctMeasuringJumps = [&](uint32_t depth) {
         const glm::vec3 joinedTwoBefore = run.simOf(joiningId)->getAllState().getState().capsule.bodyState.position;
         lockstep.tick();
-        joinedStepCm.push_back(distance(run.simOf(joiningId)->getAllState().getState().capsule.bodyState.position, joinedTwoBefore));
+        joinedStep.push_back(distance(run.simOf(joiningId)->getAllState().getState().capsule.bodyState.position, joinedTwoBefore));
         const glm::vec3 joinedBefore = run.simOf(joiningId)->getAllState().getState().capsule.bodyState.position;
         const glm::vec3 otherBefore = run.simOf(kFirstId)->getAllState().getState().capsule.bodyState.position;
         correctAndTick(lockstep, tracker, depth);
-        joinedJumpCm.push_back(distance(run.simOf(joiningId)->getAllState().getState().capsule.bodyState.position, joinedBefore));
-        otherJumpCm.push_back(distance(run.simOf(kFirstId)->getAllState().getState().capsule.bodyState.position, otherBefore));
+        joinedJump.push_back(distance(run.simOf(joiningId)->getAllState().getState().capsule.bodyState.position, joinedBefore));
+        otherJump.push_back(distance(run.simOf(kFirstId)->getAllState().getState().capsule.bodyState.position, otherBefore));
     };
     lockstep.ticks(3);
     correctMeasuringJumps(8u);
     lockstep.ticks(3);
     correctMeasuringJumps(12u);
     lockstep.ticks(10);
-    std::printf("[JoltSuite] E join: capsule displacement over the corrected tick: joined=%.2f / %.2f cm, an unrelated character=%.2f / %.2f cm; joined over the tick before=%.2f / %.2f cm\n",
-        double(joinedJumpCm[0]), double(joinedJumpCm[1]), double(otherJumpCm[0]), double(otherJumpCm[1]),
-        double(joinedStepCm[0]), double(joinedStepCm[1]));
+    std::printf("[JoltSuite] E join: capsule displacement over the corrected tick: joined=%.4f / %.4f m, an unrelated character=%.4f / %.4f m; joined over the tick before=%.4f / %.4f m\n",
+        double(joinedJump[0]), double(joinedJump[1]), double(otherJump[0]), double(otherJump[1]),
+        double(joinedStep[0]), double(joinedStep[1]));
     run.observed.beforeStep = nullptr;
 
     REQUIRE(violations == 0u);
@@ -250,7 +250,7 @@ TEST_CASE("JoltSuite.Finding.AJoinFollowedByAResimInTheNextTickKeepsTheJoinedCha
     run.join(kJoiningSlot, joiningId);
     const glm::vec3 boundRadial = run.simOf(joiningId)->getAllState().getState().radial.bodyState.position;
     const glm::vec3 boundCapsule = run.simOf(joiningId)->getAllState().getState().capsule.bodyState.position;
-    REQUIRE(distance(boundCapsule, homeOf(kJoiningSlot)) < 1.f);
+    REQUIRE(distance(boundCapsule, homeOf(kJoiningSlot)) < 0.01f);
 
     const TickOutcome outcome = run.tick();
     REQUIRE(outcome.replayedTicks == config.depthTicks);
@@ -259,7 +259,7 @@ TEST_CASE("JoltSuite.Finding.AJoinFollowedByAResimInTheNextTickKeepsTheJoinedCha
                                           << state.radial.bodyState.position.z << "); bound at (" << boundRadial.x << ", " << boundRadial.y
                                           << ", " << boundRadial.z << ")");
     CHECK(state.integrations == 1u);
-    REQUIRE(distance(state.radial.bodyState.position, homeOf(kJoiningSlot) + glm::vec3(0.f, 70.f, 30.f)) < 20.f);
+    REQUIRE(distance(state.radial.bodyState.position, homeOf(kJoiningSlot) + glm::vec3(0.7f, 0.3f, -0.f)) < 0.2f);
 }
 
 TEST_CASE("JoltSuite.Finding.AResimCrossingAJoinDoesNotReplayTheJoinedCharacterFromItsPresentState", "[.][JoltSuiteFinding]")
@@ -284,13 +284,13 @@ TEST_CASE("JoltSuite.Finding.AResimCrossingAJoinDoesNotReplayTheJoinedCharacterF
     const glm::vec3 twoBefore = run.simOf(joiningId)->getAllState().getState().capsule.bodyState.position;
     lockstep.tick();
     const glm::vec3 before = run.simOf(joiningId)->getAllState().getState().capsule.bodyState.position;
-    const float normalStepCm = distance(before, twoBefore);
+    const float normalStep = distance(before, twoBefore);
 
     ReplayTracker tracker;
     correctAndTick(lockstep, tracker, 8u);
-    const float correctedStepCm = distance(run.simOf(joiningId)->getAllState().getState().capsule.bodyState.position, before);
-    INFO("joined capsule moved " << correctedStepCm << " cm over the corrected tick; " << normalStepCm << " cm over the tick before");
-    REQUIRE(correctedStepCm < 2.f * normalStepCm + 0.5f);
+    const float correctedStep = distance(run.simOf(joiningId)->getAllState().getState().capsule.bodyState.position, before);
+    INFO("joined capsule moved " << correctedStep << " m over the corrected tick; " << normalStep << " m over the tick before");
+    REQUIRE(correctedStep < 2.f * normalStep + 0.005f);
 }
 
 #endif // WITH_LOW_LEVEL_TESTS

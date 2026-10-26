@@ -15,6 +15,7 @@
 #include "OGSimulation/PhysicsBodyState.h"
 #include "OGSimulation/SimulatableList.h"
 #include "OGSimulation/SimulationFieldDescriptors.h"
+#include "OGSimulation/SimulationFrame.h"
 #include "OGSimulation/SimulationInputResolution.h"
 #include "OGSimulation/SimulationIntegrationExecutor.h"
 #include "OGSimulation/SimulationManager.h"
@@ -68,7 +69,7 @@ namespace joltSuite
 
     inline constexpr uint32_t kSlots = 8;
     inline constexpr uint32_t kDeclarations = 6;
-    inline constexpr float kQueryRadiusCm = 200.f;
+    inline constexpr float kQueryRadius = 2.f;
 
     template <uint32_t Index>
     struct ProbeSpherePart
@@ -221,12 +222,12 @@ namespace joltSuite
     inline float scriptedAcceleration(uint32_t tick, uint32_t id, uint32_t axis, int32_t input)
     {
         const int32_t pattern = int32_t((tick * 7u + id * 13u + axis * 5u) % 11u) - 5;
-        return float(pattern) * 300.f + float(input) * 20.f;
+        return float(pattern) * 3.f + float(input) * 0.2f;
     }
 
     inline glm::vec3 homeOf(uint32_t slot)
     {
-        return glm::vec3(float(slot % 4u) * 150.f - 225.f, float(slot / 4u) * 150.f - 75.f, 97.f);
+        return glm::vec3(float(slot / 4u) * 1.5f - 0.75f, 0.97f, 2.25f - float(slot % 4u) * 1.5f);
     }
 
     class ProbeSim
@@ -273,24 +274,28 @@ namespace joltSuite
             state.queryHits = int32_t(query.overlap({ volume }).size());
 
             const glm::vec3 home = homeOf(slot);
-            glm::vec3 acceleration(scriptedAcceleration(tick, id, 0, input.value), scriptedAcceleration(tick, id, 1, input.value), 0.f);
-            acceleration.x += -3.f * capsuleVelocity.x - 4.f * (capsulePosition.x - home.x) + 150.f * float(state.queryHits);
-            acceleration.y += -3.f * capsuleVelocity.y - 4.f * (capsulePosition.y - home.y);
-            physics.addBodyAcceleration(composite.bodyOf(5), acceleration);
+            const glm::vec2 planarPosition = simFrame::forwardRight(capsulePosition);
+            const glm::vec2 planarVelocity = simFrame::forwardRight(capsuleVelocity);
+            const glm::vec2 planarHome = simFrame::forwardRight(home);
+            glm::vec2 acceleration(scriptedAcceleration(tick, id, 0, input.value), scriptedAcceleration(tick, id, 1, input.value));
+            acceleration.x += -3.f * planarVelocity.x - 4.f * (planarPosition.x - planarHome.x) + 1.5f * float(state.queryHits);
+            acceleration.y += -3.f * planarVelocity.y - 4.f * (planarPosition.y - planarHome.y);
+            physics.addBodyAcceleration(composite.bodyOf(5), simFrame::fromForwardRight(acceleration, 0.f));
 
             glm::mat4 radialTransform = glm::mat4_cast(state.radial.bodyState.rotation);
-            radialTransform[3] = glm::vec4(capsulePosition + glm::vec3(0.f, 70.f, 30.f), 1.f);
+            radialTransform[3] = glm::vec4(capsulePosition + glm::vec3(0.7f, 0.3f, -0.f), 1.f);
             physics.setBodyTransform(composite.bodyOf(0), radialTransform);
             const float angularAcceleration = ((tick / 20u + id) % 2u == 0u ? 1.f : -1.f) * 12.f;
-            physics.addBodyTorque(composite.bodyOf(0), physics.getBodyInertiaTensor(composite.bodyOf(0)) * glm::vec3(0.2f, 0.f, 1.f) * angularAcceleration);
+            physics.addBodyTorque(composite.bodyOf(0),
+                physics.getBodyInertiaTensor(composite.bodyOf(0)) * glm::vec3(-0.f, -1.f, 0.2f) * angularAcceleration);
 
             const glm::vec3 guardOffset = state.guard.bodyState.position - capsulePosition;
-            if (glm::dot(guardOffset, guardOffset) > 300.f * 300.f)
+            if (glm::dot(guardOffset, guardOffset) > 3.f * 3.f)
             {
-                physics.setBodyTransform(composite.bodyOf(1), glm::translate(glm::mat4(1.f), capsulePosition + glm::vec3(0.f, -70.f, 30.f)));
+                physics.setBodyTransform(composite.bodyOf(1), glm::translate(glm::mat4(1.f), capsulePosition + glm::vec3(-0.7f, 0.3f, -0.f)));
                 physics.setBodyLinearVelocity(composite.bodyOf(1), glm::vec3(0.f));
             }
-            physics.addBodyVelocityChange(composite.bodyOf(1), glm::vec3(scriptedAcceleration(tick, id, 2, input.value) * 0.01f, 0.f, 0.f));
+            physics.addBodyVelocityChange(composite.bodyOf(1), glm::vec3(0.f, 0.f, -(scriptedAcceleration(tick, id, 2, input.value) * 0.01f)));
 
             const std::array<glm::vec3, 3> projectilePositions{ state.projectile0.bodyState.position, state.projectile1.bodyState.position,
                 state.projectile2.bodyState.position };
@@ -298,13 +303,14 @@ namespace joltSuite
             {
                 const BodyId body = composite.bodyOf(2u + projectile);
                 const glm::vec3 offset = projectilePositions[projectile] - capsulePosition;
-                if (glm::dot(offset, offset) > 1500.f * 1500.f)
+                if (glm::dot(offset, offset) > 15.f * 15.f)
                 {
-                    physics.setBodyTransform(body, glm::translate(glm::mat4(1.f), capsulePosition + glm::vec3(60.f, 0.f, 40.f * float(projectile))));
-                    physics.setBodyLinearVelocity(body, glm::vec3(200.f * float(projectile + 1u), 0.f, 0.f));
+                    physics.setBodyTransform(body,
+                        glm::translate(glm::mat4(1.f), capsulePosition + glm::vec3(0.f, 0.4f * float(projectile), -0.6f)));
+                    physics.setBodyLinearVelocity(body, glm::vec3(0.f, 0.f, -(2.f * float(projectile + 1u))));
                 }
-                physics.addBodyAcceleration(body, glm::vec3(scriptedAcceleration(tick, id, 3u + projectile, input.value),
-                    scriptedAcceleration(tick, id, 6u + projectile, input.value), 0.f));
+                physics.addBodyAcceleration(body, glm::vec3(scriptedAcceleration(tick, id, 6u + projectile, input.value), 0.f,
+                    -scriptedAcceleration(tick, id, 3u + projectile, input.value)));
             }
 
             ++state.integrations;
@@ -323,15 +329,20 @@ namespace joltSuite
             state.queryHits = int32_t(query.overlap({ volume }).size());
 
             const glm::vec3 home = homeOf(slot);
-            capsuleVelocity.x += kDt * (scriptedAcceleration(tick, id, 0, input.value) - 3.f * capsuleVelocity.x - 4.f * (capsulePosition.x - home.x));
-            capsuleVelocity.y += kDt * (scriptedAcceleration(tick, id, 1, input.value) - 3.f * capsuleVelocity.y - 4.f * (capsulePosition.y - home.y));
+            const glm::vec2 planarPosition = simFrame::forwardRight(capsulePosition);
+            const glm::vec2 planarHome = simFrame::forwardRight(home);
+            glm::vec2 planarVelocity = simFrame::forwardRight(capsuleVelocity);
+            planarVelocity.x += kDt * (scriptedAcceleration(tick, id, 0, input.value) - 3.f * planarVelocity.x - 4.f * (planarPosition.x - planarHome.x));
+            planarVelocity.y += kDt * (scriptedAcceleration(tick, id, 1, input.value) - 3.f * planarVelocity.y - 4.f * (planarPosition.y - planarHome.y));
+            capsuleVelocity = simFrame::fromForwardRight(planarVelocity, simFrame::height(capsuleVelocity));
             glm::mat4 capsulePose(1.f);
             capsulePose[3] = glm::vec4(capsulePosition, 1.f);
             physics.setBodyTransform(composite.bodyOf(5), capsulePose);
             physics.setBodyLinearVelocity(composite.bodyOf(5), capsuleVelocity);
 
             const float angularAcceleration = ((tick / kSwingPhaseTicks + id) % 2u == 0u ? 1.f : -1.f) * kSwingAngularAcceleration;
-            physics.addBodyTorque(composite.bodyOf(0), physics.getBodyInertiaTensor(composite.bodyOf(0)) * glm::vec3(0.2f, 0.f, 1.f) * angularAcceleration);
+            physics.addBodyTorque(composite.bodyOf(0),
+                physics.getBodyInertiaTensor(composite.bodyOf(0)) * glm::vec3(-0.f, -1.f, 0.2f) * angularAcceleration);
 
             ++state.integrations;
             state.lastInput = input.value;
@@ -433,11 +444,11 @@ namespace joltSuite
         return ProbeInput{ int32_t((step.getTick() * 31u + id * 7u) % 17u) - 8 };
     }
 
-    inline StaticShapeDescriptor staticBox(const glm::vec3& centreCm, const glm::vec3& halfExtentsCm, uint64_t stableKey)
+    inline StaticShapeDescriptor staticBox(const glm::vec3& centre, const glm::vec3& halfExtents, uint64_t stableKey)
     {
         StaticShapeDescriptor descriptor;
-        descriptor.shape = StaticBox{ halfExtentsCm };
-        descriptor.localToWorld = glm::translate(glm::mat4(1.f), centreCm);
+        descriptor.shape = StaticBox{ halfExtents };
+        descriptor.localToWorld = glm::translate(glm::mat4(1.f), centre);
         descriptor.categories = CollisionCategories{ bit(kWorld) };
         descriptor.blockingCategories = CollisionCategories{ kAllMappedCategories };
         descriptor.friction = 0.7f;
@@ -449,13 +460,13 @@ namespace joltSuite
     inline StaticWorldDescription arenaWithExtraStatics(uint32_t extraStatics)
     {
         StaticWorldDescription description;
-        description.shapes.push_back(staticBox(glm::vec3(0.f, 0.f, -50.f), glm::vec3(1500.f, 1500.f, 50.f), 1u));
+        description.shapes.push_back(staticBox(glm::vec3(0.f, -0.5f, -0.f), glm::vec3(15.f, 0.5f, 15.f), 1u));
         for (uint32_t index = 0; index < extraStatics; ++index)
         {
             const float angle = float(index) * 0.7f;
-            const float radius = 800.f + 20.f * float(index % 13u);
-            description.shapes.push_back(staticBox(glm::vec3(radius * std::cos(angle), radius * std::sin(angle), 40.f + float(index % 5u) * 30.f),
-                glm::vec3(20.f + float(index % 3u) * 5.f, 20.f, 40.f), 1000u + index));
+            const float radius = 8.f + 0.2f * float(index % 13u);
+            description.shapes.push_back(staticBox(glm::vec3(radius * std::sin(angle), 0.4f + float(index % 5u) * 0.3f, -(radius * std::cos(angle))),
+                glm::vec3(0.2f, 0.4f, 0.2f + float(index % 3u) * 0.05f), 1000u + index));
         }
         return description;
     }
@@ -509,7 +520,7 @@ namespace joltSuite
                 sim.composite.bind(declarationIndex++, factory.createPhysicalObject(slotTemplate.descriptor, "probe").bodyId);
             }
             sim.volume = query.registerVolume(
-                QueryVolumeDescriptor{ SphereGeometry{ kQueryRadiusCm }, CollisionCategories{ bit(kCharacter) }, glm::mat4(1.f), kQueryRouting },
+                QueryVolumeDescriptor{ SphereGeometry{ kQueryRadius }, CollisionCategories{ bit(kCharacter) }, glm::mat4(1.f), kQueryRouting },
                 factory.parentBodyId());
 
             const glm::vec3 home = homeOf(slot);
@@ -517,7 +528,7 @@ namespace joltSuite
             for (uint32_t declaration = 0; declaration < 5u; ++declaration)
             {
                 bodies.setBodyTransform(sim.composite.bodyOf(declaration),
-                    glm::translate(glm::mat4(1.f), home + glm::vec3(60.f, 10.f * float(declaration), 30.f)));
+                    glm::translate(glm::mat4(1.f), home + glm::vec3(0.1f * float(declaration), 0.3f, -0.6f)));
                 bodies.setBodyLinearVelocity(sim.composite.bodyOf(declaration), glm::vec3(0.f));
                 bodies.setBodyAngularVelocity(sim.composite.bodyOf(declaration), glm::vec3(0.f));
             }
@@ -630,8 +641,8 @@ namespace joltSuite
         uint64_t declarationsExact = 0;
         uint64_t mismatches = 0;
         uint64_t declarationsMovedByPush = 0;
-        float maxPositionErrorCm = 0.f;
-        float maxVelocityErrorCmPerS = 0.f;
+        float maxPositionError = 0.f;
+        float maxVelocityError = 0.f;
         float maxRotationError = 0.f;
         float maxAngularVelocityError = 0.f;
     };
@@ -665,12 +676,12 @@ namespace joltSuite
                 const bool exact = positionError == 0.f && velocityError == 0.f && rotationError == 0.f && angularError == 0.f;
                 if (exact)
                     ++check.declarationsExact;
-                const float positionTolerance = 1e-5f * std::max(1.f, maxAbs(pushed.position));
-                const float velocityTolerance = 1e-5f * std::max(1.f, maxAbs(pushed.linearVelocity));
+                const float positionTolerance = 1e-5f * std::max(0.01f, maxAbs(pushed.position));
+                const float velocityTolerance = 1e-5f * std::max(0.01f, maxAbs(pushed.linearVelocity));
                 if (positionError > positionTolerance || velocityError > velocityTolerance || rotationError > 1e-6f || angularError != 0.f)
                     ++check.mismatches;
-                check.maxPositionErrorCm = std::max(check.maxPositionErrorCm, positionError);
-                check.maxVelocityErrorCmPerS = std::max(check.maxVelocityErrorCmPerS, velocityError);
+                check.maxPositionError = std::max(check.maxPositionError, positionError);
+                check.maxVelocityError = std::max(check.maxVelocityError, velocityError);
                 check.maxRotationError = std::max(check.maxRotationError, rotationError);
                 check.maxAngularVelocityError = std::max(check.maxAngularVelocityError, angularError);
             });
@@ -1104,9 +1115,10 @@ namespace joltSuite
     {
         char line[512];
         std::snprintf(line, sizeof(line),
-            "pushes=%llu declarations=%llu exact=%llu mismatches=%llu movedByPush=%llu maxPosErrCm=%.3g maxVelErrCmPerS=%.3g maxRotErr=%.3g maxAngVelErr=%.3g",
+            "pushes=%llu declarations=%llu exact=%llu mismatches=%llu movedByPush=%llu maxPosErr%s=%.3g maxVelErr%sPerS=%.3g maxRotErr=%.3g maxAngVelErr=%.3g",
             (unsigned long long)check.pushes, (unsigned long long)check.declarationsChecked, (unsigned long long)check.declarationsExact,
-            (unsigned long long)check.mismatches, (unsigned long long)check.declarationsMovedByPush, double(check.maxPositionErrorCm), double(check.maxVelocityErrorCmPerS),
+            (unsigned long long)check.mismatches, (unsigned long long)check.declarationsMovedByPush, simFrame::kLengthFieldSuffix,
+            double(check.maxPositionError), simFrame::kLengthFieldSuffix, double(check.maxVelocityError),
             double(check.maxRotationError), double(check.maxAngularVelocityError));
         return line;
     }
@@ -1208,11 +1220,11 @@ namespace joltSuite
 
     inline ProbeState perturbed(ProbeState state)
     {
-        state.capsule.bodyState.position.x += 5.f;
-        state.capsule.bodyState.linearVelocity.y -= 40.f;
-        state.radial.bodyState.rotation = glm::normalize(glm::angleAxis(0.3f, glm::vec3(0.f, 0.f, 1.f)) * state.radial.bodyState.rotation);
-        state.radial.bodyState.angularVelocity += glm::vec3(0.f, 0.f, 1.f);
-        state.guard.bodyState.linearVelocity += glm::vec3(10.f, 0.f, 0.f);
+        state.capsule.bodyState.position += glm::vec3(0.f, 0.f, -0.05f);
+        state.capsule.bodyState.linearVelocity -= glm::vec3(0.4f, 0.f, -0.f);
+        state.radial.bodyState.rotation = glm::normalize(glm::angleAxis(0.3f, glm::vec3(-0.f, -1.f, 0.f)) * state.radial.bodyState.rotation);
+        state.radial.bodyState.angularVelocity += glm::vec3(-0.f, -1.f, 0.f);
+        state.guard.bodyState.linearVelocity += glm::vec3(0.f, 0.f, -0.1f);
         state.queryHits += 1;
         return state;
     }

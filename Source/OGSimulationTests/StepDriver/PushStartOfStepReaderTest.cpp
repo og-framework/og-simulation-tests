@@ -193,16 +193,17 @@ namespace pushStartOfStep
     constexpr uint32_t kFullBody = 3u;
     constexpr uint32_t kLinearBody = 5u;
 
-    const PhysicsBodyState kFullState{ glm::vec3(-7.5f, 2.25f, 0.125f), glm::normalize(glm::quat(0.8f, -0.2f, 0.4f, 0.1f)), glm::vec3(1.f, -5.f, 6.f),
-        glm::vec3(-0.3f, 0.2f, 0.1f) };
-    const LinearBodyState kLinearState{ glm::vec3(30.f, -40.f, 88.5f), glm::vec3(2.f, -4.f, 8.f) };
-    const glm::quat kRewoundRotation = glm::angleAxis(0.7f, glm::vec3(0.f, 0.f, 1.f));
-    const glm::quat kStaleRotation = glm::angleAxis(-1.9f, glm::vec3(1.f, 0.f, 0.f));
-    const glm::vec3 kStaleOffset(4.f, -3.f, 2.f);
+    const PhysicsBodyState kFullState{ glm::vec3(0.0225f, 0.00125f, 0.075f),
+        glm::normalize(glm::quat(0.8f, -0.4f, -0.1f, -0.2f)), glm::vec3(-0.05f, 0.06f, -0.01f),
+        glm::vec3(-0.2f, -0.1f, -0.3f) };
+    const LinearBodyState kLinearState{ glm::vec3(-0.4f, 0.885f, -0.3f), glm::vec3(-0.04f, 0.08f, -0.02f) };
+    const glm::quat kRewoundRotation = glm::angleAxis(0.7f, glm::vec3(-0.f, -1.f, 0.f));
+    const glm::quat kStaleRotation = glm::angleAxis(-1.9f, glm::vec3(-0.f, -0.f, 1.f));
+    const glm::vec3 kStaleOffset = glm::vec3(-0.03f, 0.02f, -0.04f);
 
     PhysicsBodyState linearBody(const glm::vec3& position, const glm::quat& rotation)
     {
-        return PhysicsBodyState{ position, rotation, kLinearState.linearVelocity, glm::vec3(0.f, 3.f, 0.f) };
+        return PhysicsBodyState{ position, rotation, kLinearState.linearVelocity, glm::vec3(-3.f, -0.f, 0.f) };
     }
 
     template <typename AdapterT>
@@ -241,7 +242,7 @@ namespace pushStartOfStep
         rig.adapter.stale[kFullBody] = staleFull;
         rig.adapter.startOfStep[kFullBody] = kFullState;
         rig.adapter.stale[kLinearBody] = linearBody(kLinearState.position, kStaleRotation);
-        rig.adapter.startOfStep[kLinearBody] = linearBody(kLinearState.position + glm::vec3(0.f, 0.f, 1.f), kRewoundRotation);
+        rig.adapter.startOfStep[kLinearBody] = linearBody(kLinearState.position + glm::vec3(0.f, 0.01f, -0.f), kRewoundRotation);
     }
 } // namespace pushStartOfStep
 } // namespace

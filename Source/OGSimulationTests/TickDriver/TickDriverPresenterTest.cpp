@@ -4,6 +4,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <functional>
 #include <map>
@@ -25,6 +26,7 @@
 #include "OGSimulation/PhysicsDeclaration.h"
 #include "OGSimulation/RenderSnapshot.h"
 #include "OGSimulation/SimulationComposite.h"
+#include "OGSimulation/SimulationFrame.h"
 #include "OGSimulation/SimulationObjectStorage.h"
 #include "OGSimulation/StepHooks.h"
 #include "OGSimulation/TickDriverConcepts.h"
@@ -242,7 +244,7 @@ namespace tickDriverPresenterTest
             unsigned int id = 0u;
             FVector location;
             FQuat rotation{ 1.0, 0.0, 0.0, 0.0 };
-            std::optional<double> floorZ;
+            std::optional<double> floorHeight;
             std::string displayName;
         };
 
@@ -271,7 +273,7 @@ namespace tickDriverPresenterTest
             actor.location.Z += delta.z;
         }
 
-        void setFloor(unsigned int id, double z) { actors.at(id).floorZ = z; }
+        void setFloor(unsigned int id, double height) { actors.at(id).floorHeight = height; }
 
         Actor* Cast(unsigned int id)
         {
@@ -291,7 +293,7 @@ namespace tickDriverPresenterTest
             Actor* const actor = Cast(id);
             if (actor == nullptr)
                 return std::nullopt;
-            write(id, legacyRenderUe::uglm::toFVector(position), rotation.has_value() ? FQuat(*rotation) : actor->rotation);
+            write(id, legacyRenderUe::ueNative::toFVector(position), rotation.has_value() ? FQuat(*rotation) : actor->rotation);
             return glm::dvec3(actor->location.X, actor->location.Y, actor->location.Z);
         }
 
@@ -329,13 +331,21 @@ namespace tickDriverPresenterTest
             writes.push_back(Write{ id, glm::dvec3(location.X, location.Y, location.Z), rotation });
             Actor& actor = actors.at(id);
             const double tolerance = static_cast<double>(legacyRenderUe::kUeKindaSmallNumber);
-            if (!actor.location.Equals(location, tolerance) || !sameWithin(actor.rotation, rotation, tolerance))
+            if (!actor.location.Equals(location, 9.999999747378752e-7) || !sameWithin(actor.rotation, rotation, tolerance))
             {
                 actor.location = location;
                 actor.rotation = rotation;
             }
-            if (actor.floorZ.has_value() && actor.location.Z < *actor.floorZ)
-                actor.location.Z = *actor.floorZ;
+            if (actor.floorHeight.has_value())
+            {
+                static_assert(simFrame::kUp[simFrame::kUpIndex] == 1.f, "UeLikeRenderSink: the floor reads the up component unsigned");
+                glm::dvec3 at(actor.location.X, actor.location.Y, actor.location.Z);
+                if (at[simFrame::kUpIndex] < *actor.floorHeight)
+                {
+                    at[simFrame::kUpIndex] = *actor.floorHeight;
+                    actor.location = FVector{ at.x, at.y, at.z };
+                }
+            }
         }
     };
 
@@ -389,7 +399,7 @@ namespace tickDriverPresenterTest
                         continue;
 
                     glm::mat4 transform = pose->hasRotation != 0u ? glm::mat4_cast(pose->rotation) : shadowGetBodyTransform(body);
-                    transform[3] = glm::vec4(pose->positionCm, 1.f);
+                    transform[3] = glm::vec4(pose->position, 1.f);
                     shadowSetBodyTransform(body, transform);
                     visitor(id, declarationIndex, *pose, [this, body]() { return shadowReaderGetBodyTransform(body); });
                 }
@@ -468,8 +478,8 @@ namespace tickDriverPresenterTest
             {
                 if (bound[body] == 0u)
                     continue;
-                glm::mat4 newest = glm::rotate(glm::mat4(1.f), 0.25f * static_cast<float>(body), glm::vec3(0.f, 0.f, 1.f));
-                newest[3] = glm::vec4(1000.f + static_cast<float>(body), -50.f, 7.f, 1.f);
+                glm::mat4 newest = glm::rotate(glm::mat4(1.f), 0.25f * static_cast<float>(body), glm::vec3(-0.f, -1.f, 0.f));
+                newest[3] = glm::vec4(-0.5f, 0.07f, -(10.f + 0.01f * static_cast<float>(body)), 1.f);
                 transforms[body] = newest;
             }
         }
@@ -496,7 +506,7 @@ namespace tickDriverPresenterTest
         bool hasShadow = true;
         double frameSeconds = 0.01;
         double stepSeconds = 1.0 / 60.0;
-        float parkSnap = 1000.f;
+        float parkSnap = 10.f;
         double wallClockOffset = 1000.0;
         double lengthReportScale = 1.0;
         LegacyRenderCvars cvars;
@@ -541,7 +551,7 @@ namespace tickDriverPresenterTest
             present.delaySteps = cvars.InterpolationDelaySteps;
             present.newestOnly = cvars.NewestSnapshot != 0;
             present.correctionSeconds = cvars.ErrorCorrectionSeconds;
-            present.maxCorrection = cvars.ErrorCorrectionMaxCm;
+            present.maxCorrection = cvars.ErrorCorrectionMax;
             present.desyncSeconds = cvars.ErrorCorrectionDesyncSeconds;
             present.traceFrames = cvars.TraceFrames != 0;
             present.parkSnap = config.parkSnap;
@@ -555,13 +565,13 @@ namespace tickDriverPresenterTest
             TestState& state = simulatable.editAllState().state;
             state.edit<RootPart>().bodyState.position = at;
             state.edit<RootPart>().bodyState.linearVelocity = motion.velocity;
-            state.edit<WeaponPart>().bodyState.position = at + glm::vec3(40.f, 0.f, 10.f);
-            state.edit<ProjectilePart>().bodyState.position = at + glm::vec3(0.f, 0.f, 200.f);
+            state.edit<WeaponPart>().bodyState.position = at + glm::vec3(0.f, 0.1f, -0.4f);
+            state.edit<ProjectilePart>().bodyState.position = at + glm::vec3(0.f, 2.f, -0.f);
             state.edit<ProjectilePart>().bodyState.linearVelocity = motion.velocity * 2.f;
             storage.add(id, std::move(simulatable));
             motions[id] = motion;
 
-            const glm::dvec3 spawnedAt(at.x - 300.0, at.y + 125.0, at.z + 90.0);
+            const glm::dvec3 spawnedAt = glm::dvec3(at) + glm::dvec3(1.25, 0.9, 3.0);
             presenterSink.spawn(id, spawnedAt);
             legacySink.spawn(id, spawnedAt);
             presenterWorld.bindSlot(id, slot, boundDeclarations);
@@ -623,8 +633,9 @@ namespace tickDriverPresenterTest
                 LinearBodyState& root = state.edit<RootPart>().bodyState;
                 root.position += motion.velocity * dt;
                 PhysicsBodyState& weapon = state.edit<WeaponPart>().bodyState;
-                weapon.rotation = glm::normalize(glm::angleAxis(motion.weaponTurnRate * dt, glm::vec3(0.f, 0.f, 1.f)) * weapon.rotation);
-                weapon.position = root.position + glm::vec3(weapon.rotation * glm::vec3(40.f, 0.f, 10.f));
+                weapon.rotation = glm::normalize(glm::angleAxis(motion.weaponTurnRate * dt, glm::vec3(-0.f, -1.f, 0.f))
+                    * weapon.rotation);
+                weapon.position = root.position + glm::vec3(weapon.rotation * glm::vec3(0.f, 0.1f, -0.4f));
                 PhysicsBodyState& projectile = state.edit<ProjectilePart>().bodyState;
                 projectile.position += projectile.linearVelocity * dt;
             });
@@ -828,7 +839,7 @@ namespace tickDriverPresenterTest
                 const RenderBody& a = mine.bodies[index];
                 const RenderBody& b = theirs.bodies[index];
                 same = a.simulatableId == b.simulatableId && a.declarationIndex == b.declarationIndex && a.hasRotation == b.hasRotation
-                    && a.positionCm == b.positionCm && a.rotation == b.rotation;
+                    && a.position == b.position && a.rotation == b.rotation;
             }
             if (!same)
                 diff << what << " differ; ";
@@ -847,8 +858,8 @@ namespace tickDriverPresenterTest
             const RenderCorrectionFrame& c = presenter->renderCorrectionFrame();
             const RenderCorrectionFrame& d = legacy->renderCorrectionFrame();
             if (c.corrections != d.corrections || c.smoothedBodies != d.smoothedBodies || c.snappedBodies != d.snappedBodies
-                || c.late != d.late || c.finished != d.finished || c.active != d.active || c.maxErrorCm != d.maxErrorCm
-                || c.maxAppliedCm != d.maxAppliedCm || c.policySnaps != d.policySnaps || c.straddleSnaps != d.straddleSnaps)
+                || c.late != d.late || c.finished != d.finished || c.active != d.active || c.maxError != d.maxError
+                || c.maxApplied != d.maxApplied || c.policySnaps != d.policySnaps || c.straddleSnaps != d.straddleSnaps)
             {
                 diff << "correction frame differs; ";
             }
@@ -895,9 +906,9 @@ namespace tickDriverPresenterTest
     template <typename EngineT>
     void joinThreeOf(DifferentialRig<EngineT>& rig)
     {
-        rig.join(3u, 0u, glm::vec3(100.f, 0.f, 50.f), BodyMotion{ glm::vec3(240.f, 30.f, 0.f), 2.5f });
-        rig.join(17u, 2u, glm::vec3(-400.f, 220.f, 50.f), BodyMotion{ glm::vec3(-60.f, 310.f, 0.f), -4.f });
-        rig.join(1u, 1u, glm::vec3(0.f, -500.f, 50.f), BodyMotion{ glm::vec3(0.f, 0.f, 0.f), 0.f });
+        rig.join(3u, 0u, glm::vec3(0.f, 0.5f, -1.f), BodyMotion{ glm::vec3(0.3f, 0.f, -2.4f), 2.5f });
+        rig.join(17u, 2u, glm::vec3(2.2f, 0.5f, 4.f), BodyMotion{ glm::vec3(3.1f, 0.f, 0.6f), -4.f });
+        rig.join(1u, 1u, glm::vec3(-5.f, 0.5f, -0.f), BodyMotion{ glm::vec3(0.f, 0.f, 0.f), 0.f });
     }
 } // namespace tickDriverPresenterTest
 
@@ -945,18 +956,18 @@ TEST_CASE("TickDriverPresenter.Differential.ResimCorrectionCapturedSmoothedAndFi
             if (step == 1u)
                 rig.markResimulation({});
             if (step == 40u)
-                rig.markResimulation({ { 3u, glm::vec3(35.f, -20.f, 0.f) }, { 17u, glm::vec3(0.f, 12.f, 0.f) } });
+                rig.markResimulation({ { 3u, glm::vec3(-0.2f, 0.f, -0.35f) }, { 17u, glm::vec3(0.12f, 0.f, -0.f) } });
             if (step == 90u)
-                rig.markResimulation({ { 3u, glm::vec3(0.01f, 0.f, 0.f) } });
+                rig.markResimulation({ { 3u, glm::vec3(0.f, 0.f, -1e-4f) } });
             if (step == 120u)
             {
                 rig.source.tick += 5;
-                rig.markResimulation({ { 1u, glm::vec3(30.f, 0.f, 0.f) } });
+                rig.markResimulation({ { 1u, glm::vec3(0.f, 0.f, -0.3f) } });
             }
             if (step == 121u)
                 rig.source.tick -= 5;
             if (step == 200u)
-                rig.markResimulation({ { 1u, glm::vec3(400.f, 0.f, 0.f) } });
+                rig.markResimulation({ { 1u, glm::vec3(0.f, 0.f, -4.f) } });
         };
         for (int frame = 0; frame < 700; ++frame)
             rig.frame();
@@ -991,7 +1002,7 @@ TEST_CASE("TickDriverPresenter.Differential.LateCorrection", "[TickDriverPresent
         {
             if (frame == 60u || frame == 61u)
             {
-                rig.markResimulation({ { 17u, glm::vec3(25.f, 0.f, 0.f) } });
+                rig.markResimulation({ { 17u, glm::vec3(0.f, 0.f, -0.25f) } });
                 rig.capture(rig.nextStep - 3u);
             }
         };
@@ -1020,7 +1031,7 @@ TEST_CASE("TickDriverPresenter.Differential.ParkSnap", "[TickDriverPresenter]")
             if (step == 30u || step == 31u)
             {
                 PhysicsBodyState& projectile = rig.storage.template get<TestSimulatable>(3u).editAllState().state.template edit<ProjectilePart>().bodyState;
-                projectile.position.z += step == 30u ? -5000.f : 5000.f;
+                projectile.position += glm::vec3(0.f, step == 30u ? -50.f : 50.f, -0.f);
             }
         };
         for (int frame = 0; frame < 650; ++frame)
@@ -1051,7 +1062,7 @@ TEST_CASE("TickDriverPresenter.Differential.JoinAndLeave", "[TickDriverPresenter
         rig.beforePresent = [&rig](uint32_t frame)
         {
             if (frame == 100u)
-                rig.join(9u, 3u, glm::vec3(600.f, 600.f, 50.f), BodyMotion{ glm::vec3(-90.f, -90.f, 0.f), 1.f }, 2u);
+                rig.join(9u, 3u, glm::vec3(6.f, 0.5f, -6.f), BodyMotion{ glm::vec3(-0.9f, 0.f, 0.9f), 1.f }, 2u);
             if (frame == 260u)
                 rig.destroyActorOnly(1u);
             if (frame == 400u)
@@ -1059,7 +1070,7 @@ TEST_CASE("TickDriverPresenter.Differential.JoinAndLeave", "[TickDriverPresenter
             if (frame == 420u)
                 rig.leave(1u);
             if (frame == 500u)
-                rig.join(3u, 0u, glm::vec3(10.f, 10.f, 50.f), BodyMotion{ glm::vec3(50.f, 0.f, 0.f), 0.5f });
+                rig.join(3u, 0u, glm::vec3(0.1f, 0.5f, -0.1f), BodyMotion{ glm::vec3(0.f, 0.f, -0.5f), 0.5f });
         };
         for (int frame = 0; frame < 1250; ++frame)
             rig.frame();
@@ -1133,19 +1144,19 @@ TEST_CASE("TickDriverPresenter.Differential.ChecksMovedMismatchAndShadow", "[Tic
         config.hasShadow = runsPrediction;
         DifferentialRig<EngineT> rig(config);
         joinThreeOf(rig);
-        rig.presenterWorld.readBackOffset[2u * kDeclarations + 1u] = glm::vec3(0.f, 0.002f, 0.f);
-        rig.legacyWorld.readBackOffset[2u * kDeclarations + 1u] = glm::vec3(0.f, 0.002f, 0.f);
+        rig.presenterWorld.readBackOffset[2u * kDeclarations + 1u] = glm::vec3(2.0000001e-5f, 0.f, -0.f);
+        rig.legacyWorld.readBackOffset[2u * kDeclarations + 1u] = glm::vec3(2.0000001e-5f, 0.f, -0.f);
         rig.beforePresent = [&rig](uint32_t frame)
         {
             if (frame == 50u || frame == 51u)
             {
-                rig.presenterSink.nudge(17u, glm::dvec3(5.0e-5, 0.0, 0.0));
-                rig.legacySink.nudge(17u, glm::dvec3(5.0e-5, 0.0, 0.0));
+                rig.presenterSink.nudge(17u, glm::dvec3(0.0, 0.0, -5.000000000000001e-7));
+                rig.legacySink.nudge(17u, glm::dvec3(0.0, 0.0, -5.000000000000001e-7));
             }
             if (frame == 80u)
             {
-                rig.presenterSink.setFloor(1u, 50.5);
-                rig.legacySink.setFloor(1u, 50.5);
+                rig.presenterSink.setFloor(1u, 0.505);
+                rig.legacySink.setFloor(1u, 0.505);
             }
         };
         for (int frame = 0; frame < 650; ++frame)
@@ -1195,7 +1206,8 @@ namespace tickDriverPresenterTest
             if (valueEnd == std::string::npos)
                 valueEnd = text.size();
             const std::string value = text.substr(equals + 1u, valueEnd - equals - 1u);
-            if (name.size() > 2u && name.compare(name.size() - 2u, 2u, "Cm") == 0)
+            const std::string suffix = simFrame::kLengthFieldSuffix;
+            if (name.size() > suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0)
             {
                 std::stringstream parts(value);
                 std::string part;
@@ -1228,21 +1240,21 @@ TEST_CASE("TickDriverPresenter.Units.LengthReportScaleMultipliesEveryCmFieldOnce
         rig->beforeEachStep = [rigPointer = rig.get()](uint64_t step)
         {
             if (step == 40u)
-                rigPointer->markResimulation({ { 3u, glm::vec3(35.f, -20.f, 0.f) } });
+                rigPointer->markResimulation({ { 3u, glm::vec3(-0.2f, 0.f, -0.35f) } });
         };
-        rig->presenterWorld.readBackOffset[1u] = glm::vec3(0.f, 0.002f, 0.f);
-        rig->legacyWorld.readBackOffset[1u] = glm::vec3(0.f, 0.002f, 0.f);
+        rig->presenterWorld.readBackOffset[1u] = glm::vec3(2.0000001e-5f, 0.f, -0.f);
+        rig->legacyWorld.readBackOffset[1u] = glm::vec3(2.0000001e-5f, 0.f, -0.f);
         rig->beforePresent = [rigPointer = rig.get()](uint32_t frame)
         {
             if (frame == 50u)
             {
-                rigPointer->presenterSink.nudge(17u, glm::dvec3(5.0e-5, 0.0, 0.0));
-                rigPointer->legacySink.nudge(17u, glm::dvec3(5.0e-5, 0.0, 0.0));
+                rigPointer->presenterSink.nudge(17u, glm::dvec3(0.0, 0.0, -5.000000000000001e-7));
+                rigPointer->legacySink.nudge(17u, glm::dvec3(0.0, 0.0, -5.000000000000001e-7));
             }
             if (frame == 80u)
             {
-                rigPointer->presenterSink.setFloor(1u, 50.5);
-                rigPointer->legacySink.setFloor(1u, 50.5);
+                rigPointer->presenterSink.setFloor(1u, 0.505);
+                rigPointer->legacySink.setFloor(1u, 0.505);
             }
         };
         for (int frame = 0; frame < 650; ++frame)
@@ -1276,20 +1288,22 @@ TEST_CASE("TickDriverPresenter.Units.LengthReportScaleMultipliesEveryCmFieldOnce
             const size_t tagEnd = one[index].text.find_first_of(" =", one[index].text.find(']') + 2u);
             fieldsSeen.insert(one[index].text.substr(0u, tagEnd) + " " + a.names[field]);
             const double expected = 2.0 * a.lengths[field];
-            CHECK(std::abs(b.lengths[field] - expected) <= 2.0e-3 + 1.0e-6 * std::abs(expected));
-            if (a.lengths[field] >= 0.01)
+            CHECK(std::abs(b.lengths[field] - expected) <= 2e-5 + 1.0e-6 * std::abs(expected));
+            if (a.lengths[field] >= 0.0001)
                 CHECK(std::abs(b.lengths[field] / a.lengths[field] - 2.0) <= 0.1);
         }
     }
     CHECK(lengthFields > 15u);
     CHECK(nonZeroLengthFields > 10u);
+    const auto field = [](const char* lineAndName) { return std::string(lineAndName) + simFrame::kLengthFieldSuffix; };
     CHECK(fieldsSeen == std::set<std::string>{
-        "[SimHost.RenderApply] role maxErrorCm", "[SimHost.RenderApply] role maxHeldDriftCm", "[SimHost.RenderApply] role pathCm",
-        "[SimHost.RenderApply] role dispCm", "[SimHost.RenderSync] role shadowMaxErrorCm",
-        "[SimHost.RenderCorrection] role maxErrorCm", "[SimHost.RenderCorrection] role maxAppliedCm",
-        "[SimHost.RenderCorrection] role maxCm", "[SimHost.RenderCorrection] role maxPolicySnapCm",
-        "[SimHost.RenderApply] MOVED driftCm", "[SimHost.RenderApply] MISMATCH errorCm", "[SimHost.RenderSync] SHADOW errorCm",
-        "[SimHost.RenderCorrection] event maxErrorCm" });
+        field("[SimHost.RenderApply] role maxError"), field("[SimHost.RenderApply] role maxHeldDrift"),
+        field("[SimHost.RenderApply] role path"), field("[SimHost.RenderApply] role disp"),
+        field("[SimHost.RenderSync] role shadowMaxError"), field("[SimHost.RenderCorrection] role maxError"),
+        field("[SimHost.RenderCorrection] role maxApplied"), field("[SimHost.RenderCorrection] role max"),
+        field("[SimHost.RenderCorrection] role maxPolicySnap"), field("[SimHost.RenderApply] MOVED drift"),
+        field("[SimHost.RenderApply] MISMATCH error"), field("[SimHost.RenderSync] SHADOW error"),
+        field("[SimHost.RenderCorrection] event maxError") });
 }
 
 TEST_CASE("TickDriverPresenter.Kit.FakeRenderSinkReceivesTheRootPoses", "[TickDriverPresenter]")
@@ -1305,7 +1319,8 @@ TEST_CASE("TickDriverPresenter.Kit.FakeRenderSinkReceivesTheRootPoses", "[TickDr
     TestClock clock;
 
     TestSimulatable simulatable;
-    simulatable.editAllState().state.edit<RootPart>().bodyState.position = glm::vec3(1.f, 2.f, 3.f);
+    const glm::vec3 rootPosition = glm::vec3(0.02f, 0.03f, -0.01f);
+    simulatable.editAllState().state.edit<RootPart>().bodyState.position = rootPosition;
     storage.add(5u, std::move(simulatable));
     sink.addTarget(5u, glm::vec3(0.f), "Brawler_5");
     presenter.onRegistered(5u, 0u);
@@ -1321,11 +1336,17 @@ TEST_CASE("TickDriverPresenter.Kit.FakeRenderSinkReceivesTheRootPoses", "[TickDr
 
     REQUIRE(sink.applies.size() == 1u);
     CHECK(sink.applies[0].id == 5u);
-    CHECK(sink.applies[0].position == glm::vec3(1.f, 2.f, 3.f));
+    CHECK(sink.applies[0].position == rootPosition);
     CHECK_FALSE(sink.applies[0].rotation.has_value());
-    CHECK(sink.targets.at(5u).position == glm::vec3(1.f, 2.f, 3.f));
+    CHECK(sink.targets.at(5u).position == rootPosition);
     REQUIRE(engine.lines.size() == 1u);
-    CHECK(engine.lines[0].text == "[SimHost.RenderApply] first role=Authority id=5 from=(0.000,0.000,0.000) to=(1.000,2.000,3.000) physicsStep=1 tick=1");
+    const int decimals = simFrame::lengthDecimals(3);
+    char expected[256];
+    std::snprintf(expected, sizeof(expected),
+        "[SimHost.RenderApply] first role=Authority id=5 from=(%.*f,%.*f,%.*f) to=(%.*f,%.*f,%.*f) physicsStep=1 tick=1",
+        decimals, 0.0, decimals, 0.0, decimals, 0.0, decimals, static_cast<double>(rootPosition.x), decimals,
+        static_cast<double>(rootPosition.y), decimals, static_cast<double>(rootPosition.z));
+    CHECK(engine.lines[0].text == expected);
 }
 
 #endif

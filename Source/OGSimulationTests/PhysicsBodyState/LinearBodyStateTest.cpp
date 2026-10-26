@@ -6,6 +6,7 @@
 #include "OGSimulation/PhysicsBodyState.h"
 #include "OGSimulation/PhysicsDeclaration.h"
 #include "OGSimulation/QueryGeometry.h"
+#include "OGSimulation/SimulationFrame.h"
 #include "OGSimulation/SimulationSerialization.h"
 
 #include <cstdint>
@@ -67,15 +68,25 @@ namespace
     static_assert(syncSize<LinearBodyState>() == 24u, "LinearBodyState is a 24-byte wire shape");
     static_assert(syncSize<PhysicsBodyState>() == 52u, "PhysicsBodyState is a 52-byte wire shape");
 
+    constexpr glm::vec3 kFullPosition = glm::vec3(0.02f, 0.03f, -0.01f);
+    constexpr glm::vec3 kFullLinearVelocity = glm::vec3(0.05f, 0.06f, -0.04f);
+    constexpr glm::vec3 kSecondPosition = glm::vec3(-0.02f, -0.03f, 0.01f);
+    constexpr glm::vec3 kSlimPosition = glm::vec3(0.2f, 0.3f, -0.1f);
+    constexpr glm::vec3 kSlimLinearVelocity = glm::vec3(-0.02f, -0.03f, 0.01f);
+    constexpr glm::vec3 kWrittenPosition = glm::vec3(-0.025f, 0.0325f, -0.015f);
+    constexpr glm::vec3 kWrittenLinearVelocity = glm::vec3(0.05f, -0.06125f, 0.0475f);
+    constexpr float kMockRadius = 0.3f;
+    constexpr glm::vec3 kMockAttachmentOffset = glm::vec3(0.f, 0.3f, -0.f);
+
     // --- a full body state with NOTHING at its default ----------------------
     // Every field is distinguishable, so a dropped or fabricated one is visible.
     PhysicsBodyState makeFullState()
     {
         PhysicsBodyState full;
-        full.position        = glm::vec3(1.f, 2.f, 3.f);
-        full.rotation        = glm::quat(0.5f, 0.5f, 0.5f, 0.5f);   // NOT identity
-        full.linearVelocity  = glm::vec3(4.f, 5.f, 6.f);
-        full.angularVelocity = glm::vec3(7.f, 8.f, 9.f);            // NOT zero
+        full.position        = kFullPosition;
+        full.rotation        = glm::quat(0.5f, -0.5f, -0.5f, 0.5f);   // NOT identity
+        full.linearVelocity  = kFullLinearVelocity;
+        full.angularVelocity = glm::vec3(-8.f, -9.f, 7.f);            // NOT zero
         return full;
     }
 
@@ -102,7 +113,7 @@ namespace
     // --- mock game/sub static data and declarations -------------------------
     // Shaped exactly like a real sub-simulation's, so what the concept accepts
     // here is what it accepts in the game.
-    struct MockSubStaticData { float radius = 30.f; };
+    struct MockSubStaticData { float radius = kMockRadius; };
     struct MockGameStaticData { MockSubStaticData movement; };
 
     const PhysicalObjectDescriptor& mockDescriptor()
@@ -121,7 +132,7 @@ namespace
         static constexpr const char* name = "MockMovementBody";
         static const MockSubStaticData& staticDataOf(const MockGameStaticData& gsd) { return gsd.movement; }
         static std::vector<QueryVolumeDescriptor> queryVolumes(const MockSubStaticData&) { return {}; }
-        static glm::vec3 attachmentOffset(const MockSubStaticData&) { return glm::vec3(0.f, 0.f, 30.f); }
+        static glm::vec3 attachmentOffset(const MockSubStaticData&) { return kMockAttachmentOffset; }
 
         using StateType = MockLinearState;
         static       LinearBodyState& bodyStateOf(      StateType& s) { return s.bodyState; }
@@ -295,12 +306,12 @@ TEST_CASE("LinearBodyState capture bridge drops rotation and angular velocity",
     LinearBodyState slim;
     slim = captured;
 
-    CHECK(slim.position.x == 1.f);
-    CHECK(slim.position.y == 2.f);
-    CHECK(slim.position.z == 3.f);
-    CHECK(slim.linearVelocity.x == 4.f);
-    CHECK(slim.linearVelocity.y == 5.f);
-    CHECK(slim.linearVelocity.z == 6.f);
+    CHECK(slim.position.x == kFullPosition.x);
+    CHECK(slim.position.y == kFullPosition.y);
+    CHECK(slim.position.z == kFullPosition.z);
+    CHECK(slim.linearVelocity.x == kFullLinearVelocity.x);
+    CHECK(slim.linearVelocity.y == kFullLinearVelocity.y);
+    CHECK(slim.linearVelocity.z == kFullLinearVelocity.z);
 
     // The dropped half is not stored anywhere: LinearBodyState has exactly two
     // members, so the narrowing is total by construction.
@@ -308,10 +319,10 @@ TEST_CASE("LinearBodyState capture bridge drops rotation and angular velocity",
 
     // Assigning again from a DIFFERENT full state fully overwrites — no residue.
     PhysicsBodyState second;
-    second.position       = glm::vec3(-1.f, -2.f, -3.f);
+    second.position       = kSecondPosition;
     second.linearVelocity = glm::vec3(0.f);
     slim = second;
-    CHECK(slim.position.x == -1.f);
+    CHECK(slim.position.x == kSecondPosition.x);
     CHECK(slim.linearVelocity.x == 0.f);
 }
 
@@ -319,18 +330,18 @@ TEST_CASE("LinearBodyState push bridge fabricates identity rotation, zero angula
           "[LinearBodyState][PushBridge]")
 {
     LinearBodyState slim;
-    slim.position       = glm::vec3(10.f, 20.f, 30.f);
-    slim.linearVelocity = glm::vec3(-1.f, -2.f, -3.f);
+    slim.position       = kSlimPosition;
+    slim.linearVelocity = kSlimLinearVelocity;
 
     // Implicit — exactly as where the push probe stashes `D::bodyStateOf(state)`.
     const PhysicsBodyState widened = slim;
 
-    CHECK(widened.position.x == 10.f);
-    CHECK(widened.position.y == 20.f);
-    CHECK(widened.position.z == 30.f);
-    CHECK(widened.linearVelocity.x == -1.f);
-    CHECK(widened.linearVelocity.y == -2.f);
-    CHECK(widened.linearVelocity.z == -3.f);
+    CHECK(widened.position.x == kSlimPosition.x);
+    CHECK(widened.position.y == kSlimPosition.y);
+    CHECK(widened.position.z == kSlimPosition.z);
+    CHECK(widened.linearVelocity.x == kSlimLinearVelocity.x);
+    CHECK(widened.linearVelocity.y == kSlimLinearVelocity.y);
+    CHECK(widened.linearVelocity.z == kSlimLinearVelocity.z);
 
     // ⚠ THE FABRICATION. Sound ONLY for a body whose descriptor locks rotation.
     CHECK(widened.rotation.w == 1.f);
@@ -345,8 +356,8 @@ TEST_CASE("LinearBodyState push bridge fabricates identity rotation, zero angula
     LinearBodyState roundTrip;
     roundTrip = makeFullState();
     const PhysicsBodyState back = roundTrip;
-    CHECK(back.position.x == 1.f);
-    CHECK(back.linearVelocity.z == 6.f);
+    CHECK(back.position.x == kFullPosition.x);
+    CHECK(back.linearVelocity.z == kFullLinearVelocity.z);
     CHECK(back.rotation.w == 1.f);          // the original was (0.5, 0.5, 0.5, 0.5)
     CHECK(back.angularVelocity.y == 0.f);   // the original was (7, 8, 9)
 }
@@ -369,8 +380,8 @@ TEST_CASE("LinearBodyState bridges by assignment only, never by construction",
     // capture ever uses.
     MockLinearState state;
     MockLinearDecl::bodyStateOf(state) = makeFullState();
-    CHECK(state.bodyState.position.y == 2.f);
-    CHECK(state.bodyState.linearVelocity.y == 5.f);
+    CHECK(state.bodyState.position.y == kFullPosition.y);
+    CHECK(state.bodyState.linearVelocity.y == kFullLinearVelocity.y);
 }
 
 TEST_CASE("LinearBodyState is a 24-byte wire shape with an exact round-trip",
@@ -382,8 +393,8 @@ TEST_CASE("LinearBodyState is a 24-byte wire shape with an exact round-trip",
     STATIC_REQUIRE(syncSize<PhysicsBodyState>() - syncSize<LinearBodyState>() == 28u);
 
     LinearBodyState written;
-    written.position       = glm::vec3(1.5f, -2.5f, 3.25f);
-    written.linearVelocity = glm::vec3(-4.75f, 5.f, -6.125f);
+    written.position       = kWrittenPosition;
+    written.linearVelocity = kWrittenLinearVelocity;
 
     LinearTestBuffer buffer;
     const std::uint32_t bytes = writeToSyncedBuffer(written, buffer, 0u);
@@ -392,12 +403,12 @@ TEST_CASE("LinearBodyState is a 24-byte wire shape with an exact round-trip",
     LinearBodyState read;
     readFromSyncedBuffer(read, buffer, 0u);
 
-    CHECK(read.position.x == 1.5f);
-    CHECK(read.position.y == -2.5f);
-    CHECK(read.position.z == 3.25f);
-    CHECK(read.linearVelocity.x == -4.75f);
-    CHECK(read.linearVelocity.y == 5.f);
-    CHECK(read.linearVelocity.z == -6.125f);
+    CHECK(read.position.x == kWrittenPosition.x);
+    CHECK(read.position.y == kWrittenPosition.y);
+    CHECK(read.position.z == kWrittenPosition.z);
+    CHECK(read.linearVelocity.x == kWrittenLinearVelocity.x);
+    CHECK(read.linearVelocity.y == kWrittenLinearVelocity.y);
+    CHECK(read.linearVelocity.z == kWrittenLinearVelocity.z);
 
     // Fieldwise similarity comes from SerializableFields, like every other state.
     CHECK(fieldwiseIsSimilarTo(written, read));
@@ -423,9 +434,9 @@ TEST_CASE("PhysicsDeclaration accepts both body-state shapes and rejects gaps",
     // staticDataOf is what lets the creation fold reach a declaration's own
     // static-data slice generically, without an engine-side per-declaration arm.
     const MockGameStaticData gameStaticData;
-    CHECK(MockLinearDecl::staticDataOf(gameStaticData).radius == 30.f);
+    CHECK(MockLinearDecl::staticDataOf(gameStaticData).radius == kMockRadius);
     CHECK(MockLinearDecl::queryVolumes(MockLinearDecl::staticDataOf(gameStaticData)).empty());
-    CHECK(MockLinearDecl::attachmentOffset(MockLinearDecl::staticDataOf(gameStaticData)).z == 30.f);
+    CHECK(simFrame::height(MockLinearDecl::attachmentOffset(MockLinearDecl::staticDataOf(gameStaticData))) == simFrame::height(kMockAttachmentOffset));
 
     // One shared bindings struct replaces the four byte-identical per-sim copies.
     // A ROOT body is its own parent rather than carrying a null id.
@@ -452,10 +463,10 @@ TEST_CASE("PhysicsDeclaration requires the const bodyStateOf overload to widen",
     // overload's referent still models the body-state pair — every requirement
     // the concept made of this declaration before the tightening still holds.
     MockSplitState splitState;
-    splitState.bodyState.position = glm::vec3(1.f, 2.f, 3.f);
+    splitState.bodyState.position = kFullPosition;
     STATIC_REQUIRE(BodyStateLike<std::remove_cvref_t<
         decltype(MockNonWideningConstBodyStateDecl::bodyStateOf(splitState))>>);
-    CHECK(MockNonWideningConstBodyStateDecl::bodyStateOf(splitState).position.y == 2.f);
+    CHECK(MockNonWideningConstBodyStateDecl::bodyStateOf(splitState).position.y == kFullPosition.y);
 
     // The broken half: what the push would have been handed cannot become a
     // PhysicsBodyState at all.
@@ -506,10 +517,10 @@ TEST_CASE("PhysicsDeclaration requires bindings to BE the shared writable type",
     STATIC_REQUIRE(std::is_same_v<decltype((conforming.bindings)), PhysicsRuntimeBindings&>);
     conforming.bindings.ownBodyId        = BodyId{11u};
     conforming.bindings.parentBodyId     = BodyId{11u};
-    conforming.bindings.attachmentOffset = glm::vec3(0.f, 0.f, 30.f);
+    conforming.bindings.attachmentOffset = kMockAttachmentOffset;
     conforming.bindings.shapeIds.push_back(ShapeId{2u});
     conforming.bindings.queryVolumeIds.push_back(QueryVolumeId{3u});
-    CHECK(conforming.bindings.attachmentOffset.z == 30.f);
+    CHECK(simFrame::height(conforming.bindings.attachmentOffset) == simFrame::height(kMockAttachmentOffset));
     CHECK(conforming.bindings.shapeIds.size() == 1u);
     CHECK(conforming.bindings.queryVolumeIds.size() == 1u);
 }

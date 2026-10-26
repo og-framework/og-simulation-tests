@@ -141,6 +141,15 @@ namespace
 
     constexpr uint32_t kFullBody = 7u;
     constexpr uint32_t kLinearBody = 9u;
+
+    constexpr glm::vec3 kFullPosition = glm::vec3(0.02f, 0.03f, -0.01f);
+    constexpr glm::vec3 kFullRotationAxis = glm::vec3(-0.f, -1.f, 0.f);
+    constexpr glm::vec3 kFullLinearVelocity = glm::vec3(0.05f, 0.06f, -0.04f);
+    constexpr glm::vec3 kFullAngularVelocity = glm::vec3(-0.2f, -0.3f, 0.1f);
+    constexpr glm::vec3 kLinearPosition = glm::vec3(0.2f, 0.3f, -0.1f);
+    constexpr glm::vec3 kLinearLinearVelocity = glm::vec3(-0.02f, -0.03f, 0.01f);
+    constexpr glm::vec3 kLiveRotationAxis = glm::vec3(-1.f, -0.f, 0.f);
+    constexpr glm::vec3 kLiveTranslation = glm::vec3(-0.08f, -0.09f, 0.07f);
 }
 
 TEST_CASE("StepDriver.PushCorrectedBodyStates.FullWritesEverythingLinearKeepsRotationAndSpin", "[StepDriver][IntegrationExecutor]")
@@ -149,11 +158,11 @@ TEST_CASE("StepDriver.PushCorrectedBodyStates.FullWritesEverythingLinearKeepsRot
     simulatable.composite.full.bindings.ownBodyId = BodyId{ kFullBody };
     simulatable.composite.linear.bindings.ownBodyId = BodyId{ kLinearBody };
     simulatable.allState.state.full.bodyState = PhysicsBodyState{
-        glm::vec3(1.f, 2.f, 3.f),
-        glm::angleAxis(0.5f, glm::vec3(0.f, 0.f, 1.f)),
-        glm::vec3(4.f, 5.f, 6.f),
-        glm::vec3(0.1f, 0.2f, 0.3f) };
-    simulatable.allState.state.linear.bodyState = LinearBodyState{ glm::vec3(10.f, 20.f, 30.f), glm::vec3(-1.f, -2.f, -3.f) };
+        kFullPosition,
+        glm::angleAxis(0.5f, kFullRotationAxis),
+        kFullLinearVelocity,
+        kFullAngularVelocity };
+    simulatable.allState.state.linear.bodyState = LinearBodyState{ kLinearPosition, kLinearLinearVelocity };
 
     SimulationObjectStorage<PushSimulatable> storage;
     storage.add<PushSimulatable>(1u, std::move(simulatable));
@@ -162,9 +171,9 @@ TEST_CASE("StepDriver.PushCorrectedBodyStates.FullWritesEverythingLinearKeepsRot
     NoQueries queries;
 
     // The linear body's live transform carries a rotation the push must keep.
-    const glm::quat liveRotation = glm::angleAxis(1.2f, glm::vec3(0.f, 1.f, 0.f));
+    const glm::quat liveRotation = glm::angleAxis(1.2f, kLiveRotationAxis);
     glm::mat4 liveTransform = glm::mat4_cast(liveRotation);
-    liveTransform[3] = glm::vec4(-7.f, -8.f, -9.f, 1.f);
+    liveTransform[3] = glm::vec4(kLiveTranslation, 1.f);
     physics.current[kLinearBody] = liveTransform;
 
     PushExecutor executor(storage, staticData, physics, queries);
@@ -173,20 +182,20 @@ TEST_CASE("StepDriver.PushCorrectedBodyStates.FullWritesEverythingLinearKeepsRot
     // Full: position and rotation in one transform, plus both velocities.
     const BodyWrites& full = physics.writes.at(kFullBody);
     REQUIRE(full.transforms.size() == 1u);
-    glm::mat4 expectedFull = glm::mat4_cast(glm::angleAxis(0.5f, glm::vec3(0.f, 0.f, 1.f)));
-    expectedFull[3] = glm::vec4(1.f, 2.f, 3.f, 1.f);
+    glm::mat4 expectedFull = glm::mat4_cast(glm::angleAxis(0.5f, kFullRotationAxis));
+    expectedFull[3] = glm::vec4(kFullPosition, 1.f);
     CHECK(full.transforms[0] == expectedFull);
-    REQUIRE(full.linearVelocities == std::vector<glm::vec3>{ glm::vec3(4.f, 5.f, 6.f) });
-    REQUIRE(full.angularVelocities == std::vector<glm::vec3>{ glm::vec3(0.1f, 0.2f, 0.3f) });
+    REQUIRE(full.linearVelocities == std::vector<glm::vec3>{ kFullLinearVelocity });
+    REQUIRE(full.angularVelocities == std::vector<glm::vec3>{ kFullAngularVelocity });
 
     // Linear: the translation is replaced, the rotation columns are the body's own, and the
     // angular velocity is never written.
     const BodyWrites& linear = physics.writes.at(kLinearBody);
     REQUIRE(linear.transforms.size() == 1u);
     glm::mat4 expectedLinear = liveTransform;
-    expectedLinear[3] = glm::vec4(10.f, 20.f, 30.f, 1.f);
+    expectedLinear[3] = glm::vec4(kLinearPosition, 1.f);
     CHECK(linear.transforms[0] == expectedLinear);
-    REQUIRE(linear.linearVelocities == std::vector<glm::vec3>{ glm::vec3(-1.f, -2.f, -3.f) });
+    REQUIRE(linear.linearVelocities == std::vector<glm::vec3>{ kLinearLinearVelocity });
     REQUIRE(linear.angularVelocities.empty());
 }
 

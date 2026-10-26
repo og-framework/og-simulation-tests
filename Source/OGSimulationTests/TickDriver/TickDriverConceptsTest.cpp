@@ -467,10 +467,10 @@ TEST_CASE("TickDriverFakes.RecordingGameAndHosts.RecordIntoOneOrderedList", "[Ti
     CHECK(presenter.publishedDeadlines == std::vector<double>{ 0.3 });
 
     FakeRenderSink sink;
-    sink.addTarget(3u, glm::vec3(1.f, 2.f, 3.f), "three");
-    CHECK(sink.readAnchor(3u) == glm::vec3(1.f, 2.f, 3.f));
-    CHECK(sink.applyRootPose(3u, glm::vec3(4.f, 5.f, 6.f), std::nullopt) == glm::vec3(4.f, 5.f, 6.f));
-    CHECK(sink.readAnchor(3u) == glm::vec3(4.f, 5.f, 6.f));
+    sink.addTarget(3u, glm::vec3(0.02f, 0.03f, -0.01f), "three");
+    CHECK(sink.readAnchor(3u) == glm::vec3(0.02f, 0.03f, -0.01f));
+    CHECK(sink.applyRootPose(3u, glm::vec3(0.05f, 0.06f, -0.04f), std::nullopt) == glm::vec3(0.05f, 0.06f, -0.04f));
+    CHECK(sink.readAnchor(3u) == glm::vec3(0.05f, 0.06f, -0.04f));
     CHECK_FALSE(sink.applyRootPose(9u, glm::vec3(0.f), std::nullopt).has_value());
     CHECK(std::string(sink.name(3u)) == "three");
     CHECK(std::string(sink.name(9u)) == "?");

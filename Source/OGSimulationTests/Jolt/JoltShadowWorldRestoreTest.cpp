@@ -35,16 +35,16 @@ namespace
         ObstaclesFirst
     };
 
-    glm::mat4 at(const glm::vec3& positionCm)
+    glm::mat4 at(const glm::vec3& position)
     {
-        return glm::translate(glm::mat4(1.f), positionCm);
+        return glm::translate(glm::mat4(1.f), position);
     }
 
-    StaticShapeDescriptor staticElement(StaticShape shape, const glm::vec3& positionCm, uint64_t stableKey)
+    StaticShapeDescriptor staticElement(StaticShape shape, const glm::vec3& position, uint64_t stableKey)
     {
         StaticShapeDescriptor descriptor;
         descriptor.shape = std::move(shape);
-        descriptor.localToWorld = at(positionCm);
+        descriptor.localToWorld = at(position);
         descriptor.categories = CollisionCategories{ bit(kWorld) };
         descriptor.blockingCategories = CollisionCategories{ kAllMappedCategories };
         descriptor.friction = 0.7f;
@@ -56,20 +56,21 @@ namespace
     StaticWorldDescription floorPart()
     {
         StaticWorldDescription description;
-        description.shapes.push_back(staticElement(StaticBox{ glm::vec3(2000.f, 2000.f, 50.f) }, glm::vec3(0.f, 0.f, -50.f), 101));
+        description.shapes.push_back(staticElement(StaticBox{ glm::vec3(20.f, 0.5f, 20.f) }, glm::vec3(0.f, -0.5f, -0.f), 101));
         return description;
     }
 
     StaticWorldDescription obstaclePart()
     {
         StaticWorldDescription description;
-        description.shapes.push_back(staticElement(StaticBox{ glm::vec3(50.f, 50.f, 50.f) }, glm::vec3(300.f, 0.f, 50.f), 102));
-        description.shapes.push_back(staticElement(StaticSphere{ 40.f }, glm::vec3(-300.f, 0.f, 40.f), 103));
-        description.shapes.push_back(staticElement(StaticCapsuleZ{ 30.f, 90.f }, glm::vec3(0.f, 300.f, 90.f), 104));
+        description.shapes.push_back(staticElement(StaticBox{ glm::vec3(0.5f, 0.5f, 0.5f) }, glm::vec3(0.f, 0.5f, -3.f), 102));
+        description.shapes.push_back(staticElement(StaticSphere{ 0.4f }, glm::vec3(0.f, 0.4f, 3.f), 103));
+        description.shapes.push_back(staticElement(StaticCapsule{ 0.3f, 0.9f }, glm::vec3(3.f, 0.9f, -0.f), 104));
         StaticTriangleMesh ramp;
-        ramp.vertices = { glm::vec3(-100.f, -100.f, 0.f), glm::vec3(100.f, -100.f, 0.f), glm::vec3(100.f, 100.f, 0.f), glm::vec3(-100.f, 100.f, 0.f) };
-        ramp.indices = { 0, 1, 2, 0, 2, 3 };
-        description.shapes.push_back(staticElement(ramp, glm::vec3(0.f, -400.f, 20.f), 105));
+        ramp.vertices = { glm::vec3(-1.f, 0.f, 1.f), glm::vec3(-1.f, 0.f, -1.f),
+            glm::vec3(1.f, 0.f, -1.f), glm::vec3(1.f, 0.f, 1.f) };
+        ramp.indices = { 0, 2, 1, 0, 3, 2 };
+        description.shapes.push_back(staticElement(ramp, glm::vec3(-4.f, 0.2f, -0.f), 105));
         return description;
     }
 
@@ -174,8 +175,8 @@ namespace
             for (uint32_t index = 0; index < world.bodiesPerSlot(); ++index)
             {
                 const JPH::BodyID id = world.slotBodyId(slot, index);
-                world.bodies().SetPosition(id, JPH::RVec3(0.5f * float(slot), 0.3f * float(index), 2.f), JPH::EActivation::Activate);
-                world.bodies().SetLinearVelocity(id, JPH::Vec3(0.1f * float(index), -0.2f, 0.05f * float(slot)));
+                world.bodies().SetPosition(id, JPH::RVec3(0.3f * float(index), 2.f, -(0.5f * float(slot))), JPH::EActivation::Activate);
+                world.bodies().SetLinearVelocity(id, JPH::Vec3(-0.2f, 0.05f * float(slot), -(0.1f * float(index))));
             }
         }
     }
@@ -183,14 +184,16 @@ namespace
     std::vector<QueryVolumeId> randomSphereVolumes(JoltSpatialQueryAdapter& query, uint32_t count)
     {
         std::mt19937 generator(5050u);
-        std::uniform_real_distribution<float> horizontal(-500.f, 500.f);
-        std::uniform_real_distribution<float> vertical(-20.f, 250.f);
-        std::uniform_real_distribution<float> radius(20.f, 150.f);
+        std::uniform_real_distribution<float> horizontal(-5.f, 5.f);
+        std::uniform_real_distribution<float> vertical(-0.2f, 2.5f);
+        std::uniform_real_distribution<float> radius(0.2f, 1.5f);
         std::vector<QueryVolumeId> volumes;
         for (uint32_t index = 0; index < count; ++index)
         {
-            const glm::vec3 centre(horizontal(generator), horizontal(generator), vertical(generator));
-            const QueryVolumeDescriptor descriptor{ SphereGeometry{ radius(generator) }, CollisionCategories{ kAllMappedCategories }, glm::mat4(1.f), kQueryRouting };
+            const glm::vec3 forwardRightUp(horizontal(generator), horizontal(generator), vertical(generator));
+            const glm::vec3 centre(forwardRightUp.y, forwardRightUp.z, -forwardRightUp.x);
+            const QueryVolumeDescriptor descriptor{ SphereGeometry{ radius(generator) }, CollisionCategories{ kAllMappedCategories },
+                glm::mat4(1.f), kQueryRouting };
             const QueryVolumeId volume = query.registerVolume(descriptor, BodyId{});
             query.setVolumeParentTransform(volume, at(centre));
             volumes.push_back(volume);

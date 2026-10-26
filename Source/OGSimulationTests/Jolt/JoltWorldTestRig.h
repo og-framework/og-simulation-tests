@@ -4,7 +4,6 @@
 
 #include "OGSimulationJolt/JoltFpEnvironment.h"
 #include "OGSimulationJolt/JoltRuntime.h"
-#include "OGSimulationJolt/JoltUnits.h"
 #include "OGSimulationJolt/JoltStateRing.h"
 #include "OGSimulationJolt/JoltWorld.h"
 
@@ -16,10 +15,15 @@
 #include <Jolt/Physics/Collision/Shape/BoxShape.h>
 #include <Jolt/Physics/Collision/Shape/SphereShape.h>
 
+#include "glm/geometric.hpp"
+#include "glm/vec3.hpp"
+#include "OGSimulation/SimulationFrame.h"
+
 #include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace joltTestRig
@@ -46,11 +50,16 @@ namespace joltTestRig
 
     inline const JoltLayerKey kWorldStaticKey{ JoltBroadPhaseClass::Static, bit(kWorld), kAllMappedCategories };
 
-    inline SlotBodyTemplate sphereTemplate(float radiusCm, uint32_t categories, uint32_t blocking, uint8_t declarationIndex)
+    inline float joltHeight(JPH::Vec3Arg metres)
+    {
+        return simFrame::height(glm::vec3(metres.GetX(), metres.GetY(), metres.GetZ()));
+    }
+
+    inline SlotBodyTemplate sphereTemplate(float radius, uint32_t categories, uint32_t blocking, uint8_t declarationIndex)
     {
         SlotBodyTemplate slotTemplate;
         slotTemplate.descriptor.body = BodyDescriptor{ .simulatePhysics = true, .enableGravity = false };
-        slotTemplate.descriptor.shapes = { ShapeDescriptor{ SphereGeometry{ radiusCm }, CollisionCategories{ categories }, CollisionCategories{ blocking } } };
+        slotTemplate.descriptor.shapes = { ShapeDescriptor{ SphereGeometry{ radius }, CollisionCategories{ categories }, CollisionCategories{ blocking } } };
         slotTemplate.declarationIndex = declarationIndex;
         return slotTemplate;
     }
@@ -60,7 +69,7 @@ namespace joltTestRig
         SlotBodyTemplate slotTemplate;
         slotTemplate.descriptor.body = BodyDescriptor{ .simulatePhysics = true, .enableGravity = true, .isRoot = true, .lockRotation = true,
             .resimPolicy = BodyResimPolicy::Resimulate };
-        slotTemplate.descriptor.shapes = { ShapeDescriptor{ CapsuleGeometry{ 42.f, 96.f }, CollisionCategories{ categories }, CollisionCategories{ blocking } } };
+        slotTemplate.descriptor.shapes = { ShapeDescriptor{ CapsuleGeometry{ 0.42f, 0.96f }, CollisionCategories{ categories }, CollisionCategories{ blocking } } };
         slotTemplate.declarationIndex = declarationIndex;
         return slotTemplate;
     }
@@ -68,11 +77,11 @@ namespace joltTestRig
     inline std::vector<SlotBodyTemplate> brawlerSlotTemplate(uint32_t projectileBlocking = 0u)
     {
         return {
-            sphereTemplate(30.f, bit(kBody), 0u, 0),
-            sphereTemplate(40.f, bit(kGuard), 0u, 1),
-            sphereTemplate(30.f, bit(kProjectile), projectileBlocking, 2),
-            sphereTemplate(30.f, bit(kProjectile), projectileBlocking, 3),
-            sphereTemplate(30.f, bit(kProjectile), projectileBlocking, 4),
+            sphereTemplate(0.3f, bit(kBody), 0u, 0),
+            sphereTemplate(0.4f, bit(kGuard), 0u, 1),
+            sphereTemplate(0.3f, bit(kProjectile), projectileBlocking, 2),
+            sphereTemplate(0.3f, bit(kProjectile), projectileBlocking, 3),
+            sphereTemplate(0.3f, bit(kProjectile), projectileBlocking, 4),
             capsuleTemplate(bit(kCharacter), bit(kWorld) | bit(kCharacter), 5)
         };
     }
@@ -105,9 +114,9 @@ namespace joltTestRig
         JoltRuntime& runtime;
     };
 
-    inline JPH::BodyID addFloor(JoltWorld& world, const JoltLayerKey& key = kWorldStaticKey, float topZMetres = 0.f)
+    inline JPH::BodyID addFloor(JoltWorld& world, const JoltLayerKey& key = kWorldStaticKey, float topHeightMetres = 0.f)
     {
-        JPH::BodyCreationSettings floor(new JPH::BoxShape(JPH::Vec3(20.f, 20.f, 0.5f)), JPH::RVec3(0.f, 0.f, topZMetres - 0.5f),
+        JPH::BodyCreationSettings floor(new JPH::BoxShape(JPH::Vec3(20.f, 0.5f, 20.f)), JPH::RVec3(0.f, topHeightMetres - 0.5f, -0.f),
             JPH::Quat::sIdentity(), JPH::EMotionType::Static, world.layers().layerOf(key));
         const JPH::BodyID id = world.createStaticBody(floor);
         world.bodies().AddBody(id, JPH::EActivation::DontActivate);
@@ -138,7 +147,8 @@ namespace joltTestRig
         bodies.SetPosition(world.slotBodyId(slot, kTemplateCapsule), JPH::RVec3(xMetres, yMetres, zMetres), JPH::EActivation::Activate);
         for (uint32_t index = 0; index < kTemplateCapsule; ++index)
         {
-            bodies.SetPosition(world.slotBodyId(slot, index), JPH::RVec3(xMetres + 0.6f, yMetres + 0.1f * float(index), zMetres), JPH::EActivation::Activate);
+            bodies.SetPosition(world.slotBodyId(slot, index), JPH::RVec3(xMetres + 0.1f * float(index), yMetres, zMetres - 0.6f),
+                JPH::EActivation::Activate);
         }
     }
 
@@ -146,7 +156,7 @@ namespace joltTestRig
     {
         for (uint32_t slot = 0; slot < world.simulatableSlots(); ++slot)
         {
-            placeBrawler(world, slot, float(slot % 4u) * 1.5f - 2.25f, float(slot / 4u) * 1.5f - 0.75f, 1.0f + 0.1f * float(slot));
+            placeBrawler(world, slot, float(slot / 4u) * 1.5f - 0.75f, 1.0f + 0.1f * float(slot), 2.25f - float(slot % 4u) * 1.5f);
         }
     }
 
@@ -168,7 +178,7 @@ namespace joltTestRig
             for (uint32_t index = 0; index < world.bodiesPerSlot(); ++index)
             {
                 bodies.AddForce(world.slotBodyId(slot, index),
-                    JPH::Vec3(scriptedForce(tick, slot, index, 0), scriptedForce(tick, slot, index, 1), 0.f));
+                    JPH::Vec3(scriptedForce(tick, slot, index, 1), 0.f, -scriptedForce(tick, slot, index, 0)));
             }
         }
     }

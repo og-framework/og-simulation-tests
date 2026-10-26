@@ -186,11 +186,12 @@ namespace
     constexpr uint32_t kFullBody = 7u;
     constexpr uint32_t kLinearBody = 9u;
 
-    const PhysicsBodyState kFullState{ glm::vec3(1.5f, -2.25f, 3.125f), glm::normalize(glm::quat(0.9f, 0.1f, -0.3f, 0.2f)), glm::vec3(4.f, 5.f, -6.f),
-        glm::vec3(0.1f, -0.2f, 0.3f) };
-    const LinearBodyState kLinearState{ glm::vec3(10.f, 20.f, 96.5f), glm::vec3(-1.f, -2.f, -3.f) };
-    const glm::quat kLinearBodyOwnRotation = glm::angleAxis(1.2f, glm::vec3(0.f, 1.f, 0.f));
-    const glm::vec3 kLinearBodyOwnSpin(0.f, 0.f, 7.f);
+    const PhysicsBodyState kFullState{ glm::vec3(-0.0225f, 0.03125f, -0.015f),
+        glm::normalize(glm::quat(0.9f, 0.3f, -0.2f, 0.1f)), glm::vec3(0.05f, -0.06f, -0.04f),
+        glm::vec3(0.2f, -0.3f, 0.1f) };
+    const LinearBodyState kLinearState{ glm::vec3(0.2f, 0.965f, -0.1f), glm::vec3(-0.02f, -0.03f, 0.01f) };
+    const glm::quat kLinearBodyOwnRotation = glm::angleAxis(1.2f, glm::vec3(-1.f, -0.f, 0.f));
+    const glm::vec3 kLinearBodyOwnSpin = glm::vec3(-0.f, -7.f, 0.f);
 
     PhysicsBodyState capturedLinearBody()
     {
@@ -301,7 +302,7 @@ TEST_CASE("IntegrationExecutor.RestoreSkip.ALinearDeclarationIgnoresTheBodysRota
     PhysicsBodyState& restored = rig.adapter.restored[kLinearBody];
     REQUIRE(restored.rotation != glm::quat(1.f, 0.f, 0.f, 0.f));
     REQUIRE(restored.angularVelocity != glm::vec3(0.f));
-    restored.rotation = glm::angleAxis(-2.f, glm::vec3(1.f, 0.f, 0.f));
+    restored.rotation = glm::angleAxis(-2.f, glm::vec3(-0.f, -0.f, 1.f));
     restored.angularVelocity = glm::vec3(9.f, -9.f, 9.f);
     rig.push();
     REQUIRE(rig.adapter.writeCount() == 0u);
@@ -311,7 +312,7 @@ TEST_CASE("IntegrationExecutor.PosePath.WithSetBodyPoseThePushNeverWritesAMatrix
 {
     RestoreRig<PoseWriterAdapter> rig;
     rig.adapter.restored[kFullBody] = PhysicsBodyState{};
-    rig.adapter.restored[kLinearBody].position += glm::vec3(5.f, 0.f, 0.f);
+    rig.adapter.restored[kLinearBody].position += glm::vec3(0.f, 0.f, -0.05f);
     rig.push();
 
     const RestoreWrites& full = rig.adapter.writes.at(kFullBody);
@@ -331,7 +332,7 @@ TEST_CASE("IntegrationExecutor.PosePath.WithoutSetBodyPoseThePushKeepsTheMatrixP
 {
     RestoreRig<MatrixOnlyAdapter> rig;
     rig.adapter.restored[kFullBody] = PhysicsBodyState{};
-    rig.adapter.restored[kLinearBody].position += glm::vec3(5.f, 0.f, 0.f);
+    rig.adapter.restored[kLinearBody].position += glm::vec3(0.f, 0.f, -0.05f);
     const glm::mat4 linearLiveTransform = rig.adapter.getBodyTransform(BodyId{ kLinearBody });
     rig.push();
 

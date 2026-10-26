@@ -18,7 +18,7 @@ StaticShapeDescriptor describeStaticShape(StaticShape shape, uint32_t index)
 {
     StaticShapeDescriptor descriptor;
     descriptor.shape = std::move(shape);
-    descriptor.localToWorld = glm::translate(glm::mat4{ 1.f }, glm::vec3{ 100.f * index, -20.f, 5.f + index });
+    descriptor.localToWorld = glm::translate(glm::mat4{ 1.f }, glm::vec3(-0.2f, 0.05f + 0.01f * float(index), -float(index)));
     descriptor.categories = CollisionCategories::single(index);
     descriptor.blockingCategories = CollisionCategories::single(index + 1) | CollisionCategories::single(31);
     descriptor.friction = 0.1f * static_cast<float>(index + 1);
@@ -30,12 +30,14 @@ StaticShapeDescriptor describeStaticShape(StaticShape shape, uint32_t index)
 StaticWorldDescription staticArenaWithEveryShape()
 {
     StaticWorldDescription description;
-    description.shapes.push_back(describeStaticShape(StaticBox{ glm::vec3{ 500.f, 400.f, 25.f } }, 0));
-    description.shapes.push_back(describeStaticShape(StaticSphere{ 75.f }, 1));
-    description.shapes.push_back(describeStaticShape(StaticCapsuleZ{ 30.f, 90.f }, 2));
-    description.shapes.push_back(describeStaticShape(StaticConvexHull{ { { 0.f, 0.f, 0.f }, { 10.f, 0.f, 0.f }, { 0.f, 10.f, 0.f }, { 0.f, 0.f, 10.f } } }, 3));
-    description.shapes.push_back(describeStaticShape(StaticTriangleMesh{ { { 0.f, 0.f, 0.f }, { 10.f, 0.f, 0.f }, { 0.f, 10.f, 0.f }, { 10.f, 10.f, 0.f } }, { 0, 1, 2, 2, 1, 3 } }, 4));
-    description.shapes.push_back(describeStaticShape(StaticBox{ glm::vec3{ 1.f, 2.f, 3.f } }, 5));
+    description.shapes.push_back(describeStaticShape(StaticBox{ glm::vec3(4.f, 0.25f, 5.f) }, 0));
+    description.shapes.push_back(describeStaticShape(StaticSphere{ 0.75f }, 1));
+    description.shapes.push_back(describeStaticShape(StaticCapsule{ 0.3f, 0.9f }, 2));
+    description.shapes.push_back(describeStaticShape(StaticConvexHull{ { glm::vec3(0.f, 0.f, -0.f), glm::vec3(0.f, 0.f, -0.1f),
+        glm::vec3(0.1f, 0.f, -0.f), glm::vec3(0.f, 0.1f, -0.f) } }, 3));
+    description.shapes.push_back(describeStaticShape(StaticTriangleMesh{ { glm::vec3(0.f, 0.f, -0.f), glm::vec3(0.f, 0.f, -0.1f),
+        glm::vec3(0.1f, 0.f, -0.f), glm::vec3(0.1f, 0.f, -0.1f) }, { 0, 2, 1, 2, 3, 1 } }, 4));
+    description.shapes.push_back(describeStaticShape(StaticBox{ glm::vec3(0.02f, 0.03f, 0.01f) }, 5));
     return description;
 }
 
@@ -61,7 +63,7 @@ void requireSameStaticDescriptor(const StaticShapeDescriptor& received, const St
         {
             CHECK(receivedShape.radius == sentShape.radius);
         }
-        else if constexpr (std::is_same_v<Shape, StaticCapsuleZ>)
+        else if constexpr (std::is_same_v<Shape, StaticCapsule>)
         {
             CHECK(receivedShape.radius == sentShape.radius);
             CHECK(receivedShape.totalHalfHeight == sentShape.totalHalfHeight);
@@ -98,7 +100,7 @@ TEST_CASE("StaticGeometry descriptors round-trip through a StaticWorldBuilder in
 
     CHECK(report.countOf<StaticBox>() == 2);
     CHECK(report.countOf<StaticSphere>() == 1);
-    CHECK(report.countOf<StaticCapsuleZ>() == 1);
+    CHECK(report.countOf<StaticCapsule>() == 1);
     CHECK(report.countOf<StaticConvexHull>() == 1);
     CHECK(report.countOf<StaticTriangleMesh>() == 1);
 }
@@ -108,7 +110,7 @@ TEST_CASE("StaticGeometry holds exactly the five M1 shapes in a fixed order", "[
     STATIC_REQUIRE(kStaticShapeTypeCount == 5);
     STATIC_REQUIRE(kStaticShapeIndex<StaticBox> == 0);
     STATIC_REQUIRE(kStaticShapeIndex<StaticSphere> == 1);
-    STATIC_REQUIRE(kStaticShapeIndex<StaticCapsuleZ> == 2);
+    STATIC_REQUIRE(kStaticShapeIndex<StaticCapsule> == 2);
     STATIC_REQUIRE(kStaticShapeIndex<StaticConvexHull> == 3);
     STATIC_REQUIRE(kStaticShapeIndex<StaticTriangleMesh> == 4);
     STATIC_REQUIRE(std::tuple_size_v<decltype(StaticWorldBuildReport{}.shapeCountByType)> == kStaticShapeTypeCount);

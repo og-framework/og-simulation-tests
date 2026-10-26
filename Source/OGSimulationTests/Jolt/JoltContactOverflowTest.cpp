@@ -47,7 +47,7 @@ TEST_CASE("JoltWorld.ContactOverflowIsLoggedOncePerFlagPerSecond", "[Jolt]")
     world.applyBodySlotOccupancy(allOccupied());
     for (uint32_t slot = 0; slot < world.simulatableSlots(); ++slot)
     {
-        world.bodies().SetPosition(world.slotBodyId(slot, kTemplateCapsule), JPH::RVec3(0.05f * float(slot), 0.f, 0.9f), JPH::EActivation::Activate);
+        world.bodies().SetPosition(world.slotBodyId(slot, kTemplateCapsule), JPH::RVec3(0.f, 0.9f, -(0.05f * float(slot))), JPH::EActivation::Activate);
     }
 
     for (uint32_t index = 0; index < 50; ++index)

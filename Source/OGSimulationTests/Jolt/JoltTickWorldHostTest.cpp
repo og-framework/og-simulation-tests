@@ -71,8 +71,8 @@ namespace
 
     struct HostStaticData
     {
-        glm::vec3 radialOffset{ 0.f, 70.f, 30.f };
-        float queryRadius = 50.f;
+        glm::vec3 radialOffset = glm::vec3(0.7f, 0.3f, -0.f);
+        float queryRadius = 0.5f;
     };
 
     struct HostRadialPart
@@ -93,7 +93,7 @@ namespace
         static const PhysicalObjectDescriptor& descriptor()
         {
             static const PhysicalObjectDescriptor radial =
-                joltTestRig::sphereTemplate(30.f, joltTestRig::bit(joltTestRig::kBody), 0u, 0).descriptor;
+                joltTestRig::sphereTemplate(0.3f, joltTestRig::bit(joltTestRig::kBody), 0u, 0).descriptor;
             return radial;
         }
 
@@ -178,9 +178,9 @@ namespace
     StaticWorldDescription importedStatics()
     {
         StaticWorldDescription description;
-        description.shapes.push_back(staticBoxOf(glm::vec3(0.f, 0.f, -50.f), glm::vec3(1500.f, 1500.f, 50.f), 1u));
-        description.shapes.push_back(staticBoxOf(glm::vec3(900.f, 0.f, 200.f), glm::vec3(40.f, 40.f, 200.f), 2u));
-        description.shapes.push_back(staticBoxOf(glm::vec3(-900.f, 0.f, 100.f), glm::vec3(20.f, 60.f, 100.f), 3u));
+        description.shapes.push_back(staticBoxOf(glm::vec3(0.f, -0.5f, -0.f), glm::vec3(15.f, 0.5f, 15.f), 1u));
+        description.shapes.push_back(staticBoxOf(glm::vec3(0.f, 2.f, -9.f), glm::vec3(0.4f, 2.f, 0.4f), 2u));
+        description.shapes.push_back(staticBoxOf(glm::vec3(0.f, 1.f, 9.f), glm::vec3(0.6f, 1.f, 0.2f), 3u));
         return description;
     }
 
@@ -192,7 +192,7 @@ namespace
         config.isAuthority = isAuthority;
         config.runInline = runInline;
         config.clientRingDepthTicks = kClientRingDepthTicks;
-        config.gravity = glm::vec3(0.f, 0.f, -980.f);
+        config.gravity = glm::vec3(0.f, -9.8f, -0.f);
         config.contactCounts = contactCounts;
         config.mappedCategories = joltTestRig::kAllMappedCategories;
         config.log = &joltTestRig::logJoltProblems;
@@ -287,7 +287,7 @@ namespace
 
     bool nearPose(const glm::vec3& first, const glm::vec3& second)
     {
-        return glm::distance(first, second) < 1.0e-3f;
+        return glm::distance(first, second) < 1.0000001e-5f;
     }
 
     TickOutcome outcomeOf(SimTick tick, StepKind kind)
@@ -406,7 +406,7 @@ TEST_CASE("JoltTickWorldHost.Build.InlineHostRegistersAVolumeFromTheConfiguringT
     CHECK_FALSE(rig.host.hasShadowWorld());
 
     const BodyId root = joltTickWorldHost::slotRootBodyId(rig.host.stepWorld(), rig.host.getDiagnostics().slotTemplate(), 0u);
-    const QueryVolumeDescriptor volume{ SphereGeometry{ 80.f }, CollisionCategories{ joltTestRig::bit(joltTestRig::kCharacter) },
+    const QueryVolumeDescriptor volume{ SphereGeometry{ 0.8f }, CollisionCategories{ joltTestRig::bit(joltTestRig::kCharacter) },
         glm::mat4(1.f), joltTestRig::kQueryRouting };
     const uint32_t volumesBefore = rig.queryAdapter->volumeCount();
     rig.queryAdapter->registerVolume(volume, root);
@@ -586,9 +586,9 @@ TEST_CASE("JoltTickWorldHost.Shadow.OverwriteWritesTheRenderPosesIntoTheRestored
 
         RenderSnapshotT<16> poses;
         poses.bodyCount = 2u;
-        poses.bodies[0] = RenderBody{ 9u, kRadialDeclaration, 1u, 0u, 0u, glm::vec3(10.f, 20.f, 30.f),
-            glm::angleAxis(0.5f, glm::vec3(0.f, 0.f, 1.f)) };
-        poses.bodies[1] = RenderBody{ 9u, kCapsuleDeclaration, 0u, 0u, 1u, glm::vec3(40.f, 50.f, 160.f) };
+        poses.bodies[0] = RenderBody{ 9u, kRadialDeclaration, 1u, 0u, 0u, glm::vec3(0.2f, 0.3f, -0.1f),
+            glm::angleAxis(0.5f, glm::vec3(-0.f, -1.f, 0.f)) };
+        poses.bodies[1] = RenderBody{ 9u, kCapsuleDeclaration, 0u, 0u, 1u, glm::vec3(0.5f, 1.6f, -0.4f) };
 
         std::vector<std::pair<uint32_t, glm::vec3>> visits;
         rig.host.overwriteShadowPoses_GameThread(poses,
@@ -597,7 +597,7 @@ TEST_CASE("JoltTickWorldHost.Shadow.OverwriteWritesTheRenderPosesIntoTheRestored
             {
                 const glm::mat4 queried = readBack();
                 CHECK(id == 9u);
-                CHECK(nearPose(glm::vec3(queried[3]), pose.positionCm));
+                CHECK(nearPose(glm::vec3(queried[3]), pose.position));
                 visits.emplace_back(declaration, glm::vec3(queried[3]));
             });
 
@@ -605,8 +605,8 @@ TEST_CASE("JoltTickWorldHost.Shadow.OverwriteWritesTheRenderPosesIntoTheRestored
         const JoltWorld& shadow = *rig.host.getDiagnostics().shadowWorld();
         const glm::mat4 radial = shadowBodies.getBodyTransform(JoltPhysicsBodyAdapter::bodyIdOf(shadow.slotBodyId(4u, kRadialDeclaration)));
         const glm::mat4 capsule = shadowBodies.getBodyTransform(JoltPhysicsBodyAdapter::bodyIdOf(shadow.slotBodyId(4u, kCapsuleDeclaration)));
-        CHECK(nearPose(glm::vec3(radial[3]), glm::vec3(10.f, 20.f, 30.f)));
-        CHECK(nearPose(glm::vec3(capsule[3]), glm::vec3(40.f, 50.f, 160.f)));
+        CHECK(nearPose(glm::vec3(radial[3]), glm::vec3(0.2f, 0.3f, -0.1f)));
+        CHECK(nearPose(glm::vec3(capsule[3]), glm::vec3(0.5f, 1.6f, -0.4f)));
         CHECK(visits.size() == expectedVisits);
     };
 
@@ -642,8 +642,8 @@ TEST_CASE("JoltTickWorldHost.Contacts.OneRunTickWithAFiveTickReplayRecordsSixCon
     const BodyId radial = sim.getPhysicsComposite().get<HostRadialDeclaration>().bindings.ownBodyId;
     {
         auto worldLock = rig.host.lockForStep();
-        rig.bodyAdapter->setBodyTransform(capsule, glm::translate(glm::mat4(1.f), glm::vec3(0.f, 0.f, 95.f)));
-        rig.bodyAdapter->setBodyTransform(radial, glm::translate(glm::mat4(1.f), glm::vec3(300.f, 0.f, 400.f)));
+        rig.bodyAdapter->setBodyTransform(capsule, glm::translate(glm::mat4(1.f), glm::vec3(0.f, 0.95f, -0.f)));
+        rig.bodyAdapter->setBodyTransform(radial, glm::translate(glm::mat4(1.f), glm::vec3(0.f, 4.f, -3.f)));
     }
 
     uint64_t physicsStep = 0u;
@@ -770,7 +770,7 @@ TEST_CASE("JoltTickWorldHost.Lines.MatchTheGoldens", "[JoltTickWorldHost]")
         bindAt(rig, first, 31u, "BP_Brawler_C_1", 6u, 12u, false);
 
         const BodyId stray = JoltPhysicsBodyAdapter::bodyIdOf(rig.host.stepWorld().slotBodyId(1u, kRadialDeclaration));
-        rig.bodyAdapter->bindTable().bind(stray, JoltBodyBinding{ 99u, kRadialDeclaration }, glm::vec3(1.f));
+        rig.bodyAdapter->bindTable().bind(stray, JoltBodyBinding{ 99u, kRadialDeclaration }, glm::vec3(1e-4f, 1e-4f, 1e-4f));
         HostSim second;
         bindAt(rig, second, 32u, "BP_Brawler_C_2", 3u, 13u, false);
 
@@ -804,7 +804,7 @@ TEST_CASE("JoltTickWorldHost.Lines.MatchTheGoldens", "[JoltTickWorldHost]")
         rig.host.getVizReader();
         const uint64_t shadowAccessesBefore = TickDriverThreadContext::shadowQueryAccessesOnThisThread();
         PublishRecorder publish;
-        const QueryVolumeDescriptor volume{ SphereGeometry{ 80.f }, CollisionCategories{ joltTestRig::bit(joltTestRig::kCharacter) },
+        const QueryVolumeDescriptor volume{ SphereGeometry{ 0.8f }, CollisionCategories{ joltTestRig::bit(joltTestRig::kCharacter) },
             glm::mat4(1.f), joltTestRig::kQueryRouting };
         CHECK(rig.host.registerVizVolume(volume, 31u, "BP_Brawler_C_1", false, std::optional<uint32_t>(6u), std::ref(publish)).has_value());
         CHECK(rig.host.editVizQuery().callerMayAccessWorld());

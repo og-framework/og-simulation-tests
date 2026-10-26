@@ -7,6 +7,8 @@
 #include <Jolt/Physics/Collision/ContactListener.h>
 #include <Jolt/Physics/PhysicsSettings.h>
 
+#include "OGSimulation/SimulationFrame.h"
+
 #include <algorithm>
 #include <chrono>
 #include <cstdio>
@@ -132,9 +134,9 @@ namespace
 
     struct SingleSlotScene
     {
-        SingleSlotScene(JoltRuntime& runtime, const StaticWorldDescription& statics, glm::vec3 gravityCmPerS2,
-            std::optional<float> minVelocityForRestitutionCmPerS, JoltPhysicsFactoryOptions options)
-            : world(runtime, configOf(statics, gravityCmPerS2, minVelocityForRestitutionCmPerS), &logJoltProblems)
+        SingleSlotScene(JoltRuntime& runtime, const StaticWorldDescription& statics, glm::vec3 gravity,
+            std::optional<float> minVelocityForRestitution, JoltPhysicsFactoryOptions options)
+            : world(runtime, configOf(statics, gravity, minVelocityForRestitution), &logJoltProblems)
             , bodies(world)
         {
             JoltStaticWorldBuilder builder(world, [](const char*) {});
@@ -145,19 +147,19 @@ namespace
             capsule = factory.parentBodyId();
             world.applyBodySlotOccupancy(bodySlotOccupancyOf({ 0u }));
             for (uint32_t index = 0; index + 1u < declarationBodies.size(); ++index)
-                bodies.setBodyTransform(declarationBodies[index], glm::translate(glm::mat4(1.f), glm::vec3(-3000.f, 300.f * float(index), 2000.f)));
+                bodies.setBodyTransform(declarationBodies[index], glm::translate(glm::mat4(1.f), glm::vec3(3.f * float(index), 20.f, 30.f)));
         }
 
-        static JoltWorldConfig configOf(const StaticWorldDescription& statics, glm::vec3 gravityCmPerS2, std::optional<float> minVelocityForRestitution)
+        static JoltWorldConfig configOf(const StaticWorldDescription& statics, glm::vec3 gravity, std::optional<float> minVelocityForRestitution)
         {
             JoltWorldConfig config;
             config.simulatableSlots = 1;
             config.slotTemplate = brawlerSlotTemplate();
             config.staticLayers = staticLayerKeysOf(statics);
-            config.gravityCmPerS2 = gravityCmPerS2;
+            config.gravity = gravity;
             config.tempAllocatorBytes = 4u << 20;
             if (minVelocityForRestitution.has_value())
-                config.minVelocityForRestitutionCmPerS = *minVelocityForRestitution;
+                config.minVelocityForRestitution = *minVelocityForRestitution;
             return config;
         }
 
@@ -170,9 +172,10 @@ namespace
         BodyId capsule;
     };
 
-    constexpr float kCapsuleRadiusCm = 42.f;
-    constexpr float kCapsuleHalfHeightCm = 96.f;
-    constexpr float kWallNearFaceCm = 300.f;
+    constexpr float kCapsuleRadius = 0.42f;
+    constexpr float kCapsuleHalfHeight = 0.96f;
+    constexpr float kWallNearFace = 3.f;
+    constexpr float kWallHalfSize = 4.f;
 
     enum class WallKind
     {
@@ -193,7 +196,7 @@ namespace
 
     float thicknessOf(WallKind kind)
     {
-        return kind == WallKind::Box1Cm ? 1.f : kind == WallKind::Box10Cm ? 10.f : 0.f;
+        return kind == WallKind::Box1Cm ? 0.01f : kind == WallKind::Box10Cm ? 0.1f : 0.f;
     }
 
     StaticWorldDescription wallOf(WallKind kind)
@@ -201,11 +204,12 @@ namespace
         StaticWorldDescription description;
         if (kind == WallKind::TriangleMesh)
         {
-            StaticShapeDescriptor wall = staticBox(glm::vec3(0.f), glm::vec3(1.f), 7u);
+            StaticShapeDescriptor wall = staticBox(glm::vec3(0.f), glm::vec3(0.01f, 0.01f, 0.01f), 7u);
             StaticTriangleMesh mesh;
-            mesh.vertices = { { kWallNearFaceCm, -400.f, -400.f }, { kWallNearFaceCm, 400.f, -400.f }, { kWallNearFaceCm, 400.f, 400.f },
-                { kWallNearFaceCm, -400.f, 400.f } };
-            mesh.indices = { 0, 2, 1, 0, 3, 2 };
+            mesh.vertices = { glm::vec3(-kWallHalfSize, -kWallHalfSize, -kWallNearFace),
+                glm::vec3(kWallHalfSize, -kWallHalfSize, -kWallNearFace), glm::vec3(kWallHalfSize, kWallHalfSize, -kWallNearFace),
+                glm::vec3(-kWallHalfSize, kWallHalfSize, -kWallNearFace) };
+            mesh.indices = { 0, 1, 2, 0, 2, 3 };
             wall.shape = mesh;
             wall.localToWorld = glm::mat4(1.f);
             description.shapes.push_back(wall);
@@ -213,7 +217,8 @@ namespace
         else
         {
             const float halfThickness = 0.5f * thicknessOf(kind);
-            description.shapes.push_back(staticBox(glm::vec3(kWallNearFaceCm + halfThickness, 0.f, 0.f), glm::vec3(halfThickness, 400.f, 400.f), 7u));
+            description.shapes.push_back(staticBox(glm::vec3(0.f, 0.f, -(kWallNearFace + halfThickness)),
+                glm::vec3(kWallHalfSize, kWallHalfSize, halfThickness), 7u));
         }
         return description;
     }
@@ -223,66 +228,67 @@ namespace
         uint32_t trials = 0;
         uint32_t tunnelled = 0;
         uint32_t blocked = 0;
-        float maxPenetrationCm = 0.f;
+        float maxPenetration = 0.f;
     };
 
-    TunnelResult runTunnelling(JoltRuntime& runtime, WallKind kind, bool linearCast, float speedCmPerS)
+    TunnelResult runTunnelling(JoltRuntime& runtime, WallKind kind, bool linearCast, float speed)
     {
         TunnelResult result;
-        const float farFace = kWallNearFaceCm + thicknessOf(kind);
-        const float travelPerTick = speedCmPerS * kDt;
+        const float farFace = kWallNearFace + thicknessOf(kind);
+        const float travelPerTick = speed * kDt;
         for (uint32_t phase = 0; phase < 16u; ++phase)
         {
             SingleSlotScene scene(runtime, wallOf(kind), glm::vec3(0.f), std::nullopt, JoltPhysicsFactoryOptions{ linearCast });
-            const float startX = kWallNearFaceCm - kCapsuleRadiusCm - 2.f * travelPerTick - travelPerTick * float(phase) / 16.f;
-            scene.bodies.setBodyTransform(scene.capsule, glm::translate(glm::mat4(1.f), glm::vec3(startX, 0.f, 0.f)));
+            const float startX = kWallNearFace - kCapsuleRadius - 2.f * travelPerTick - travelPerTick * float(phase) / 16.f;
+            scene.bodies.setBodyTransform(scene.capsule, glm::translate(glm::mat4(1.f), glm::vec3(0.f, 0.f, -startX)));
             float maxCentreX = startX;
             for (int tick = 0; tick < 20; ++tick)
             {
-                scene.bodies.setBodyLinearVelocity(scene.capsule, glm::vec3(speedCmPerS, 0.f, 0.f));
+                scene.bodies.setBodyLinearVelocity(scene.capsule, glm::vec3(0.f, 0.f, -speed));
                 scene.world.step(kDt);
-                maxCentreX = std::max(maxCentreX, scene.capsulePosition().x);
+                maxCentreX = std::max(maxCentreX, simFrame::forwardRight(scene.capsulePosition()).x);
             }
             ++result.trials;
-            const float finalX = scene.capsulePosition().x;
+            const float finalX = simFrame::forwardRight(scene.capsulePosition()).x;
             if (finalX > farFace || maxCentreX > farFace)
                 ++result.tunnelled;
             else
                 ++result.blocked;
-            result.maxPenetrationCm = std::max(result.maxPenetrationCm, maxCentreX + kCapsuleRadiusCm - kWallNearFaceCm);
+            result.maxPenetration = std::max(result.maxPenetration, maxCentreX + kCapsuleRadius - kWallNearFace);
         }
         return result;
     }
 
-    float bounceSpeed(JoltRuntime& runtime, std::optional<float> minVelocityForRestitutionCmPerS, float approachSpeedCmPerS)
+    float bounceSpeed(JoltRuntime& runtime, std::optional<float> minVelocityForRestitution, float approachSpeed)
     {
         StaticWorldDescription floor;
-        floor.shapes.push_back(staticBox(glm::vec3(0.f, 0.f, -50.f), glm::vec3(1000.f, 1000.f, 50.f), 1u));
-        SingleSlotScene scene(runtime, floor, glm::vec3(0.f), minVelocityForRestitutionCmPerS, JoltPhysicsFactoryOptions{});
-        scene.bodies.setBodyTransform(scene.capsule, glm::translate(glm::mat4(1.f), glm::vec3(0.f, 0.f, kCapsuleHalfHeightCm + 2.f)));
-        scene.bodies.setBodyLinearVelocity(scene.capsule, glm::vec3(0.f, 0.f, -approachSpeedCmPerS));
+        floor.shapes.push_back(staticBox(glm::vec3(0.f, -0.5f, -0.f), glm::vec3(10.f, 0.5f, 10.f), 1u));
+        SingleSlotScene scene(runtime, floor, glm::vec3(0.f), minVelocityForRestitution, JoltPhysicsFactoryOptions{});
+        scene.bodies.setBodyTransform(scene.capsule,
+            glm::translate(glm::mat4(1.f), glm::vec3(0.f, kCapsuleHalfHeight + 0.02f, -0.f)));
+        scene.bodies.setBodyLinearVelocity(scene.capsule, glm::vec3(0.f, -approachSpeed, -0.f));
         float maxUpward = 0.f;
         for (int tick = 0; tick < 40; ++tick)
         {
             scene.world.step(kDt);
-            maxUpward = std::max(maxUpward, scene.capsuleVelocity().z);
+            maxUpward = std::max(maxUpward, simFrame::height(scene.capsuleVelocity()));
         }
-        REQUIRE(scene.capsulePosition().z > kCapsuleHalfHeightCm - 2.f);
+        REQUIRE(simFrame::height(scene.capsulePosition()) > kCapsuleHalfHeight - 0.02f);
         return maxUpward;
     }
 
     constexpr uint8_t kContactSphereNearDeclaration = 0;
     constexpr uint8_t kContactSphereFarDeclaration = 1;
     constexpr uint8_t kContactCapsuleDeclaration = 2;
-    constexpr float kContactSphereRadiusCm = 30.f;
-    constexpr float kGravityCmPerS2 = 980.f;
-    constexpr float kPushOutEpsilonCm = 0.05f;
+    constexpr float kContactSphereRadius = 0.3f;
+    constexpr float kGravity = 9.8f;
+    constexpr float kPushOutEpsilon = 0.0005f;
     constexpr float kCosMaxWalkableSlope = 0.70710678f;
 
     std::vector<SlotBodyTemplate> contactSlotTemplate()
     {
         SlotBodyTemplate nearSphere =
-            sphereTemplate(kContactSphereRadiusCm, bit(kProjectile), bit(kWorld) | bit(kCharacter), kContactSphereNearDeclaration);
+            sphereTemplate(kContactSphereRadius, bit(kProjectile), bit(kWorld) | bit(kCharacter), kContactSphereNearDeclaration);
         nearSphere.descriptor.body.enableGravity = true;
         SlotBodyTemplate farSphere = nearSphere;
         farSphere.declarationIndex = kContactSphereFarDeclaration;
@@ -325,9 +331,9 @@ namespace
         }
 
         BodyId body(uint8_t declaration) const { return declarationBodies[declaration]; }
-        void place(uint8_t declaration, const glm::vec3& positionCm)
+        void place(uint8_t declaration, const glm::vec3& position)
         {
-            bodies.setBodyTransform(body(declaration), glm::translate(glm::mat4(1.f), positionCm));
+            bodies.setBodyTransform(body(declaration), glm::translate(glm::mat4(1.f), position));
             bodies.setBodyLinearVelocity(body(declaration), glm::vec3(0.f));
         }
         glm::vec3 positionOf(uint8_t declaration) const { return bodies.captureBodyState(body(declaration)).position; }
@@ -377,32 +383,33 @@ namespace
     struct SlopeRun
     {
         std::vector<float> pushOutUp;
-        float downSlopeTravelCm = 0.f;
-        float finalDownSlopeSpeedCmPerS = 0.f;
+        float downSlopeTravel = 0.f;
+        float finalDownSlopeSpeed = 0.f;
     };
 
     SlopeRun runSixtyDegreeSlope(JoltRuntime& runtime)
     {
-        const glm::mat4 slopeRotation = glm::rotate(glm::mat4(1.f), glm::radians(60.f), glm::vec3(0.f, 1.f, 0.f));
-        const glm::vec3 normal = glm::vec3(slopeRotation * glm::vec4(0.f, 0.f, 1.f, 0.f));
-        const glm::vec3 downSlope = glm::vec3(slopeRotation * glm::vec4(1.f, 0.f, 0.f, 0.f));
-        REQUIRE(normal.z == Catch::Approx(0.5f).margin(1e-6f));
-        REQUIRE(downSlope.z < 0.f);
+        const glm::mat4 slopeRotation = glm::rotate(glm::mat4(1.f), glm::radians(60.f), glm::vec3(-1.f, -0.f, 0.f));
+        const glm::vec3 normal = glm::vec3(slopeRotation * glm::vec4(glm::vec3(0.f, 1.f, -0.f), 0.f));
+        const glm::vec3 downSlope = glm::vec3(slopeRotation * glm::vec4(glm::vec3(0.f, 0.f, -1.f), 0.f));
+        REQUIRE(simFrame::height(normal) == Catch::Approx(0.5f).margin(1e-6f));
+        REQUIRE(simFrame::height(downSlope) < 0.f);
 
         StaticWorldDescription description;
-        StaticShapeDescriptor slope = staticSurface(staticBox(glm::vec3(0.f), glm::vec3(1.f), 11u), 0.7f);
+        StaticShapeDescriptor slope = staticSurface(staticBox(glm::vec3(0.f), glm::vec3(0.01f, 0.01f, 0.01f), 11u), 0.7f);
         StaticTriangleMesh mesh;
-        mesh.vertices = { { -2000.f, -2000.f, 0.f }, { 2000.f, -2000.f, 0.f }, { 2000.f, 2000.f, 0.f }, { -2000.f, 2000.f, 0.f } };
-        mesh.indices = { 0, 1, 2, 0, 2, 3 };
+        mesh.vertices = { glm::vec3(-20.f, 0.f, 20.f), glm::vec3(-20.f, 0.f, -20.f),
+            glm::vec3(20.f, 0.f, -20.f), glm::vec3(20.f, 0.f, 20.f) };
+        mesh.indices = { 0, 2, 1, 0, 3, 2 };
         slope.shape = mesh;
         slope.localToWorld = slopeRotation;
         description.shapes.push_back(slope);
         ContactScene scene(runtime, description);
-        scene.place(kContactSphereNearDeclaration, glm::vec3(-3000.f, 0.f, 3000.f));
-        scene.place(kContactSphereFarDeclaration, glm::vec3(-3000.f, 300.f, 3000.f));
+        scene.place(kContactSphereNearDeclaration, glm::vec3(0.f, 30.f, 30.f));
+        scene.place(kContactSphereFarDeclaration, glm::vec3(3.f, 30.f, 30.f));
 
-        const glm::vec3 lowerSphereCentre = normal * (kCapsuleRadiusCm + 0.5f);
-        const glm::vec3 start = lowerSphereCentre + glm::vec3(0.f, 0.f, kCapsuleHalfHeightCm - kCapsuleRadiusCm);
+        const glm::vec3 lowerSphereCentre = normal * (kCapsuleRadius + 0.005f);
+        const glm::vec3 start = lowerSphereCentre + glm::vec3(0.f, kCapsuleHalfHeight - kCapsuleRadius, -0.f);
         scene.place(kContactCapsuleDeclaration, start);
 
         SlopeRun run;
@@ -416,25 +423,25 @@ namespace
             if (hasCommand)
             {
                 const glm::vec3 pushOut = position - (command + velocity * kDt);
-                if (glm::dot(pushOut, pushOut) > kPushOutEpsilonCm * kPushOutEpsilonCm)
+                if (glm::dot(pushOut, pushOut) > kPushOutEpsilon * kPushOutEpsilon)
                 {
                     const glm::vec3 contactNormal = glm::normalize(pushOut);
-                    run.pushOutUp.push_back(contactNormal.z);
-                    if (contactNormal.z >= kCosMaxWalkableSlope)
-                        velocity.z = 0.f;
+                    run.pushOutUp.push_back(simFrame::height(contactNormal));
+                    if (simFrame::height(contactNormal) >= kCosMaxWalkableSlope)
+                        velocity = simFrame::withHeight(velocity, 0.f);
                     else
                         velocity -= glm::dot(velocity, contactNormal) * contactNormal;
                 }
             }
-            velocity.z -= kGravityCmPerS2 * kDt;
+            velocity = simFrame::withHeight(velocity, simFrame::height(velocity) - kGravity * kDt);
             command = position;
             hasCommand = true;
             scene.bodies.setBodyTransform(capsule, glm::translate(glm::mat4(1.f), position));
             scene.bodies.setBodyLinearVelocity(capsule, velocity);
             scene.world.step(kDt);
         }
-        run.downSlopeTravelCm = glm::dot(scene.positionOf(kContactCapsuleDeclaration) - start, downSlope);
-        run.finalDownSlopeSpeedCmPerS = glm::dot(velocity, downSlope);
+        run.downSlopeTravel = glm::dot(scene.positionOf(kContactCapsuleDeclaration) - start, downSlope);
+        run.finalDownSlopeSpeed = glm::dot(velocity, downSlope);
         return run;
     }
 } // namespace
@@ -471,19 +478,20 @@ TEST_CASE("JoltSuite.SaveRestoreAndDepthTwentyReplayCostWithOneTwentyAndThreeHun
 TEST_CASE("JoltSuite.TunnellingAtTheMaximumKnockbackSpeedWithAndWithoutLinearCast", "[Jolt]")
 {
     RuntimeLease lease;
-    constexpr float kMaxKnockbackCmPerS = 2000.f;
+    constexpr float kMaxKnockbackSpeed = 20.f;
     for (const WallKind kind : { WallKind::Box1Cm, WallKind::Box10Cm, WallKind::TriangleMesh })
     {
-        for (const float speed : { kMaxKnockbackCmPerS, 2500.f, 2828.f, 2.f * kMaxKnockbackCmPerS, 4.f * kMaxKnockbackCmPerS, 8.f * kMaxKnockbackCmPerS })
+        for (const float speed : { kMaxKnockbackSpeed, 25.f, 28.28f, 2.f * kMaxKnockbackSpeed,
+                 4.f * kMaxKnockbackSpeed, 8.f * kMaxKnockbackSpeed })
         {
             const TunnelResult discrete = runTunnelling(lease.runtime, kind, false, speed);
             const TunnelResult linearCast = runTunnelling(lease.runtime, kind, true, speed);
-            std::printf("[JoltSuite] D tunnelling, %s wall, %.0f cm/s (%.1f cm/tick): discrete tunnelled %u/%u (max penetration %.2f cm); "
-                        "LinearCast tunnelled %u/%u (max penetration %.2f cm)\n",
-                nameOf(kind), double(speed), double(speed * kDt), discrete.tunnelled, discrete.trials, double(discrete.maxPenetrationCm),
-                linearCast.tunnelled, linearCast.trials, double(linearCast.maxPenetrationCm));
+            std::printf("[JoltSuite] D tunnelling, %s wall, %.2f m/s (%.3f m/tick): discrete tunnelled %u/%u (max penetration %.4f m); "
+                        "LinearCast tunnelled %u/%u (max penetration %.4f m)\n",
+                nameOf(kind), double(speed), double(speed * kDt), discrete.tunnelled, discrete.trials, double(discrete.maxPenetration),
+                linearCast.tunnelled, linearCast.trials, double(linearCast.maxPenetration));
             REQUIRE(linearCast.tunnelled == 0u);
-            if (speed == kMaxKnockbackCmPerS)
+            if (speed == kMaxKnockbackSpeed)
                 REQUIRE(discrete.tunnelled == 0u);
         }
     }
@@ -492,36 +500,35 @@ TEST_CASE("JoltSuite.TunnellingAtTheMaximumKnockbackSpeedWithAndWithoutLinearCas
 
 TEST_CASE("JoltSuite.TheRestitutionVelocityThresholdIsChaosParity", "[Jolt]")
 {
-    REQUIRE(kChaosParityMinVelocityForRestitutionCmPerS == Catch::Approx(1000.0 / 60.0).epsilon(1e-6));
-    REQUIRE(JoltWorldConfig{}.minVelocityForRestitutionCmPerS == kChaosParityMinVelocityForRestitutionCmPerS);
+    REQUIRE(kChaosParityMinVelocityForRestitution == Catch::Approx(10.0 / 60.0).epsilon(1e-6));
+    REQUIRE(JoltWorldConfig{}.minVelocityForRestitution == kChaosParityMinVelocityForRestitution);
 
     RuntimeLease lease;
     {
         StaticWorldDescription floor;
-        floor.shapes.push_back(staticBox(glm::vec3(0.f, 0.f, -50.f), glm::vec3(1000.f, 1000.f, 50.f), 1u));
+        floor.shapes.push_back(staticBox(glm::vec3(0.f, -0.5f, -0.f), glm::vec3(10.f, 0.5f, 10.f), 1u));
         SingleSlotScene scene(lease.runtime, floor, glm::vec3(0.f), std::nullopt, JoltPhysicsFactoryOptions{});
-        REQUIRE(scene.world.physics().GetPhysicsSettings().mMinVelocityForRestitution
-            == joltUnits::centimetresToMetres(kChaosParityMinVelocityForRestitutionCmPerS));
+        REQUIRE(scene.world.physics().GetPhysicsSettings().mMinVelocityForRestitution == kChaosParityMinVelocityForRestitution);
         REQUIRE(JPH::PhysicsSettings{}.mMinVelocityForRestitution == 1.f);
     }
 
-    const float joltDefaultCmPerS = 100.f;
-    const float slowParity = bounceSpeed(lease.runtime, std::nullopt, 10.f);
-    const float betweenParity = bounceSpeed(lease.runtime, std::nullopt, 50.f);
-    const float fastParity = bounceSpeed(lease.runtime, std::nullopt, 150.f);
-    const float slowJolt = bounceSpeed(lease.runtime, joltDefaultCmPerS, 10.f);
-    const float betweenJolt = bounceSpeed(lease.runtime, joltDefaultCmPerS, 50.f);
-    const float fastJolt = bounceSpeed(lease.runtime, joltDefaultCmPerS, 150.f);
-    std::printf("[JoltSuite] restitution threshold: capsule (0/0) on a 0.7/0.3 floor, combined restitution 0.15; rebound cm/s at approach 10 / 50 / 150: "
-                "Chaos-parity threshold %.2f / %.2f / %.2f, Jolt default threshold %.2f / %.2f / %.2f\n",
+    const float joltDefaultThreshold = 1.f;
+    const float slowParity = bounceSpeed(lease.runtime, std::nullopt, 0.1f);
+    const float betweenParity = bounceSpeed(lease.runtime, std::nullopt, 0.5f);
+    const float fastParity = bounceSpeed(lease.runtime, std::nullopt, 1.5f);
+    const float slowJolt = bounceSpeed(lease.runtime, joltDefaultThreshold, 0.1f);
+    const float betweenJolt = bounceSpeed(lease.runtime, joltDefaultThreshold, 0.5f);
+    const float fastJolt = bounceSpeed(lease.runtime, joltDefaultThreshold, 1.5f);
+    std::printf("[JoltSuite] restitution threshold: capsule (0/0) on a 0.7/0.3 floor, combined restitution 0.15; rebound m/s at approach 0.1 / 0.5 / 1.5: "
+                "Chaos-parity threshold %.4f / %.4f / %.4f, Jolt default threshold %.4f / %.4f / %.4f\n",
         double(slowParity), double(betweenParity), double(fastParity), double(slowJolt), double(betweenJolt), double(fastJolt));
 
-    CHECK(slowParity < 0.5f);
-    CHECK(slowJolt < 0.5f);
-    CHECK(betweenParity == Catch::Approx(0.15f * 50.f).margin(2.f));
-    CHECK(betweenJolt < 0.5f);
-    CHECK(fastParity == Catch::Approx(0.15f * 150.f).margin(4.f));
-    CHECK(fastJolt == Catch::Approx(0.15f * 150.f).margin(4.f));
+    CHECK(slowParity < 0.005f);
+    CHECK(slowJolt < 0.005f);
+    CHECK(betweenParity == Catch::Approx(0.15f * 0.5f).margin(0.02f));
+    CHECK(betweenJolt < 0.005f);
+    CHECK(fastParity == Catch::Approx(0.15f * 1.5f).margin(0.04f));
+    CHECK(fastJolt == Catch::Approx(0.15f * 1.5f).margin(0.04f));
 }
 
 TEST_CASE("JoltSuite.CapsulePushOutOnASixtyDegreeSlopeIsTheFaceNormal", "[Jolt]")
@@ -529,25 +536,27 @@ TEST_CASE("JoltSuite.CapsulePushOutOnASixtyDegreeSlopeIsTheFaceNormal", "[Jolt]"
     RuntimeLease lease;
     const SlopeRun run = runSixtyDegreeSlope(lease.runtime);
     std::printf("[JoltSuite] 60 deg slope, root capsule under the movement sim's command/step/push-out loop: %zu push-out ticks, "
-                "normalize(pushOut).z per tick:",
+                "height(normalize(pushOut)) per tick:",
         run.pushOutUp.size());
     for (const float up : run.pushOutUp)
         std::printf(" %.4f", double(up));
-    std::printf("; down-slope travel after 30 ticks %.2f cm, final down-slope speed %.1f cm/s\n", double(run.downSlopeTravelCm),
-        double(run.finalDownSlopeSpeedCmPerS));
+    std::printf("; down-slope travel after 30 ticks %.4f m, final down-slope speed %.3f m/s\n", double(run.downSlopeTravel),
+        double(run.finalDownSlopeSpeed));
 
     REQUIRE(run.pushOutUp.size() >= 20u);
     for (const float up : run.pushOutUp)
         CHECK(up == Catch::Approx(0.5f).margin(0.03f));
-    CHECK(run.downSlopeTravelCm > 50.f);
+    CHECK(run.downSlopeTravel > 0.5f);
 }
 
 TEST_CASE("JoltSuite.OnlyContactsWithARootCapsuleAreFrictionless", "[Jolt]")
 {
     RuntimeLease lease;
     StaticWorldDescription description;
-    description.shapes.push_back(staticSurface(staticBox(glm::vec3(-230.f, 0.f, -50.f), glm::vec3(270.f, 500.f, 50.f), 21u), 0.7f));
-    description.shapes.push_back(staticSurface(staticBox(glm::vec3(270.f, 0.f, -50.f), glm::vec3(230.f, 500.f, 50.f), 22u), 0.f));
+    description.shapes.push_back(
+        staticSurface(staticBox(glm::vec3(0.f, -0.5f, 2.3f), glm::vec3(5.f, 0.5f, 2.7f), 21u), 0.7f));
+    description.shapes.push_back(
+        staticSurface(staticBox(glm::vec3(0.f, -0.5f, -2.7f), glm::vec3(5.f, 0.5f, 2.3f), 22u), 0.f));
     CombinedFrictionRecorder recorder;
     ContactScene scene(lease.runtime, description);
     REQUIRE(scene.staticBodies.size() == 2u);
@@ -557,9 +566,10 @@ TEST_CASE("JoltSuite.OnlyContactsWithARootCapsuleAreFrictionless", "[Jolt]")
     REQUIRE(scene.world.bodies().GetFriction(highFrictionFloor) == 0.7f);
     REQUIRE(scene.world.bodies().GetFriction(zeroFrictionFloor) == 0.f);
 
-    scene.place(kContactCapsuleDeclaration, glm::vec3(0.f, 0.f, kCapsuleHalfHeightCm - 0.5f));
-    scene.place(kContactSphereFarDeclaration, glm::vec3(-300.f, 0.f, kContactSphereRadiusCm - 0.5f));
-    scene.place(kContactSphereNearDeclaration, glm::vec3(kCapsuleRadiusCm + kContactSphereRadiusCm - 1.5f, 0.f, kContactSphereRadiusCm - 0.5f));
+    scene.place(kContactCapsuleDeclaration, glm::vec3(0.f, kCapsuleHalfHeight - 0.005f, -0.f));
+    scene.place(kContactSphereFarDeclaration, glm::vec3(0.f, kContactSphereRadius - 0.005f, 3.f));
+    scene.place(kContactSphereNearDeclaration, glm::vec3(0.f, kContactSphereRadius - 0.005f,
+        -(kCapsuleRadius + kContactSphereRadius - 0.015f)));
     scene.world.physics().SetContactListener(&recorder);
     for (int tick = 0; tick < 2; ++tick)
         scene.world.step(kDt);

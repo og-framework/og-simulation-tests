@@ -41,7 +41,7 @@ namespace
         body.simulatableId = id;
         body.declarationIndex = declaration;
         body.hasRotation = hasRotation ? uint8_t{ 1 } : uint8_t{ 0 };
-        body.positionCm = position;
+        body.position = position;
         body.rotation = rotation;
         return body;
     }
@@ -59,8 +59,8 @@ namespace
         std::sort(snapshot.bodies.begin(), snapshot.bodies.begin() + snapshot.bodyCount, &renderSnapshotDetail::keyLess);
     }
 
-    Correction oneBodyCorrection(uint64_t step, glm::dvec3 errorCm, glm::dquat errorRotation = glm::dquat(1.0, 0.0, 0.0, 0.0),
-        float speedCmPerSecond = 0.f, uint32_t id = 1u, uint8_t declaration = 0u, bool hasRotation = false)
+    Correction oneBodyCorrection(uint64_t step, glm::dvec3 errorPosition, glm::dquat errorRotation = glm::dquat(1.0, 0.0, 0.0, 0.0),
+        float speed = 0.f, uint32_t id = 1u, uint8_t declaration = 0u, bool hasRotation = false)
     {
         Correction correction;
         correction.physicsStep = step;
@@ -69,8 +69,8 @@ namespace
         body.simulatableId = id;
         body.declarationIndex = declaration;
         body.hasRotation = hasRotation ? uint8_t{ 1 } : uint8_t{ 0 };
-        body.speedCmPerSecond = speedCmPerSecond;
-        body.errorCm = errorCm;
+        body.speed = speed;
+        body.errorPosition = errorPosition;
         body.errorRotation = errorRotation;
         return correction;
     }
@@ -206,13 +206,13 @@ namespace
             SimTicks = 0;
         }
 
-        static int32_t DurationTicks(const RenderCorrectionBody& Error, float ErrorCorrectionDuration, float MaxErrorCorrectionCm,
+        static int32_t DurationTicks(const RenderCorrectionBody& Error, float ErrorCorrectionDuration, float MaxErrorCorrectionDistance,
             float MaxErrorDesyncTime, float AsyncFixedTimeStep)
         {
-            const double ErrorDistanceSqr = glm::dot(Error.errorCm, Error.errorCm);
-            const double MaxErrorCorrection = static_cast<double>(MaxErrorCorrectionCm) * static_cast<double>(MaxErrorCorrectionCm);
-            const double DesyncCm = static_cast<double>(Error.speedCmPerSecond) * static_cast<double>(MaxErrorDesyncTime);
-            const bool VelocityWithinLimit = MaxErrorDesyncTime > 0.f && ErrorDistanceSqr < DesyncCm * DesyncCm;
+            const double ErrorDistanceSqr = glm::dot(Error.errorPosition, Error.errorPosition);
+            const double MaxErrorCorrection = static_cast<double>(MaxErrorCorrectionDistance) * static_cast<double>(MaxErrorCorrectionDistance);
+            const double DesyncDistance = static_cast<double>(Error.speed) * static_cast<double>(MaxErrorDesyncTime);
+            const bool VelocityWithinLimit = MaxErrorDesyncTime > 0.f && ErrorDistanceSqr < DesyncDistance * DesyncDistance;
             if (ErrorDistanceSqr < MaxErrorCorrection || VelocityWithinLimit)
             {
                 return static_cast<int32_t>(std::floor(static_cast<double>(ErrorCorrectionDuration) / static_cast<double>(AsyncFixedTimeStep)));
@@ -296,15 +296,15 @@ namespace
 
 TEST_CASE("RenderCorrection.Capture.ErrorIsShownMinusCorrectedWithTheRotationInTheCorrectedBodysFrame", "[RenderInterpolation]")
 {
-    const glm::quat shownRotation = glm::angleAxis(0.4f, glm::normalize(glm::vec3(0.f, 0.f, 1.f)));
-    const glm::quat correctedRotation = glm::angleAxis(0.1f, glm::normalize(glm::vec3(0.f, 0.f, 1.f)));
+    const glm::quat shownRotation = glm::angleAxis(0.4f, glm::normalize(glm::vec3(-0.f, -1.f, 0.f)));
+    const glm::quat correctedRotation = glm::angleAxis(0.1f, glm::normalize(glm::vec3(-0.f, -1.f, 0.f)));
 
     Snapshot shown;
-    fillSnapshot(shown, 41u, { makeBody(1u, 0u, false, glm::vec3(100.f, 20.f, 112.f)),
-        makeBody(1u, 1u, true, glm::vec3(5.f, 5.f, 5.f), shownRotation) });
+    fillSnapshot(shown, 41u, { makeBody(1u, 0u, false, glm::vec3(0.2f, 1.12f, -1.f)),
+        makeBody(1u, 1u, true, glm::vec3(0.05f, 0.05f, -0.05f), shownRotation) });
     Snapshot corrected;
-    fillSnapshot(corrected, 41u, { makeBody(1u, 0u, false, glm::vec3(97.f, 20.f, 112.5f)),
-        makeBody(1u, 1u, true, glm::vec3(5.f, 5.f, 5.f), correctedRotation) });
+    fillSnapshot(corrected, 41u, { makeBody(1u, 0u, false, glm::vec3(0.2f, 1.125f, -0.97f)),
+        makeBody(1u, 1u, true, glm::vec3(0.05f, 0.05f, -0.05f), correctedRotation) });
 
     Correction correction;
     REQUIRE(captureRenderCorrection(shown, corrected, 42u, correction) == 2u);
@@ -315,9 +315,9 @@ TEST_CASE("RenderCorrection.Capture.ErrorIsShownMinusCorrectedWithTheRotationInT
     CHECK(root.simulatableId == 1u);
     CHECK(root.declarationIndex == 0u);
     CHECK(root.hasRotation == 0u);
-    CHECK(root.errorCm.x == Catch::Approx(3.0));
-    CHECK(root.errorCm.y == Catch::Approx(0.0));
-    CHECK(root.errorCm.z == Catch::Approx(-0.5));
+    CHECK(root.errorPosition.z == Catch::Approx(-0.03));
+    CHECK(root.errorPosition.x == Catch::Approx(0.0));
+    CHECK(root.errorPosition.y == Catch::Approx(-0.005));
     CHECK(sameBits(root.errorRotation, glm::dquat(1.0, 0.0, 0.0, 0.0)));
 
     const RenderCorrectionBody& turned = correction.bodies[1];
@@ -331,12 +331,12 @@ TEST_CASE("RenderCorrection.Capture.ErrorIsShownMinusCorrectedWithTheRotationInT
 
 TEST_CASE("RenderCorrection.Capture.ChaosThresholdsATenthOfACentimetrePerAxisOrTwoHundredthsOfAQuaternionComponent", "[RenderInterpolation]")
 {
-    const glm::vec3 base(10.f, 10.f, 10.f);
+    const glm::vec3 base = glm::vec3(0.1f, 0.1f, -0.1f);
     Snapshot shown;
-    fillSnapshot(shown, 7u, { makeBody(1u, 0u, false, base + glm::vec3(0.0625f, -0.0625f, 0.f)),
-        makeBody(2u, 0u, false, base + glm::vec3(0.f, 0.f, 0.125f)),
-        makeBody(3u, 0u, true, base, glm::angleAxis(0.039f, glm::vec3(1.f, 0.f, 0.f))),
-        makeBody(4u, 0u, true, base, glm::angleAxis(0.041f, glm::vec3(1.f, 0.f, 0.f))) });
+    fillSnapshot(shown, 7u, { makeBody(1u, 0u, false, base + glm::vec3(-0.000625f, 0.f, -0.000625f)),
+        makeBody(2u, 0u, false, base + glm::vec3(0.f, 0.00125f, -0.f)),
+        makeBody(3u, 0u, true, base, glm::angleAxis(0.039f, glm::vec3(-0.f, -0.f, 1.f))),
+        makeBody(4u, 0u, true, base, glm::angleAxis(0.041f, glm::vec3(-0.f, -0.f, 1.f))) });
     Snapshot corrected;
     fillSnapshot(corrected, 7u, { makeBody(1u, 0u, false, base), makeBody(2u, 0u, false, base),
         makeBody(3u, 0u, true, base, kIdentity), makeBody(4u, 0u, true, base, kIdentity) });
@@ -344,33 +344,35 @@ TEST_CASE("RenderCorrection.Capture.ChaosThresholdsATenthOfACentimetrePerAxisOrT
     Correction correction;
     REQUIRE(captureRenderCorrection(shown, corrected, 8u, correction) == 2u);
     CHECK(correction.bodies[0].simulatableId == 2u);
-    CHECK(correction.bodies[0].errorCm.z == Catch::Approx(0.125));
+    CHECK(correction.bodies[0].errorPosition.y == Catch::Approx(0.00125));
     CHECK(correction.bodies[1].simulatableId == 4u);
-    CHECK(correction.bodies[1].errorRotation.x > kRenderCorrectionMinRotationError);
+    CHECK(glm::quat(correction.bodies[1].errorRotation).z > kRenderCorrectionMinRotationError);
 }
 
 TEST_CASE("RenderCorrection.Capture.ABodyInOnlyOneOfTheTwoSnapshotsCarriesNoError", "[RenderInterpolation]")
 {
     Snapshot shown;
-    fillSnapshot(shown, 3u, { makeBody(1u, 0u, false, glm::vec3(50.f)), makeBody(2u, 0u, false, glm::vec3(50.f)) });
+    fillSnapshot(shown, 3u, { makeBody(1u, 0u, false, glm::vec3(0.5f, 0.5f, -0.5f)),
+        makeBody(2u, 0u, false, glm::vec3(0.5f, 0.5f, -0.5f)) });
     Snapshot corrected;
-    fillSnapshot(corrected, 3u, { makeBody(2u, 0u, false, glm::vec3(40.f)), makeBody(3u, 0u, false, glm::vec3(0.f)) });
+    fillSnapshot(corrected, 3u, { makeBody(2u, 0u, false, glm::vec3(0.4f, 0.4f, -0.4f)),
+        makeBody(3u, 0u, false, glm::vec3(0.f)) });
 
     Correction correction;
     REQUIRE(captureRenderCorrection(shown, corrected, 4u, correction) == 1u);
     CHECK(correction.bodies[0].simulatableId == 2u);
-    CHECK(correction.bodies[0].errorCm.x == Catch::Approx(10.0));
+    CHECK(correction.bodies[0].errorPosition.z == Catch::Approx(-0.1));
 }
 
 TEST_CASE("RenderCorrection.Speeds.RecordedFromTheStoragesLinearVelocityForTheCorrectedBodiesOnly", "[RenderInterpolation]")
 {
     SimulationObjectStorage<TwoBodySimulatable> storage;
     TwoBodySimulatable first;
-    first.allState.state.full.bodyState.linearVelocity = glm::vec3(300.f, 400.f, 0.f);
-    first.allState.state.linear.bodyState.linearVelocity = glm::vec3(0.f, 0.f, 7.f);
+    first.allState.state.full.bodyState.linearVelocity = glm::vec3(4.f, 0.f, -3.f);
+    first.allState.state.linear.bodyState.linearVelocity = glm::vec3(0.f, 0.07f, -0.f);
     TwoBodySimulatable second;
-    second.allState.state.full.bodyState.linearVelocity = glm::vec3(9.f, 0.f, 0.f);
-    second.allState.state.linear.bodyState.linearVelocity = glm::vec3(0.f, 12.f, 0.f);
+    second.allState.state.full.bodyState.linearVelocity = glm::vec3(0.f, 0.f, -0.09f);
+    second.allState.state.linear.bodyState.linearVelocity = glm::vec3(0.12f, 0.f, -0.f);
     storage.add(5u, std::move(first));
     storage.add(6u, std::move(second));
 
@@ -382,12 +384,12 @@ TEST_CASE("RenderCorrection.Speeds.RecordedFromTheStoragesLinearVelocityForTheCo
     correction.bodies[1].declarationIndex = 1u;
     correction.bodies[2].simulatableId = 6u;
     correction.bodies[2].declarationIndex = 0u;
-    correction.bodies[2].speedCmPerSecond = -1.f;
+    correction.bodies[2].speed = -1.f;
 
     recordRenderCorrectionSpeeds(correction, storage);
-    CHECK(correction.bodies[0].speedCmPerSecond == Catch::Approx(500.f));
-    CHECK(correction.bodies[1].speedCmPerSecond == Catch::Approx(12.f));
-    CHECK(correction.bodies[2].speedCmPerSecond == -1.f);
+    CHECK(correction.bodies[0].speed == Catch::Approx(5.f));
+    CHECK(correction.bodies[1].speed == Catch::Approx(0.12f));
+    CHECK(correction.bodies[2].speed == -1.f);
 }
 
 TEST_CASE("RenderCorrection.Duration.FloorOfTheSecondsOverTheStepConvertedAsChaosDoes", "[RenderInterpolation]")
@@ -403,7 +405,7 @@ TEST_CASE("RenderCorrection.Duration.FloorOfTheSecondsOverTheStepConvertedAsChao
 TEST_CASE("RenderCorrection.Decay.EveryStepMatchesChaossLinearDecayBitForBit", "[RenderInterpolation]")
 {
     std::mt19937 random(5701u);
-    std::uniform_real_distribution<double> errorComponent(-60.0, 60.0);
+    std::uniform_real_distribution<double> errorComponent(-0.6, 0.6);
     std::uniform_real_distribution<float> unit(0.f, 1.f);
     std::uniform_int_distribution<int> advance(-1, 3);
 
@@ -414,7 +416,7 @@ TEST_CASE("RenderCorrection.Decay.EveryStepMatchesChaossLinearDecayBitForBit", "
     {
         RenderCorrectionParams params = defaultParams();
         params.correctionSeconds = run % 8 == 0 ? 0.1f : 0.3f;
-        params.maxCorrectionCm = run % 5 == 0 ? 40.f : 250.f;
+        params.maxCorrection = run % 5 == 0 ? 0.4f : 2.5f;
         params.desyncSeconds = run % 3 == 0 ? -1.f : 0.6f;
 
         Smoother smoother;
@@ -429,27 +431,30 @@ TEST_CASE("RenderCorrection.Decay.EveryStepMatchesChaossLinearDecayBitForBit", "
             std::optional<RenderCorrectionBody> error;
             if (unit(random) < 0.06f)
             {
-                const glm::dvec3 errorCm(errorComponent(random), errorComponent(random), 0.25 * errorComponent(random));
-                const glm::dquat errorRotation = glm::normalize(glm::dquat(1.0, 0.02 * errorComponent(random) / 60.0,
-                    0.1 * errorComponent(random) / 60.0, 0.05 * errorComponent(random) / 60.0));
-                const Correction correction = oneBodyCorrection(nextStep, errorCm, errorRotation, 200.f * unit(random), 1u, 0u, true);
+                const glm::dvec3 forwardRightUp(errorComponent(random), errorComponent(random), 0.25 * errorComponent(random));
+                const glm::dvec3 errorPosition(forwardRightUp.y, forwardRightUp.z, -forwardRightUp.x);
+                const double componentRange = 0.6;
+                const glm::dquat errorRotation = glm::normalize(glm::dquat(1.0, 0.02 * errorComponent(random) / componentRange,
+                    0.1 * errorComponent(random) / componentRange, 0.05 * errorComponent(random) / componentRange));
+                const Correction correction = oneBodyCorrection(nextStep, errorPosition, errorRotation,
+                    2.f * unit(random), 1u, 0u, true);
                 REQUIRE(ring.tryPush(correction));
                 error = correction.bodies[0];
             }
 
             const float alpha = unit(random);
             const RenderInterpolationFrame frame = frameAt(nextStep, static_cast<double>(alpha));
-            const glm::quat poseRotation = glm::angleAxis(0.5f, glm::vec3(0.f, 1.f, 0.f));
-            Snapshot poses = posesWithOneBody(nextStep, glm::vec3(1000.f, -200.f, 112.f), true, poseRotation);
+            const glm::quat poseRotation = glm::angleAxis(0.5f, glm::vec3(-1.f, -0.f, 0.f));
+            Snapshot poses = posesWithOneBody(nextStep, glm::vec3(-2.f, 1.12f, -10.f), true, poseRotation);
             RenderCorrectionFrame summary;
             smoother.correctPoses(ring, frame, params, poses, summary);
 
             if (error.has_value())
             {
-                const int32_t ticks = ChaosErrorReference::DurationTicks(*error, params.correctionSeconds, params.maxCorrectionCm,
+                const int32_t ticks = ChaosErrorReference::DurationTicks(*error, params.correctionSeconds, params.maxCorrection,
                     params.desyncSeconds, params.stepSeconds);
                 snaps += ticks == 0 ? 1u : 0u;
-                reference.AccumlateErrorXR(error->errorCm, error->errorRotation, static_cast<int32_t>(nextStep), ticks);
+                reference.AccumlateErrorXR(error->errorPosition, error->errorRotation, static_cast<int32_t>(nextStep), ticks);
             }
             reference.UpdateError(static_cast<int32_t>(nextStep));
 
@@ -459,21 +464,21 @@ TEST_CASE("RenderCorrection.Decay.EveryStepMatchesChaossLinearDecayBitForBit", "
                 ++smoothingFrames;
                 REQUIRE(state != nullptr);
                 REQUIRE(state->isSmoothing());
-                REQUIRE(sameBits(state->errorCm, reference.ErrorX));
-                REQUIRE(sameBits(state->errorCmPrev, reference.ErrorXPrev));
+                REQUIRE(sameBits(state->errorPosition, reference.ErrorX));
+                REQUIRE(sameBits(state->errorPositionPrev, reference.ErrorXPrev));
                 REQUIRE(sameBits(state->errorRotation, reference.ErrorR));
                 REQUIRE(sameBits(state->errorRotationPrev, reference.ErrorRPrev));
-                REQUIRE(sameBits(smoother.appliedErrorCm(frame, 1u, 0u), reference.GetErrorX(alpha)));
+                REQUIRE(sameBits(smoother.appliedErrorPosition(frame, 1u, 0u), reference.GetErrorX(alpha)));
 
-                const glm::dvec3 expectedPosition = glm::dvec3(glm::vec3(1000.f, -200.f, 112.f)) + reference.GetErrorX(alpha);
-                REQUIRE(poses.bodies[0].positionCm == glm::vec3(expectedPosition));
+                const glm::dvec3 expectedPosition = glm::dvec3(glm::vec3(-2.f, 1.12f, -10.f)) + reference.GetErrorX(alpha);
+                REQUIRE(poses.bodies[0].position == glm::vec3(expectedPosition));
                 const glm::quat expectedRotation = glm::quat(glm::dquat(poseRotation) * reference.GetErrorR(alpha));
                 REQUIRE(poses.bodies[0].rotation == expectedRotation);
             }
             else
             {
                 REQUIRE((state == nullptr || !state->isSmoothing()));
-                REQUIRE(poses.bodies[0].positionCm == glm::vec3(1000.f, -200.f, 112.f));
+                REQUIRE(poses.bodies[0].position == glm::vec3(-2.f, 1.12f, -10.f));
                 REQUIRE(poses.bodies[0].rotation == poseRotation);
             }
             ++compared;
@@ -491,20 +496,20 @@ TEST_CASE("RenderCorrection.Decay.LinearToZeroOverTheDurationMinusOneSteps", "[R
 
     Smoother smoother;
     CorrectionRing ring;
-    REQUIRE(ring.tryPush(oneBodyCorrection(50u, glm::dvec3(16.0, 0.0, 0.0))));
+    REQUIRE(ring.tryPush(oneBodyCorrection(50u, glm::dvec3(0.0, 0.0, -0.16))));
 
     for (uint64_t step = 50u; step <= 67u; ++step)
     {
         Snapshot poses = posesWithOneBody(step);
         RenderCorrectionFrame summary;
         smoother.correctPoses(ring, frameAt(step, 1.0), params, poses, summary);
-        const double expected = step <= 65u ? 16.0 * static_cast<double>(65u - step) / 16.0 : 0.0;
-        CHECK(poses.bodies[0].positionCm.x == Catch::Approx(expected).margin(1e-4));
+        const double expected = step <= 65u ? 0.16 * static_cast<double>(65u - step) / 16.0 : 0.0;
+        CHECK(poses.bodies[0].position.z == Catch::Approx(-expected).margin(1e-6));
         if (step == 50u)
         {
             CHECK(summary.corrections == 1u);
             CHECK(summary.smoothedBodies == 1u);
-            CHECK(summary.maxErrorCm == Catch::Approx(16.0));
+            CHECK(summary.maxError == Catch::Approx(0.16));
         }
         if (step == 66u)
         {
@@ -530,37 +535,37 @@ TEST_CASE("RenderCorrection.Snap.AtOrAboveTheMaximumOrWithZeroSecondsTheWholeErr
     {
         Smoother smoother;
         CorrectionRing ring;
-        REQUIRE(ring.tryPush(oneBodyCorrection(10u, glm::dvec3(0.0, 250.0, 0.0))));
+        REQUIRE(ring.tryPush(oneBodyCorrection(10u, glm::dvec3(2.5, 0.0, 0.0))));
         Snapshot poses = posesWithOneBody(10u);
         RenderCorrectionFrame summary;
         smoother.correctPoses(ring, frameAt(10u, 0.0), params, poses, summary);
         CHECK(summary.snappedBodies == 1u);
         CHECK(summary.smoothedBodies == 0u);
-        CHECK(poses.bodies[0].positionCm == glm::vec3(0.f));
+        CHECK(poses.bodies[0].position == glm::vec3(0.f));
 
-        REQUIRE(ring.tryPush(oneBodyCorrection(11u, glm::dvec3(0.0, 249.99, 0.0))));
+        REQUIRE(ring.tryPush(oneBodyCorrection(11u, glm::dvec3(2.4999000000000002, 0.0, 0.0))));
         poses = posesWithOneBody(11u);
         smoother.correctPoses(ring, frameAt(11u, 0.0), params, poses, summary);
         CHECK(summary.smoothedBodies == 1u);
-        CHECK(poses.bodies[0].positionCm.y == Catch::Approx(249.99f));
+        CHECK(poses.bodies[0].position.x == Catch::Approx(2.4999f));
     }
 
     SECTION("a snap also drops the error still decaying from an earlier correction")
     {
         Smoother smoother;
         CorrectionRing ring;
-        REQUIRE(ring.tryPush(oneBodyCorrection(10u, glm::dvec3(30.0, 0.0, 0.0))));
+        REQUIRE(ring.tryPush(oneBodyCorrection(10u, glm::dvec3(0.0, 0.0, -0.3))));
         Snapshot poses = posesWithOneBody(10u);
         RenderCorrectionFrame summary;
         smoother.correctPoses(ring, frameAt(10u, 1.0), params, poses, summary);
-        REQUIRE(poses.bodies[0].positionCm.x > 20.f);
+        REQUIRE(poses.bodies[0].position.z < -0.2);
 
-        REQUIRE(ring.tryPush(oneBodyCorrection(12u, glm::dvec3(0.0, 0.0, 400.0))));
+        REQUIRE(ring.tryPush(oneBodyCorrection(12u, glm::dvec3(0.0, 4.0, 0.0))));
         poses = posesWithOneBody(12u);
         smoother.correctPoses(ring, frameAt(12u, 1.0), params, poses, summary);
         CHECK(summary.snappedBodies == 1u);
         CHECK(summary.active == 0u);
-        CHECK(poses.bodies[0].positionCm == glm::vec3(0.f));
+        CHECK(poses.bodies[0].position == glm::vec3(0.f));
     }
 
     SECTION("zero seconds snaps every correction: the pop")
@@ -568,13 +573,13 @@ TEST_CASE("RenderCorrection.Snap.AtOrAboveTheMaximumOrWithZeroSecondsTheWholeErr
         params.correctionSeconds = 0.f;
         Smoother smoother;
         CorrectionRing ring;
-        REQUIRE(ring.tryPush(oneBodyCorrection(10u, glm::dvec3(0.5, 0.0, 0.0))));
+        REQUIRE(ring.tryPush(oneBodyCorrection(10u, glm::dvec3(0.0, 0.0, -0.005))));
         Snapshot poses = posesWithOneBody(10u);
         RenderCorrectionFrame summary;
         smoother.correctPoses(ring, frameAt(10u, 0.0), params, poses, summary);
         CHECK(summary.corrections == 1u);
         CHECK(summary.snappedBodies == 1u);
-        CHECK(poses.bodies[0].positionCm == glm::vec3(0.f));
+        CHECK(poses.bodies[0].position == glm::vec3(0.f));
     }
 }
 
@@ -584,21 +589,24 @@ TEST_CASE("RenderCorrection.Snap.TheDesyncTimeTimesTheSpeedKeepsAFastBodySmoothi
     Smoother smoother;
     CorrectionRing ring;
 
-    REQUIRE(ring.tryPush(oneBodyCorrection(20u, glm::dvec3(299.0, 0.0, 0.0), glm::dquat(1.0, 0.0, 0.0, 0.0), 500.f)));
+    REQUIRE(ring.tryPush(oneBodyCorrection(20u, glm::dvec3(0.0, 0.0, -2.99), glm::dquat(1.0, 0.0, 0.0, 0.0),
+        5.f)));
     Snapshot poses = posesWithOneBody(20u);
     RenderCorrectionFrame summary;
     smoother.correctPoses(ring, frameAt(20u, 0.0), params, poses, summary);
     CHECK(summary.smoothedBodies == 1u);
 
     smoother.reset();
-    REQUIRE(ring.tryPush(oneBodyCorrection(21u, glm::dvec3(300.01, 0.0, 0.0), glm::dquat(1.0, 0.0, 0.0, 0.0), 500.f)));
+    REQUIRE(ring.tryPush(oneBodyCorrection(21u, glm::dvec3(0.0, 0.0, -3.0000999999999998), glm::dquat(1.0, 0.0, 0.0, 0.0),
+        5.f)));
     poses = posesWithOneBody(21u);
     smoother.correctPoses(ring, frameAt(21u, 0.0), params, poses, summary);
     CHECK(summary.snappedBodies == 1u);
 
     params.desyncSeconds = 0.f;
     smoother.reset();
-    REQUIRE(ring.tryPush(oneBodyCorrection(22u, glm::dvec3(299.0, 0.0, 0.0), glm::dquat(1.0, 0.0, 0.0, 0.0), 500.f)));
+    REQUIRE(ring.tryPush(oneBodyCorrection(22u, glm::dvec3(0.0, 0.0, -2.99), glm::dquat(1.0, 0.0, 0.0, 0.0),
+        5.f)));
     poses = posesWithOneBody(22u);
     smoother.correctPoses(ring, frameAt(22u, 0.0), params, poses, summary);
     CHECK(summary.snappedBodies == 1u);
@@ -611,7 +619,7 @@ TEST_CASE("RenderCorrection.Accumulate.ASecondCorrectionAddsToTheRemainingErrorA
     CorrectionRing ring;
     RenderCorrectionFrame summary;
 
-    REQUIRE(ring.tryPush(oneBodyCorrection(30u, glm::dvec3(16.0, 0.0, 0.0))));
+    REQUIRE(ring.tryPush(oneBodyCorrection(30u, glm::dvec3(0.0, 0.0, -0.16))));
     for (uint64_t step = 30u; step <= 37u; ++step)
     {
         Snapshot poses = posesWithOneBody(step);
@@ -619,25 +627,25 @@ TEST_CASE("RenderCorrection.Accumulate.ASecondCorrectionAddsToTheRemainingErrorA
     }
     const Smoother::BodyError* state = smoother.findError(1u, 0u);
     REQUIRE(state != nullptr);
-    const double remaining = state->errorCm.x;
-    CHECK(remaining == Catch::Approx(16.0 * 8.0 / 16.0).margin(1e-5));
+    const double remaining = -state->errorPosition.z;
+    CHECK(remaining == Catch::Approx(0.16 * 8.0 / 16.0).margin(1.0000000000000001e-7));
 
-    REQUIRE(ring.tryPush(oneBodyCorrection(38u, glm::dvec3(4.0, 0.0, 0.0))));
+    REQUIRE(ring.tryPush(oneBodyCorrection(38u, glm::dvec3(0.0, 0.0, -0.04))));
     Snapshot poses = posesWithOneBody(38u);
     smoother.correctPoses(ring, frameAt(38u, 0.0), params, poses, summary);
     state = smoother.findError(1u, 0u);
     REQUIRE(state != nullptr);
-    CHECK(state->errorCmPrev.x == Catch::Approx(remaining + 4.0));
-    CHECK(state->errorCm.x == Catch::Approx((remaining + 4.0) * 15.0 / 16.0));
+    CHECK(-state->errorPositionPrev.z == Catch::Approx(remaining + 0.04));
+    CHECK(-state->errorPosition.z == Catch::Approx((remaining + 0.04) * 15.0 / 16.0));
     CHECK(state->endDecayStep == 38 - 1 + 17);
 }
 
 TEST_CASE("RenderCorrection.Straddle.TheRenderedPathStaysContinuousAcrossTheCorrectedStepAndMatchesChaossCorrectedPrev", "[RenderInterpolation]")
 {
-    const glm::vec3 errorCm(-30.f, 12.f, 0.f);
+    const glm::vec3 errorPosition = glm::vec3(0.12f, 0.f, 0.3f);
     const uint64_t correctedStep = 40u;
-    auto oldTimeline = [](uint64_t step) { return glm::vec3(5.f * static_cast<float>(step), 0.f, 112.f); };
-    auto newTimeline = [&](uint64_t step) { return oldTimeline(step) - errorCm; };
+    auto oldTimeline = [](uint64_t step) { return glm::vec3(0.f, 1.12f, -(0.05f * static_cast<float>(step))); };
+    auto newTimeline = [&](uint64_t step) { return oldTimeline(step) - errorPosition; };
 
     auto renderRun = [&](float correctionSeconds, std::vector<glm::vec3>& rendered, std::vector<double>& maxChaosGap)
     {
@@ -680,15 +688,15 @@ TEST_CASE("RenderCorrection.Straddle.TheRenderedPathStaysContinuousAcrossTheCorr
             REQUIRE(interpolateRenderPoses(channel, interpolation, poses, frame));
             RenderCorrectionFrame summary;
             smoother.correctPoses(ring, frame, params, poses, summary);
-            rendered.push_back(poses.bodies[0].positionCm);
+            rendered.push_back(poses.bodies[0].position);
 
             if (correctionSeconds > 0.f && frame.hasPrev && frame.prevStep + 1u == correctedStep)
             {
                 const float alpha = static_cast<float>(frame.alpha);
                 const glm::vec3 chaosPrev = newTimeline(frame.prevStep);
                 const glm::vec3 chaosPose = chaosPrev + (newTimeline(frame.nextStep) - chaosPrev) * alpha;
-                const glm::vec3 chaosError = glm::vec3(errorCm) + (glm::vec3(errorCm) * (15.f / 16.f) - glm::vec3(errorCm)) * alpha;
-                chaosGap = std::max(chaosGap, static_cast<double>(glm::distance(chaosPose + chaosError, poses.bodies[0].positionCm)));
+                const glm::vec3 chaosError = glm::vec3(errorPosition) + (glm::vec3(errorPosition) * (15.f / 16.f) - glm::vec3(errorPosition)) * alpha;
+                chaosGap = std::max(chaosGap, static_cast<double>(glm::distance(chaosPose + chaosError, poses.bodies[0].position)));
                 ++straddleFrames;
             }
             CHECK(summary.late == 0u);
@@ -703,7 +711,7 @@ TEST_CASE("RenderCorrection.Straddle.TheRenderedPathStaysContinuousAcrossTheCorr
         for (size_t index = 1; index < rendered.size(); ++index)
         {
             const glm::vec3 motion = rendered[index] - rendered[index - 1];
-            maxExtra = std::max(maxExtra, static_cast<double>(glm::length(motion - glm::vec3(3.f, 0.f, 0.f))));
+            maxExtra = std::max(maxExtra, static_cast<double>(glm::length(motion - glm::vec3(0.f, 0.f, -0.03f))));
         }
         return maxExtra;
     };
@@ -717,10 +725,10 @@ TEST_CASE("RenderCorrection.Straddle.TheRenderedPathStaysContinuousAcrossTheCorr
     const double smoothedJump = maxJumpAgainstMotion(smoothed);
     const double poppedJump = maxJumpAgainstMotion(popped);
     INFO("smoothed " << smoothedJump << " popped " << poppedJump);
-    CHECK(smoothedJump < 0.1 * static_cast<double>(glm::length(errorCm)));
-    CHECK(poppedJump > 0.4 * static_cast<double>(glm::length(errorCm)));
-    CHECK(chaosGaps[0] < 1e-3);
-    CHECK(glm::distance(smoothed.back(), popped.back()) < 1e-3f);
+    CHECK(smoothedJump < 0.1 * static_cast<double>(glm::length(errorPosition)));
+    CHECK(poppedJump > 0.4 * static_cast<double>(glm::length(errorPosition)));
+    CHECK(chaosGaps[0] < 1e-5);
+    CHECK(glm::distance(smoothed.back(), popped.back()) < 1.0000001e-5f);
 }
 
 TEST_CASE("RenderCorrection.Pending.ACorrectionWaitsForTheBracketToReachItsStepAndALateOneIsCounted", "[RenderInterpolation]")
@@ -730,12 +738,12 @@ TEST_CASE("RenderCorrection.Pending.ACorrectionWaitsForTheBracketToReachItsStepA
     CorrectionRing ring;
     RenderCorrectionFrame summary;
 
-    REQUIRE(ring.tryPush(oneBodyCorrection(60u, glm::dvec3(8.0, 0.0, 0.0))));
+    REQUIRE(ring.tryPush(oneBodyCorrection(60u, glm::dvec3(0.0, 0.0, -0.08))));
     Snapshot poses = posesWithOneBody(58u);
     smoother.correctPoses(ring, frameAt(58u, 0.5, 57u), params, poses, summary);
     CHECK(summary.corrections == 0u);
     CHECK(smoother.pendingCount() == 1u);
-    CHECK(poses.bodies[0].positionCm == glm::vec3(0.f));
+    CHECK(poses.bodies[0].position == glm::vec3(0.f));
 
     poses = posesWithOneBody(59u);
     smoother.correctPoses(ring, frameAt(59u, 0.5, 58u), params, poses, summary);
@@ -746,9 +754,10 @@ TEST_CASE("RenderCorrection.Pending.ACorrectionWaitsForTheBracketToReachItsStepA
     CHECK(summary.corrections == 1u);
     CHECK(summary.late == 0u);
     CHECK(smoother.pendingCount() == 0u);
-    CHECK(poses.bodies[0].positionCm.x == Catch::Approx(0.5 * 8.0 * 15.0 / 16.0).margin(1e-5));
+    CHECK(poses.bodies[0].position.z
+        == Catch::Approx(-(0.5 * 0.08 * 15.0 / 16.0)).margin(1.0000000000000001e-7));
 
-    REQUIRE(ring.tryPush(oneBodyCorrection(60u, glm::dvec3(1.0, 0.0, 0.0))));
+    REQUIRE(ring.tryPush(oneBodyCorrection(60u, glm::dvec3(0.0, 0.0, -0.01))));
     poses = posesWithOneBody(61u);
     smoother.correctPoses(ring, frameAt(61u, 0.5, 60u), params, poses, summary);
     CHECK(summary.late == 1u);
@@ -757,16 +766,16 @@ TEST_CASE("RenderCorrection.Pending.ACorrectionWaitsForTheBracketToReachItsStepA
 
 TEST_CASE("RenderCorrection.Pose.AtTheCorrectionTheRenderedPoseIsTheShownOneAndARotationlessBodyKeepsItsRotation", "[RenderInterpolation]")
 {
-    const glm::quat shownRotation = glm::angleAxis(0.7f, glm::normalize(glm::vec3(1.f, 2.f, 0.5f)));
-    const glm::quat correctedRotation = glm::angleAxis(0.5f, glm::normalize(glm::vec3(1.f, 2.f, 0.4f)));
-    const glm::vec3 shownPosition(400.f, -30.f, 120.f);
-    const glm::vec3 correctedPosition(385.f, -26.f, 118.f);
+    const glm::quat shownRotation = glm::angleAxis(0.7f, glm::normalize(glm::vec3(-2.f, -0.5f, 1.f)));
+    const glm::quat correctedRotation = glm::angleAxis(0.5f, glm::normalize(glm::vec3(-2.f, -0.4f, 1.f)));
+    const glm::vec3 shownPosition = glm::vec3(-0.3f, 1.2f, -4.f);
+    const glm::vec3 correctedPosition = glm::vec3(-0.26f, 1.18f, -3.85f);
 
     Snapshot shown;
     fillSnapshot(shown, 70u, { makeBody(1u, 0u, true, shownPosition, shownRotation), makeBody(1u, 1u, false, shownPosition) });
     Snapshot corrected;
     fillSnapshot(corrected, 70u, { makeBody(1u, 0u, true, correctedPosition, correctedRotation),
-        makeBody(1u, 1u, false, correctedPosition, glm::angleAxis(1.f, glm::vec3(0.f, 0.f, 1.f))) });
+        makeBody(1u, 1u, false, correctedPosition, glm::angleAxis(1.f, glm::vec3(-0.f, -1.f, 0.f))) });
     Correction correction;
     REQUIRE(captureRenderCorrection(shown, corrected, 71u, correction) == 2u);
 
@@ -778,9 +787,9 @@ TEST_CASE("RenderCorrection.Pose.AtTheCorrectionTheRenderedPoseIsTheShownOneAndA
     RenderCorrectionFrame summary;
     smoother.correctPoses(ring, frameAt(71u, 0.0), defaultParams(), poses, summary);
 
-    CHECK(glm::distance(poses.bodies[0].positionCm, shownPosition) < 1e-4f);
+    CHECK(glm::distance(poses.bodies[0].position, shownPosition) < 1e-6f);
     CHECK(std::abs(glm::dot(poses.bodies[0].rotation, shownRotation)) == Catch::Approx(1.f).margin(1e-6f));
-    CHECK(glm::distance(poses.bodies[1].positionCm, shownPosition) < 1e-4f);
+    CHECK(glm::distance(poses.bodies[1].position, shownPosition) < 1e-6f);
     CHECK(poses.bodies[1].rotation == corrected.bodies[1].rotation);
 }
 
@@ -791,8 +800,8 @@ TEST_CASE("RenderCorrection.Lifetime.AnErrorIsReleasedWhenItsBodyLeavesThePoseSe
     CorrectionRing ring;
     RenderCorrectionFrame summary;
 
-    REQUIRE(ring.tryPush(oneBodyCorrection(80u, glm::dvec3(10.0, 0.0, 0.0))));
-    REQUIRE(ring.tryPush(oneBodyCorrection(80u, glm::dvec3(10.0, 0.0, 0.0), glm::dquat(1.0, 0.0, 0.0, 0.0), 0.f, 9u)));
+    REQUIRE(ring.tryPush(oneBodyCorrection(80u, glm::dvec3(0.0, 0.0, -0.1))));
+    REQUIRE(ring.tryPush(oneBodyCorrection(80u, glm::dvec3(0.0, 0.0, -0.1), glm::dquat(1.0, 0.0, 0.0, 0.0), 0.f, 9u)));
     Snapshot poses = posesWithOneBody(80u);
     smoother.correctPoses(ring, frameAt(80u, 0.0), params, poses, summary);
     CHECK(smoother.findError(1u, 0u) != nullptr);
@@ -805,7 +814,7 @@ TEST_CASE("RenderCorrection.Lifetime.AnErrorIsReleasedWhenItsBodyLeavesThePoseSe
 
     poses = posesWithOneBody(82u);
     smoother.correctPoses(ring, frameAt(82u, 0.0), params, poses, summary);
-    CHECK(poses.bodies[0].positionCm == glm::vec3(0.f));
+    CHECK(poses.bodies[0].position == glm::vec3(0.f));
 }
 
 TEST_CASE("RenderCorrection.NoAllocation.TheCorrectionTheSmootherAndItsFrameAreFlatValues", "[RenderInterpolation]")

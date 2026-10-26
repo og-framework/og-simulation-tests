@@ -70,7 +70,7 @@ namespace
         config.simulatableSlots = 1;
         config.slotTemplate = { capsuleTemplate(capsuleIn, capsuleWith, 0) };
         config.staticLayers = { staticKey };
-        config.parkingPositionCm = glm::vec3(0.f, 0.f, 90.f);
+        config.parkingPosition = glm::vec3(0.f, 0.9f, -0.f);
         config.tempAllocatorBytes = 4u << 20;
         JoltWorld world(lease.runtime, config, nullptr);
         addFloor(world, staticKey);
@@ -223,9 +223,9 @@ TEST_CASE("JoltLayerTable.AllocatesDeterministicallyAndIncludesParked", "[Jolt]"
 TEST_CASE("JoltLayerTable.StaticKeysComeFromTheStaticDescription", "[Jolt]")
 {
     StaticWorldDescription description;
-    description.shapes.push_back(StaticShapeDescriptor{ StaticBox{ glm::vec3(100.f) }, glm::mat4(1.f), CollisionCategories{ bit(kWorld) }, CollisionCategories{ kAllMappedCategories } });
-    description.shapes.push_back(StaticShapeDescriptor{ StaticSphere{ 50.f }, glm::mat4(1.f), CollisionCategories{ bit(kWorld) }, CollisionCategories{ kAllMappedCategories } });
-    description.shapes.push_back(StaticShapeDescriptor{ StaticSphere{ 50.f }, glm::mat4(1.f), CollisionCategories{ bit(kWorld) }, CollisionCategories{ bit(kCharacter) } });
+    description.shapes.push_back(StaticShapeDescriptor{ StaticBox{ glm::vec3(1.f, 1.f, 1.f) }, glm::mat4(1.f), CollisionCategories{ bit(kWorld) }, CollisionCategories{ kAllMappedCategories } });
+    description.shapes.push_back(StaticShapeDescriptor{ StaticSphere{ 0.5f }, glm::mat4(1.f), CollisionCategories{ bit(kWorld) }, CollisionCategories{ kAllMappedCategories } });
+    description.shapes.push_back(StaticShapeDescriptor{ StaticSphere{ 0.5f }, glm::mat4(1.f), CollisionCategories{ bit(kWorld) }, CollisionCategories{ bit(kCharacter) } });
 
     const std::vector<JoltLayerKey> keys = staticLayerKeysOf(description);
     REQUIRE(keys.size() == 3u);
