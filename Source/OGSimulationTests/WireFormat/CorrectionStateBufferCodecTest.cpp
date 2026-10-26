@@ -6,7 +6,6 @@
 #include "OGSimulation/CorrectionStateBufferCodec.h"
 #include "OGSimulation/SimulationComposite.h"
 #include "OGSimulation/SimulationFieldDescriptors.h"
-#include "OGSimulation/SimulationFrame.h"
 
 #include <cstdint>
 #include <cstring>
@@ -41,11 +40,14 @@
 //     input, no client capture stands behind this tick") round-trips as itself
 //     and is distinguishable from every real capture tick, INCLUDING tick 0,
 //     which is an ordinary session-start capture;
-//   * the version fence is at 5 — the SINGLE fence of the increment.
+//   * the version fence is at 8 — the SINGLE fence of the increment.
 //     History: 1 -> 2 by this task; 2 -> 3 by og-brawler-ringout-gamemode task 2,
 //     when a whole sub-simulation joined the state composite; 3 -> 4 and 4 -> 5 by
 //     og-netcode-v2-field-defects tasks 9 and 17 (fields removed mid-composite;
-//     task 9 left this line at 3, fixed by task 17). ⚠ THIS BANNER IS A
+//     task 9 left this line at 3, fixed by task 17); 5 -> 6 by that initiative's
+//     task 27 (this line was left at 5 until og-sim-metres-yup task 24); 6 -> 7
+//     and 7 -> 8 by og-sim-metres-yup's two flips (the same layout in metres, then
+//     in the right-handed Y-up frame). ⚠ THIS BANNER IS A
 //     PRESENT-TENSE VALUE CLAIM, so it goes stale on every bump — unlike the
 //     conditional "bump if anything before it moved" wording elsewhere, which does
 //     not. It was missed by that task's own tree-wide sweep because the sweep did
@@ -217,7 +219,7 @@ TEST_CASE("CorrectionStateBuffer.RealCaptureTickZeroIsNotTheSentinel",
 // ---------------------------------------------------------------------------
 // Layout + fence. Both halves are wire contracts a future edit must not move
 // silently: the ref sits between the tick and the composite, and the version
-// fence is at 5.
+// fence is at 8.
 // ---------------------------------------------------------------------------
 TEST_CASE("CorrectionStateBuffer.LayoutAndVersionFence",
           "[WireFormat][CorrectionStateRef]")
@@ -255,9 +257,12 @@ TEST_CASE("CorrectionStateBuffer.LayoutAndVersionFence",
     // brawler radial InitialConditions' dead `activeRootBodyId` (4 B) was REMOVED from the
     // composite's first slice, and the radial State gained its 3 B synced hit ledger. Seen RED
     // on the edit (`6 == 5`). No `!= 5u`, for task 17's reason above.
-    REQUIRE(correctionStateBuffer::kLegacyFrameWireFormatVersion == 6u);
-    REQUIRE(correctionStateBuffer::kWireFormatVersion
-        == correctionStateBuffer::wireFormatVersionFor(kAxisFrame, kUnitsPerMetre));
+    //
+    // [og-sim-metres-yup] 6 -> 7 at flip U (every length in metres) and 7 -> 8 at flip X (the
+    // right-handed Y-up frame): the layout did not move, but every value a 6 peer decodes would be
+    // in the wrong unit or axes. Task 15 derived the version from the two frame knobs; task 24
+    // deleted the knobs and froze it at 8. No `!= 6u` or `!= 7u`, for task 17's reason above.
+    REQUIRE(correctionStateBuffer::kWireFormatVersion == 8u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 3u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 2u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 1u);

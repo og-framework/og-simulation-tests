@@ -1115,10 +1115,10 @@ namespace joltSuite
     {
         char line[512];
         std::snprintf(line, sizeof(line),
-            "pushes=%llu declarations=%llu exact=%llu mismatches=%llu movedByPush=%llu maxPosErr%s=%.3g maxVelErr%sPerS=%.3g maxRotErr=%.3g maxAngVelErr=%.3g",
+            "pushes=%llu declarations=%llu exact=%llu mismatches=%llu movedByPush=%llu maxPosErrM=%.3g maxVelErrMPerS=%.3g maxRotErr=%.3g maxAngVelErr=%.3g",
             (unsigned long long)check.pushes, (unsigned long long)check.declarationsChecked, (unsigned long long)check.declarationsExact,
-            (unsigned long long)check.mismatches, (unsigned long long)check.declarationsMovedByPush, simFrame::kLengthFieldSuffix,
-            double(check.maxPositionError), simFrame::kLengthFieldSuffix, double(check.maxVelocityError),
+            (unsigned long long)check.mismatches, (unsigned long long)check.declarationsMovedByPush,
+            double(check.maxPositionError), double(check.maxVelocityError),
             double(check.maxRotationError), double(check.maxAngularVelocityError));
         return line;
     }

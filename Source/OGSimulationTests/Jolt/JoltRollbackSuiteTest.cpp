@@ -357,10 +357,10 @@ TEST_CASE("JoltSuite.AlwaysResimsReproduceTheUnreplayedRunByteForByte", "[Jolt]"
     REQUIRE(withPush.firstDifferingTick == -1);
     REQUIRE(withPush.movedByPush == 0u);
     REQUIRE(withPush.maxCapsuleDifference == 0.f);
-    std::printf("[JoltSuite] push fidelity, always depth 8 vs an unreplayed run over 300 ticks: without push firstDiff=%d maxCapsuleDiff%s=%g; "
-                "with push firstDiff=%d maxCapsuleDiff%s=%g movedByPush=%llu\n",
-        withoutPush.firstDifferingTick, simFrame::kLengthFieldSuffix, double(withoutPush.maxCapsuleDifference), withPush.firstDifferingTick,
-        simFrame::kLengthFieldSuffix, double(withPush.maxCapsuleDifference), (unsigned long long)withPush.movedByPush);
+    std::printf("[JoltSuite] push fidelity, always depth 8 vs an unreplayed run over 300 ticks: without push firstDiff=%d maxCapsuleDiffM=%g; "
+                "with push firstDiff=%d maxCapsuleDiffM=%g movedByPush=%llu\n",
+        withoutPush.firstDifferingTick, double(withoutPush.maxCapsuleDifference), withPush.firstDifferingTick,
+        double(withPush.maxCapsuleDifference), (unsigned long long)withPush.movedByPush);
 }
 
 TEST_CASE("JoltSuite.Finding.AResimWithoutACorrectionReproducesTheUnreplayedRun", "[Jolt]")
@@ -376,20 +376,6 @@ namespace
     constexpr float kOffsetCentreOfMassMetres = 0.25f;
     constexpr uint32_t kSeamWriteSamples = 1000;
     constexpr uint32_t kSeamWriteSeed = 59;
-
-    constexpr const char* kSeamWriteTripwireExplanation =
-        "TRIPWIRE: this test is EXPECTED to fail one day, and that failure is the signal, not a bug.\n"
-        "Today the simulations work in centimetres and Jolt works in metres. Writing a body state into Jolt (cm -> m, plus Jolt's "
-        "centre-of-mass offset) does not give back the same bits.\n"
-        "Because of that, SimulationIntegrationExecutor::pushCorrectedBodyStatesAll compares each body with the restored Jolt snapshot "
-        "and skips the write when they are equal (the restore skip). Without it, every resim would perturb bodies nobody corrected and "
-        "start disagreement storms.\n"
-        "The simulations are planned to move to metres, with Jolt's centre-of-mass convention. When that lands, the write is exact and "
-        "this test fails.\n"
-        "When it fails: remove the restore-skip comparison from pushCorrectedBodyStatesAll (keep setBodyPose), then delete this test. "
-        "To keep the skip on purpose instead, delete only this test and record why in og-simulation-jolt's docs/JoltPhysicsBodyAdapter-rationale.md "
-        "\xC2\xA7"
-        "9.";
 
     void offsetCentreOfMass(JoltWorld& world, JPH::BodyID body)
     {
@@ -429,108 +415,11 @@ namespace
             }
         }
 
-        uint32_t index(uint32_t count) { return uint32_t(m_engine() % count); }
-
     private:
         std::mt19937 m_engine;
     };
 
-    std::vector<PhysicsBodyState> lossySeamStates(uint32_t seed)
-    {
-        SeamRandom random(seed);
-        std::vector<PhysicsBodyState> states(kSeamWriteSamples);
-        for (PhysicsBodyState& state : states)
-        {
-            state.position = random.vector(1000.f) + glm::vec3(0.f, 0.f, 1000.f);
-            state.rotation = random.unitQuaternion();
-            state.linearVelocity = random.vector(1500.f);
-            state.angularVelocity = random.vector(10.f);
-        }
-        return states;
-    }
-
-    std::vector<PhysicsBodyState> exactSeamStates(uint32_t seed)
-    {
-        std::vector<float> exactValues;
-        for (int32_t step = 1; step <= 400; ++step)
-        {
-            for (const float value : { 25.f * float(step), -25.f * float(step) })
-                exactValues.push_back(value);
-        }
-        REQUIRE(exactValues.size() > 100u);
-        SeamRandom random(seed);
-        std::vector<PhysicsBodyState> states(kSeamWriteSamples);
-        for (PhysicsBodyState& state : states)
-        {
-            const uint32_t count = uint32_t(exactValues.size());
-            state.position = glm::vec3(exactValues[random.index(count)], exactValues[random.index(count)], exactValues[random.index(count)]);
-            state.rotation = random.unitQuaternion();
-        }
-        return states;
-    }
-
-    uint32_t seamWritesThatChangedBits(JoltPhysicsBodyAdapter& bodies, BodyId body, const std::vector<PhysicsBodyState>& states)
-    {
-        uint32_t changed = 0;
-        for (const PhysicsBodyState& written : states)
-        {
-            bodies.setBodyPose(body, written.position, written.rotation);
-            bodies.setBodyLinearVelocity(body, written.linearVelocity);
-            bodies.setBodyAngularVelocity(body, written.angularVelocity);
-            const PhysicsBodyState captured = bodies.captureBodyState(body);
-            if (std::memcmp(&captured, &written, sizeof(PhysicsBodyState)) != 0)
-                ++changed;
-        }
-        return changed;
-    }
-
-    void requireTheSeamWriteIsLossy(uint32_t lossyCount)
-    {
-        INFO(kSeamWriteTripwireExplanation);
-        REQUIRE(lossyCount > 0u);
-    }
-
-    struct TripwireBodies
-    {
-        explicit TripwireBodies(JoltRuntime& runtime)
-            : scene(runtime, SceneConfig{})
-            , offsetBody(scene.world.slotBodyId(0, kTemplateRadial))
-            , centredBody(scene.world.slotBodyId(0, kTemplateGuard))
-        {
-            offsetCentreOfMass(scene.world, offsetBody);
-        }
-
-        JoltScene scene;
-        JPH::BodyID offsetBody;
-        JPH::BodyID centredBody;
-    };
 } // namespace
-
-TEST_CASE("JoltSuite.Tripwire.TheSeamWriteIsLossyUntilTheSimulationsUseMetres", "[Jolt]")
-{
-    RuntimeLease lease;
-    TripwireBodies tripwire(lease.runtime);
-    REQUIRE(centreOfMassOffsetMetres(tripwire.scene.world, tripwire.offsetBody) == kOffsetCentreOfMassMetres);
-    REQUIRE(centreOfMassOffsetMetres(tripwire.scene.world, tripwire.centredBody) == 0.f);
-
-    const uint32_t lossyCount = seamWritesThatChangedBits(tripwire.scene.bodies, JoltPhysicsBodyAdapter::bodyIdOf(tripwire.offsetBody),
-        lossySeamStates(kSeamWriteSeed));
-    std::printf("[JoltSuite] tripwire: %u of 1000 seam writes changed bits (0 = remove the restore skip in pushCorrectedBodyStatesAll)\n", lossyCount);
-
-    const uint32_t exactCount = seamWritesThatChangedBits(tripwire.scene.bodies, JoltPhysicsBodyAdapter::bodyIdOf(tripwire.centredBody),
-        exactSeamStates(kSeamWriteSeed));
-    REQUIRE(exactCount == 0u);
-
-    requireTheSeamWriteIsLossy(lossyCount);
-}
-
-TEST_CASE("JoltSuite.Tripwire.Poison.ExactRoundTripsTripTheTripwire", "[.][JoltSuitePoison]")
-{
-    RuntimeLease lease;
-    TripwireBodies tripwire(lease.runtime);
-    requireTheSeamWriteIsLossy(seamWritesThatChangedBits(tripwire.scene.bodies, JoltPhysicsBodyAdapter::bodyIdOf(tripwire.centredBody),
-        exactSeamStates(kSeamWriteSeed)));
-}
 
 TEST_CASE("JoltSuite.SetBodyPoseWritesTheQuaternionBitForBitAndTheMatrixPathDoesNot", "[Jolt]")
 {
@@ -658,9 +547,9 @@ TEST_CASE("JoltSuite.AResimWithNoBodyCorrectionMidSwingReproducesTheUnreplayedRu
     RuntimeLease lease;
     const SwingFidelity fidelity = resimMidSwingAgainstUnreplayed(lease.runtime);
     std::printf("[JoltSuite] mid-swing resim vs an unreplayed run over %u ticks: granted=%llu firstDiff=%d differingTicks=%u movedByPush=%llu "
-                "anchorAngularSpeed=%g maxCapsuleSpeed%sPerS=%g\n",
+                "anchorAngularSpeed=%g maxCapsuleSpeedMPerS=%g\n",
         kSwingComparedTicks, (unsigned long long)fidelity.granted, fidelity.firstDifferingTick, fidelity.differingTicks,
-        (unsigned long long)fidelity.movedByPush, double(fidelity.anchorAngularSpeed), simFrame::kLengthFieldSuffix, double(fidelity.maxCapsuleSpeed));
+        (unsigned long long)fidelity.movedByPush, double(fidelity.anchorAngularSpeed), double(fidelity.maxCapsuleSpeed));
     REQUIRE(fidelity.granted == 1u);
     REQUIRE(fidelity.anchorAngularSpeed > 1.f);
     REQUIRE(fidelity.maxCapsuleSpeed > 0.1f);

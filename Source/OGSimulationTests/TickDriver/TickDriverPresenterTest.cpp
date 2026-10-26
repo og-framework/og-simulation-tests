@@ -508,7 +508,6 @@ namespace tickDriverPresenterTest
         double stepSeconds = 1.0 / 60.0;
         float parkSnap = 10.f;
         double wallClockOffset = 1000.0;
-        double lengthReportScale = 1.0;
         LegacyRenderCvars cvars;
     };
 
@@ -555,7 +554,6 @@ namespace tickDriverPresenterTest
             present.desyncSeconds = cvars.ErrorCorrectionDesyncSeconds;
             present.traceFrames = cvars.TraceFrames != 0;
             present.parkSnap = config.parkSnap;
-            present.lengthReportScale = config.lengthReportScale;
             return present;
         }
 
@@ -1206,7 +1204,7 @@ namespace tickDriverPresenterTest
             if (valueEnd == std::string::npos)
                 valueEnd = text.size();
             const std::string value = text.substr(equals + 1u, valueEnd - equals - 1u);
-            const std::string suffix = simFrame::kLengthFieldSuffix;
+            const std::string suffix = "M";
             if (name.size() > suffix.size() && name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0)
             {
                 std::stringstream parts(value);
@@ -1228,12 +1226,11 @@ namespace tickDriverPresenterTest
     }
 } // namespace tickDriverPresenterTest
 
-TEST_CASE("TickDriverPresenter.Units.LengthReportScaleMultipliesEveryCmFieldOnce", "[TickDriverPresenter]")
+TEST_CASE("TickDriverPresenter.Units.EveryLengthFieldIsNamedInMetres", "[TickDriverPresenter]")
 {
-    const auto runWithScale = [](double scale)
+    const auto run = []()
     {
         RigConfig config;
-        config.lengthReportScale = scale;
         config.cvars.TraceFrames = 1;
         auto rig = std::make_unique<DifferentialRig<FakeEngine>>(config);
         joinThreeOf(*rig);
@@ -1262,40 +1259,29 @@ TEST_CASE("TickDriverPresenter.Units.LengthReportScaleMultipliesEveryCmFieldOnce
         return rig;
     };
 
-    const auto unscaled = runWithScale(1.0);
-    const auto scaled = runWithScale(2.0);
-    INFO(unscaled->firstDiff);
-    REQUIRE(unscaled->firstDiff.empty());
+    const auto rig = run();
+    INFO(rig->firstDiff);
+    REQUIRE(rig->firstDiff.empty());
 
-    const std::vector<LoggedLine>& one = unscaled->presenterEngine.lines;
-    const std::vector<LoggedLine>& two = scaled->presenterEngine.lines;
-    REQUIRE(one.size() == two.size());
+    const std::vector<LoggedLine>& one = rig->presenterEngine.lines;
     uint32_t lengthFields = 0u;
     uint32_t nonZeroLengthFields = 0u;
     std::set<std::string> fieldsSeen;
     for (size_t index = 0u; index < one.size(); ++index)
     {
         const ParsedLine a = parseLengthFields(one[index].text);
-        const ParsedLine b = parseLengthFields(two[index].text);
         INFO(one[index].text);
-        INFO(two[index].text);
-        REQUIRE(a.skeleton == b.skeleton);
-        REQUIRE(a.lengths.size() == b.lengths.size());
         for (size_t field = 0u; field < a.lengths.size(); ++field)
         {
             ++lengthFields;
             nonZeroLengthFields += a.lengths[field] != 0.0 ? 1u : 0u;
             const size_t tagEnd = one[index].text.find_first_of(" =", one[index].text.find(']') + 2u);
             fieldsSeen.insert(one[index].text.substr(0u, tagEnd) + " " + a.names[field]);
-            const double expected = 2.0 * a.lengths[field];
-            CHECK(std::abs(b.lengths[field] - expected) <= 2e-5 + 1.0e-6 * std::abs(expected));
-            if (a.lengths[field] >= 0.0001)
-                CHECK(std::abs(b.lengths[field] / a.lengths[field] - 2.0) <= 0.1);
         }
     }
     CHECK(lengthFields > 15u);
     CHECK(nonZeroLengthFields > 10u);
-    const auto field = [](const char* lineAndName) { return std::string(lineAndName) + simFrame::kLengthFieldSuffix; };
+    const auto field = [](const char* lineAndName) { return std::string(lineAndName) + "M"; };
     CHECK(fieldsSeen == std::set<std::string>{
         field("[SimHost.RenderApply] role maxError"), field("[SimHost.RenderApply] role maxHeldDrift"),
         field("[SimHost.RenderApply] role path"), field("[SimHost.RenderApply] role disp"),
@@ -1340,12 +1326,11 @@ TEST_CASE("TickDriverPresenter.Kit.FakeRenderSinkReceivesTheRootPoses", "[TickDr
     CHECK_FALSE(sink.applies[0].rotation.has_value());
     CHECK(sink.targets.at(5u).position == rootPosition);
     REQUIRE(engine.lines.size() == 1u);
-    const int decimals = simFrame::lengthDecimals(3);
     char expected[256];
     std::snprintf(expected, sizeof(expected),
-        "[SimHost.RenderApply] first role=Authority id=5 from=(%.*f,%.*f,%.*f) to=(%.*f,%.*f,%.*f) physicsStep=1 tick=1",
-        decimals, 0.0, decimals, 0.0, decimals, 0.0, decimals, static_cast<double>(rootPosition.x), decimals,
-        static_cast<double>(rootPosition.y), decimals, static_cast<double>(rootPosition.z));
+        "[SimHost.RenderApply] first role=Authority id=5 from=(%.5f,%.5f,%.5f) to=(%.5f,%.5f,%.5f) physicsStep=1 tick=1",
+        0.0, 0.0, 0.0, static_cast<double>(rootPosition.x), static_cast<double>(rootPosition.y),
+        static_cast<double>(rootPosition.z));
     CHECK(engine.lines[0].text == expected);
 }
 

@@ -430,10 +430,10 @@ private:
         {
             ueLog(HostLogLevel::Log,
                 "[SimHost.RenderCorrection] event frame=%llu prev=%llu next=%llu alpha=%.4f corrections=%u smoothed=%u "
-                "snapped=%u maxError%s=%.*f durationSteps=%d policySnaps=%u rootFramed=%u",
+                "snapped=%u maxErrorM=%.6f durationSteps=%d policySnaps=%u rootFramed=%u",
                 static_cast<unsigned long long>(m_engine.frameNumber()), static_cast<unsigned long long>(m_renderFrame.prevStep),
                 static_cast<unsigned long long>(m_renderFrame.nextStep), m_renderFrame.alpha, corrected.corrections,
-                corrected.smoothedBodies, corrected.snappedBodies, simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(4),
+                corrected.smoothedBodies, corrected.snappedBodies,
                 corrected.maxError,
                 renderCorrectionDurationSteps(correction.correctionSeconds, correction.stepSeconds), corrected.policySnaps,
                 corrected.rootFramed);
@@ -482,12 +482,12 @@ private:
                 else
                 {
                     ueLog(HostLogLevel::Log,
-                        "[SimHost.RenderApply] first role=%s id=%u from=(%.*f,%.*f,%.*f) to=(%.*f,%.*f,%.*f) physicsStep=%llu tick=%u",
+                        "[SimHost.RenderApply] first role=%s id=%u from=(%.5f,%.5f,%.5f) to=(%.5f,%.5f,%.5f) physicsStep=%llu tick=%u",
                         m_runsPrediction ? "Client" : "Authority", id,
-                        simFrame::lengthDecimals(3), before.X, simFrame::lengthDecimals(3), before.Y,
-                        simFrame::lengthDecimals(3), before.Z,
-                        simFrame::lengthDecimals(3), location.X, simFrame::lengthDecimals(3), location.Y,
-                        simFrame::lengthDecimals(3), location.Z, static_cast<unsigned long long>(m_renderPoses.physicsStep),
+                        before.X, before.Y,
+                        before.Z,
+                        location.X, location.Y,
+                        location.Z, static_cast<unsigned long long>(m_renderPoses.physicsStep),
                         static_cast<uint32>(m_renderPoses.tick));
                 }
                 }
@@ -595,14 +595,14 @@ private:
                 if ((errorDistance > kShadowPoseTolerance || angleRad > kShadowPoseToleranceRad) && window.shadowOutOfTolerance++ == 0u)
                 {
                     ueLog(HostLogLevel::Warning,
-                        "[SimHost.RenderSync] SHADOW id=%u declaration=%u queried=(%.*f,%.*f,%.*f) rendered=(%.*f,%.*f,%.*f) "
-                        "error%s=%.*f angleRad=%.9f: the shadow world the visualizations query is not at the rendered pose",
+                        "[SimHost.RenderSync] SHADOW id=%u declaration=%u queried=(%.8f,%.8f,%.8f) rendered=(%.8f,%.8f,%.8f) "
+                        "errorM=%.11f angleRad=%.9f: the shadow world the visualizations query is not at the rendered pose",
                         id, declarationIndex,
-                        simFrame::lengthDecimals(6), queried[3].x, simFrame::lengthDecimals(6), queried[3].y,
-                        simFrame::lengthDecimals(6), queried[3].z,
-                        simFrame::lengthDecimals(6), pose->position.x, simFrame::lengthDecimals(6), pose->position.y,
-                        simFrame::lengthDecimals(6), pose->position.z,
-                        simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(9), errorDistance, angleRad);
+                        queried[3].x, queried[3].y,
+                        queried[3].z,
+                        pose->position.x, pose->position.y,
+                        pose->position.z,
+                        errorDistance, angleRad);
                 }
                 }
             }
@@ -624,14 +624,14 @@ private:
             if (driftLength > kRenderApplyTolerance && m_renderApplyWindow.moved++ == 0u)
             {
                 ueLog(HostLogLevel::Warning,
-                    "[SimHost.RenderApply] MOVED role=%s id=%u capsule=(%.*f,%.*f,%.*f) applied=(%.*f,%.*f,%.*f) drift%s=%.*f: "
+                    "[SimHost.RenderApply] MOVED role=%s id=%u capsule=(%.8f,%.8f,%.8f) applied=(%.8f,%.8f,%.8f) driftM=%.11f: "
                     "something moved the capsule between the last render apply and this one",
                     m_runsPrediction ? "Client" : "Authority", id,
-                    simFrame::lengthDecimals(6), planePoint.X, simFrame::lengthDecimals(6), planePoint.Y,
-                    simFrame::lengthDecimals(6), planePoint.Z,
-                    simFrame::lengthDecimals(6), target.appliedLocation.X, simFrame::lengthDecimals(6), target.appliedLocation.Y,
-                    simFrame::lengthDecimals(6), target.appliedLocation.Z,
-                    simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(9), driftLength);
+                    planePoint.X, planePoint.Y,
+                    planePoint.Z,
+                    target.appliedLocation.X, target.appliedLocation.Y,
+                    target.appliedLocation.Z,
+                    driftLength);
             }
         }
     }
@@ -669,12 +669,12 @@ private:
             if (!planePoint.Equals(pose, kRenderMatchTolerance) && window.outOfTolerance++ == 0u)
             {
                 ueLog(HostLogLevel::Warning,
-                    "[SimHost.RenderApply] MISMATCH role=%s id=%u capsule=(%.*f,%.*f,%.*f) rendered=(%.*f,%.*f,%.*f) error%s=%.*f physicsStep=%llu",
+                    "[SimHost.RenderApply] MISMATCH role=%s id=%u capsule=(%.8f,%.8f,%.8f) rendered=(%.8f,%.8f,%.8f) errorM=%.11f physicsStep=%llu",
                     m_runsPrediction ? "Client" : "Authority", id,
-                    simFrame::lengthDecimals(6), planePoint.X, simFrame::lengthDecimals(6), planePoint.Y,
-                    simFrame::lengthDecimals(6), planePoint.Z,
-                    simFrame::lengthDecimals(6), pose.X, simFrame::lengthDecimals(6), pose.Y, simFrame::lengthDecimals(6), pose.Z,
-                    simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(9), errorDistance,
+                    planePoint.X, planePoint.Y,
+                    planePoint.Z,
+                    pose.X, pose.Y, pose.Z,
+                    errorDistance,
                     static_cast<unsigned long long>(m_renderPoses.physicsStep));
             }
         }
@@ -693,19 +693,19 @@ private:
                 continue;
             const glm::dvec3 errorPosition = m_renderCorrectionSmoother.appliedErrorPosition(bracket, id, m_joltRootDeclarationIndex);
             ueLog(HostLogLevel::Log,
-                "[SimHost.RenderTrace] role=%s frame=%llu id=%u pos=(%.*f,%.*f,%.*f) nextPos=(%.*f,%.*f,%.*f) host=%.6f "
-                "render=%.6f mode=%s prev=%llu/%s next=%llu/%s back=%u alpha=%.4f newest=%llu err=(%.*f,%.*f,%.*f)",
+                "[SimHost.RenderTrace] role=%s frame=%llu id=%u pos=(%.6f,%.6f,%.6f) nextPos=(%.6f,%.6f,%.6f) host=%.6f "
+                "render=%.6f mode=%s prev=%llu/%s next=%llu/%s back=%u alpha=%.4f newest=%llu err=(%.6f,%.6f,%.6f)",
                 m_runsPrediction ? "Client" : "Authority", static_cast<unsigned long long>(m_engine.frameNumber()), id,
-                simFrame::lengthDecimals(4), target.appliedLocation.X, simFrame::lengthDecimals(4), target.appliedLocation.Y,
-                simFrame::lengthDecimals(4), target.appliedLocation.Z,
-                simFrame::lengthDecimals(4), nextBody->position.x, simFrame::lengthDecimals(4), nextBody->position.y,
-                simFrame::lengthDecimals(4), nextBody->position.z,
+                target.appliedLocation.X, target.appliedLocation.Y,
+                target.appliedLocation.Z,
+                nextBody->position.x, nextBody->position.y,
+                nextBody->position.z,
                 m_frameHost.hostNowSeconds(), bracket.renderTimeSeconds,
                 bracket.newestOnly ? "newest" : "interp",
                 static_cast<unsigned long long>(bracket.prevStep), bracket.hasPrev ? stepKindText(bracket.prevKind) : "-",
                 static_cast<unsigned long long>(bracket.nextStep), stepKindText(bracket.nextKind), bracket.nextBack,
                 bracket.alpha, static_cast<unsigned long long>(bracket.newestStep),
-                simFrame::lengthDecimals(4), errorPosition.x, simFrame::lengthDecimals(4), errorPosition.y, simFrame::lengthDecimals(4), errorPosition.z);
+                errorPosition.x, errorPosition.y, errorPosition.z);
         }
     }
 
@@ -718,34 +718,34 @@ private:
             std::vector<float>& values = window.frameDisplacements;
             std::sort(values.begin(), values.end());
             const uint32 n = static_cast<uint32>(values.size());
-            displacement = Printf("%.*f/%.*f/%.*f", simFrame::lengthDecimals(4), values[latencyBudget::nearestRankIndex(n, 500u)],
-                simFrame::lengthDecimals(4), values[latencyBudget::nearestRankIndex(n, 990u)], simFrame::lengthDecimals(4), values.back());
+            displacement = Printf("%.6f/%.6f/%.6f", values[latencyBudget::nearestRankIndex(n, 500u)],
+                values[latencyBudget::nearestRankIndex(n, 990u)], values.back());
         }
 
         ueLog(HostLogLevel::Log,
             "[SimHost.RenderApply] role=%s frames=%u appliedFrames=%u characters=%d applied=%u missing=%u exact=%u "
-            "outOfTolerance=%u maxError%s=%.*f held=%u moved=%u maxHeldDrift%s=%.*f path%s=%.*f steps=[%llu,%llu] drops=%llu "
-            "mode=%s delaySteps=%.2f interpolated=%u atNewest=%u beyondOldest=%u snaps=%u maxNextBack=%u disp%s=%s",
+            "outOfTolerance=%u maxErrorM=%.11f held=%u moved=%u maxHeldDriftM=%.11f pathM=%.5f steps=[%llu,%llu] drops=%llu "
+            "mode=%s delaySteps=%.2f interpolated=%u atNewest=%u beyondOldest=%u snaps=%u maxNextBack=%u dispM=%s",
             m_runsPrediction ? "Client" : "Authority", window.frames, window.appliedFrames,
             static_cast<int32>(m_renderTargetsById.size()), window.applied, window.missing, window.exact,
-            window.outOfTolerance, simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(9), window.maxError, window.held,
-            window.moved, simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(9), window.maxHeldDrift,
-            simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(3), window.pathLength,
+            window.outOfTolerance, window.maxError, window.held,
+            window.moved, window.maxHeldDrift,
+            window.pathLength,
             static_cast<unsigned long long>(window.firstAppliedStep), static_cast<unsigned long long>(window.lastAppliedStep),
             static_cast<unsigned long long>(m_renderSnapshots.drops()),
             window.newestMode > 0u ? "newest" : "interp",
             FMath::Clamp(static_cast<double>(m_cvars.InterpolationDelaySteps), 0.0,
                 kRenderMaxInterpolationDelaySteps),
-            window.interpolated, window.atNewest, window.beyondOldest, window.snaps, window.maxNextBack, simFrame::kLengthFieldSuffix,
+            window.interpolated, window.atNewest, window.beyondOldest, window.snaps, window.maxNextBack,
             displacement.c_str());
 
         if (m_worlds.hasShadowWorld())
         {
             ueLog(HostLogLevel::Log,
                 "[SimHost.RenderSync] role=Client frames=%u shadowBodies=%u shadowExact=%u shadowOutOfTolerance=%u "
-                "shadowMaxError%s=%.*f shadowMaxAngleRad=%.6f",
-                window.frames, window.shadowBodies, window.shadowExact, window.shadowOutOfTolerance, simFrame::kLengthFieldSuffix,
-                simFrame::lengthDecimals(6), window.shadowMaxError, window.shadowMaxAngleRad);
+                "shadowMaxErrorM=%.8f shadowMaxAngleRad=%.6f",
+                window.frames, window.shadowBodies, window.shadowExact, window.shadowOutOfTolerance,
+                window.shadowMaxError, window.shadowMaxAngleRad);
         }
 
         if (m_runsPrediction)
@@ -772,21 +772,21 @@ private:
 
         ueLog(HostLogLevel::Log,
             "[SimHost.RenderCorrection] role=Client frames=%u resims=%llu captured=%llu withoutError=%llu tickMismatches=%llu "
-            "ringDrops=%llu corrections=%u smoothedBodies=%u snappedBodies=%u maxError%s=%.*f maxApplied%s=%.*f decays=%u "
+            "ringDrops=%llu corrections=%u smoothedBodies=%u snappedBodies=%u maxErrorM=%.5f maxAppliedM=%.5f decays=%u "
             "decayMeanS=%.3f decayMaxS=%.3f activeFrames=%u late=%u pendingDrops=%u seconds=%.3f durationSteps=%d "
-            "max%s=%.*f desyncS=%.2f policySnaps=%u maxPolicySnap%s=%.*f maxPolicySnapDeg=%.1f rootFramedFrames=%u "
+            "maxM=%.3f desyncS=%.2f policySnaps=%u maxPolicySnapM=%.5f maxPolicySnapDeg=%.1f rootFramedFrames=%u "
             "straddleSnaps=%u",
             m_renderApplyWindow.frames, static_cast<unsigned long long>(resims - window.resimsAtStart),
             static_cast<unsigned long long>(captured - window.capturedAtStart),
             static_cast<unsigned long long>(withoutError - window.withoutErrorAtStart),
             static_cast<unsigned long long>(tickMismatch - window.tickMismatchAtStart),
             static_cast<unsigned long long>(ringDrops - window.ringDropsAtStart), window.corrections, window.smoothedBodies,
-            window.snappedBodies, simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(3), window.maxError,
-            simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(3), window.maxApplied, window.finished, decayMeanS,
+            window.snappedBodies, window.maxError,
+            window.maxApplied, window.finished, decayMeanS,
             static_cast<double>(window.maxFinishedSteps) * stepSeconds, window.activeFrames, window.late, window.pendingDrops,
             seconds, renderCorrectionDurationSteps(seconds, m_renderCorrectionStepSeconds),
-            simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(1), m_cvars.ErrorCorrectionMax, m_cvars.ErrorCorrectionDesyncSeconds,
-            window.policySnaps, simFrame::kLengthFieldSuffix, simFrame::lengthDecimals(3), window.maxPolicySnap,
+            m_cvars.ErrorCorrectionMax, m_cvars.ErrorCorrectionDesyncSeconds,
+            window.policySnaps, window.maxPolicySnap,
             window.maxPolicySnapDeg, window.rootFramedFrames, window.straddleSnaps);
 
         window = RenderCorrectionWindowUImpl{};
