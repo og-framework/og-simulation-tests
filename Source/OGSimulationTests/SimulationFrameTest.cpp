@@ -73,10 +73,10 @@ TEST_CASE("SimulationFrame.PicksReturnTheirInputBitsOverEdgeFloats", "[Simulatio
         const glm::vec3 v(x, y, z);
         CHECK(bitsEqual(simFrame::height(v), y));
         CHECK(bitsEqual(simFrame::withHeight(v, w), glm::vec3(x, w, z)));
-        CHECK(bitsEqual(simFrame::planar(v), glm::vec2(-z, x)));
-        CHECK(bitsEqual(simFrame::compose(glm::vec2(x, y), z), glm::vec3(y, z, -x)));
+        CHECK(bitsEqual(simFrame::planar(v), glm::vec2(-z, -x)));
+        CHECK(bitsEqual(simFrame::compose(glm::vec2(x, y), z), glm::vec3(-y, z, -x)));
         CHECK(bitsEqual(simFrame::flatten(v), glm::vec3(x, 0.f, z)));
-        CHECK(bitsEqual(simFrame::turnComponent(v), -y));
+        CHECK(bitsEqual(simFrame::turnComponent(v), y));
         CHECK(bitsEqual(simFrame::forwardRight(v), glm::vec2(-z, x)));
         CHECK(bitsEqual(simFrame::fromForwardRight(glm::vec2(x, y), z), glm::vec3(y, z, -x)));
         CHECK(bitsEqual(simFrame::alongUp(v), y));
@@ -86,10 +86,11 @@ TEST_CASE("SimulationFrame.PicksReturnTheirInputBitsOverEdgeFloats", "[Simulatio
 
     CHECK(std::signbit(simFrame::height(glm::vec3(1.f, -0.f, 1.f))));
     CHECK(std::signbit(simFrame::planar(glm::vec3(1.f, 1.f, 0.f)).x));
-    CHECK(std::signbit(simFrame::planar(glm::vec3(-0.f, 1.f, 1.f)).y));
-    CHECK(std::signbit(simFrame::turnComponent(glm::vec3(1.f, 0.f, 1.f))));
+    CHECK(std::signbit(simFrame::planar(glm::vec3(0.f, 1.f, 1.f)).y));
+    CHECK(std::signbit(simFrame::turnComponent(glm::vec3(1.f, -0.f, 1.f))));
     CHECK(std::signbit(simFrame::forwardRight(glm::vec3(-0.f, 1.f, 1.f)).y));
     CHECK(std::signbit(simFrame::compose(glm::vec2(0.f, 1.f), 1.f).z));
+    CHECK(std::signbit(simFrame::compose(glm::vec2(1.f, 0.f), 1.f).x));
     CHECK(std::signbit(simFrame::withHeight(glm::vec3(1.f), -0.f).y));
     const glm::mat4 signedZeroColumns(glm::vec4(1.f), glm::vec4(1.f), glm::vec4(0.f, 1.f, 0.f, 0.f), glm::vec4(1.f));
     CHECK(std::signbit(simFrame::forwardColumn(signedZeroColumns).x));
@@ -101,29 +102,33 @@ TEST_CASE("SimulationFrame.AxisTableAndIdentities", "[SimulationFrame]")
 {
     CHECK(simFrame::kForward == glm::vec3(0.f, 0.f, -1.f));
     CHECK(simFrame::kRight == glm::vec3(1.f, 0.f, 0.f));
+    CHECK(simFrame::kLeft == glm::vec3(-1.f, 0.f, 0.f));
     CHECK(simFrame::kUp == glm::vec3(0.f, 1.f, 0.f));
-    CHECK(simFrame::kTurnAxis == glm::vec3(0.f, -1.f, 0.f));
-    CHECK(simFrame::kVerticalTurnAxis == glm::vec3(-1.f, 0.f, 0.f));
-    CHECK(simFrame::kChartOrientation == -1.f);
+    CHECK(simFrame::kTurnAxis == glm::vec3(0.f, 1.f, 0.f));
+    CHECK(simFrame::kVerticalTurnAxis == glm::vec3(1.f, 0.f, 0.f));
+    CHECK(simFrame::kChartOrientation == 1.f);
     CHECK(simFrame::kUpIndex == 1);
     CHECK(simFrame::kUeCentimetresPerUnit == 100.f);
 
-    CHECK(glm::cross(simFrame::kForward, simFrame::kRight) == simFrame::kTurnAxis);
-    CHECK(glm::cross(simFrame::kUp, simFrame::kForward) == simFrame::kVerticalTurnAxis);
-    CHECK(glm::dot(glm::cross(simFrame::kForward, simFrame::kRight), simFrame::kUp) == simFrame::kChartOrientation);
+    CHECK(-simFrame::kRight == simFrame::kLeft);
+    CHECK(glm::cross(simFrame::kForward, simFrame::kLeft) == simFrame::kTurnAxis);
+    CHECK(simFrame::kTurnAxis == simFrame::kUp);
+    CHECK(glm::cross(simFrame::kForward, simFrame::kUp) == simFrame::kVerticalTurnAxis);
+    CHECK(simFrame::kVerticalTurnAxis == simFrame::kRight);
+    CHECK(glm::dot(glm::cross(simFrame::kForward, simFrame::kLeft), simFrame::kUp) == simFrame::kChartOrientation);
 }
 
 TEST_CASE("SimulationFrame.PicksMatchTheTables", "[SimulationFrame]")
 {
     const glm::vec3 v(2.f, 3.f, 5.f);
     CHECK(bitsEqual(simFrame::height(v), 3.f));
-    CHECK(bitsEqual(simFrame::planar(v), glm::vec2(-5.f, 2.f)));
+    CHECK(bitsEqual(simFrame::planar(v), glm::vec2(-5.f, -2.f)));
     CHECK(bitsEqual(simFrame::forwardRight(v), glm::vec2(-5.f, 2.f)));
-    CHECK(bitsEqual(simFrame::compose(glm::vec2(7.f, 11.f), 13.f), glm::vec3(11.f, 13.f, -7.f)));
+    CHECK(bitsEqual(simFrame::compose(glm::vec2(7.f, 11.f), 13.f), glm::vec3(-11.f, 13.f, -7.f)));
     CHECK(bitsEqual(simFrame::fromForwardRight(glm::vec2(7.f, 11.f), 13.f), glm::vec3(11.f, 13.f, -7.f)));
     CHECK(bitsEqual(simFrame::flatten(v), glm::vec3(2.f, 0.f, 5.f)));
     CHECK(bitsEqual(simFrame::withHeight(v, 17.f), glm::vec3(2.f, 17.f, 5.f)));
-    CHECK(bitsEqual(simFrame::turnComponent(v), -3.f));
+    CHECK(bitsEqual(simFrame::turnComponent(v), 3.f));
     CHECK(bitsEqual(simFrame::alongUp(v), 3.f));
     const glm::mat4 columns(glm::vec4(2.f, 3.f, 5.f, 0.f), glm::vec4(7.f, 11.f, 13.f, 0.f), glm::vec4(17.f, -0.f, 19.f, 0.f),
         glm::vec4(23.f, 29.f, 31.f, 1.f));

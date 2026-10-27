@@ -262,7 +262,11 @@ TEST_CASE("CorrectionStateBuffer.LayoutAndVersionFence",
     // right-handed Y-up frame): the layout did not move, but every value a 6 peer decodes would be
     // in the wrong unit or axes. Task 15 derived the version from the two frame knobs; task 24
     // deleted the knobs and froze it at 8. No `!= 6u` or `!= 7u`, for task 17's reason above.
-    REQUIRE(correctionStateBuffer::kWireFormatVersion == 8u);
+    //
+    // [og-sim-metres-yup task 26] 8 -> 9 for the native planar chart: the layout did not move,
+    // but the brawler movement's `committedStepDir` is mirrored, (x, y) -> (x, -y), against what
+    // an 8 peer decodes. No `!= 8u`, for task 17's reason above.
+    REQUIRE(correctionStateBuffer::kWireFormatVersion == 9u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 3u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 2u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 1u);
