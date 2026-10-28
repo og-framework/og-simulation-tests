@@ -10,11 +10,14 @@
 #include "OGSimulationJolt/JoltStaticWorldBuilder.h"
 
 #include "glm/gtc/matrix_transform.hpp"
+#include "glm/gtc/quaternion.hpp"
 #include "OGSimulation/SimulationFrame.h"
 #include "OGSimulation/SpatialQueryAdapter.h"
 
 #include <algorithm>
+#include <bit>
 #include <cmath>
+#include <cstdio>
 #include <optional>
 #include <random>
 #include <string>
@@ -742,6 +745,119 @@ TEST_CASE("JoltSpatialQuery.TheQueryPoseIgnoresTheVolumeRotationAsTheChaosAdapte
     const QueryVolumeDescriptor yawedOffset{ BoxGeometry{ glm::vec3(0.1f, 0.1f, 2.f) }, CollisionCategories{ bit(kBody) }, yawed, kQueryRouting };
     const QueryVolumeId offsetVolume = scene.query.registerVolume(yawedOffset, BodyId{});
     CHECK(scene.query.overlap({ offsetVolume }).size() == 1);
+}
+
+namespace
+{
+    constexpr glm::vec3 kFaceHalfExtents{ 4.f, 0.25f, 4.f };
+    constexpr glm::vec3 kTiltedCentre{ 0.f, 2.f, -0.f };
+    constexpr glm::vec3 kFlatCentre{ 20.f, -0.25f, -0.f };
+    constexpr float kProbeRadius = 0.41f;
+    constexpr float kProbeHalfHeight = 0.95f;
+    constexpr int kGridSide = 11;
+    constexpr float kGridSpacing = 0.5f;
+
+    glm::quat tiltAboutRight(double degrees)
+    {
+        const double halfAngle = 0.5 * degrees * 3.14159265358979323846 / 180.0;
+        return glm::quat(float(std::cos(halfAngle)), float(std::sin(halfAngle)), -0.f, 0.f);
+    }
+
+    StaticShapeDescriptor faceBox(const glm::vec3& centre, const glm::quat& rotation, uint64_t stableKey)
+    {
+        StaticShapeDescriptor descriptor = staticElement(StaticBox{ kFaceHalfExtents }, centre, stableKey);
+        descriptor.localToWorld = at(centre) * glm::mat4_cast(rotation);
+        return descriptor;
+    }
+
+    glm::vec3 facePointOf(const glm::vec3& centre, const glm::quat& rotation, int column, int row)
+    {
+        const float half = 0.5f * float(kGridSide - 1);
+        const glm::vec3 local((float(column) - half) * kGridSpacing, kFaceHalfExtents.y, (float(row) - half) * kGridSpacing);
+        return centre + glm::mat3_cast(rotation) * local;
+    }
+
+    float maxAbsDifference(const glm::vec3& first, const glm::vec3& second)
+    {
+        const glm::vec3 d = first - second;
+        return std::max({ std::abs(d.x), std::abs(d.y), std::abs(d.z) });
+    }
+
+    float angleBetween(const glm::vec3& first, const glm::vec3& second)
+    {
+        return std::atan2(glm::length(glm::cross(first, second)), glm::dot(first, second));
+    }
+
+    bool sameBits(const glm::vec3& first, const glm::vec3& second)
+    {
+        return std::bit_cast<uint32_t>(first.x) == std::bit_cast<uint32_t>(second.x)
+            && std::bit_cast<uint32_t>(first.y) == std::bit_cast<uint32_t>(second.y)
+            && std::bit_cast<uint32_t>(first.z) == std::bit_cast<uint32_t>(second.z);
+    }
+} // namespace
+
+TEST_CASE("JoltSpatialQuery.ASweepReportsTheExactFaceNormalAsSurfaceNormal", "[Jolt]")
+{
+    RuntimeLease lease;
+    const glm::quat tilt = tiltAboutRight(30.0);
+    const glm::quat identity(1.f, 0.f, 0.f, 0.f);
+    StaticWorldDescription description;
+    description.shapes.push_back(faceBox(kTiltedCentre, tilt, 201));
+    description.shapes.push_back(faceBox(kFlatCentre, identity, 202));
+    QueryWorld scene(lease.runtime, queryWorldConfig(0, staticLayerKeysOf(description)));
+    JoltWorldAccessScope access;
+    JoltStaticWorldBuilder builder(scene.world, &logToNowhere);
+    (void)builder.build(description);
+
+    const QueryVolumeDescriptor probe{ CapsuleGeometry{ kProbeRadius, kProbeHalfHeight }, CollisionCategories{ bit(kWorld) }, glm::mat4(1.f), kQueryRouting };
+    const QueryVolumeId volume = scene.query.registerVolume(probe, BodyId{});
+    const glm::vec3 tiltedUp = glm::mat3_cast(tilt)[simFrame::kUpIndex];
+    const glm::vec3 lift(0.f, 3.f, -0.f);
+    const glm::vec3 down(0.f, -6.f, -0.f);
+    const glm::vec3 sphereToCentre(0.f, kProbeHalfHeight - kProbeRadius, -0.f);
+
+    float maxCastError = 0.f;
+    float maxCollideError = 0.f;
+    float maxGjkAngle = 0.f;
+    int castHits = 0;
+    int collideHits = 0;
+    int flatExact = 0;
+    for (int column = 0; column < kGridSide; ++column)
+    {
+        for (int row = 0; row < kGridSide; ++row)
+        {
+            const glm::vec3 onTilted = facePointOf(kTiltedCentre, tilt, column, row);
+            const SweepHit cast = scene.query.sweep(volume, at(onTilted + lift), down);
+            REQUIRE(cast.blocked);
+            CHECK_FALSE(cast.startPenetrating);
+            castHits += 1;
+            maxCastError = std::max(maxCastError, maxAbsDifference(cast.surfaceNormal, tiltedUp));
+            maxGjkAngle = std::max(maxGjkAngle, angleBetween(cast.normal, cast.surfaceNormal));
+
+            const glm::vec3 sphereCentre = onTilted + tiltedUp * (kProbeRadius - 0.05f);
+            const SweepHit collide = scene.query.sweep(volume, at(sphereCentre + sphereToCentre), glm::vec3(0.f));
+            REQUIRE(collide.blocked);
+            CHECK(collide.startPenetrating);
+            collideHits += 1;
+            maxCollideError = std::max(maxCollideError, maxAbsDifference(collide.surfaceNormal, tiltedUp));
+            maxGjkAngle = std::max(maxGjkAngle, angleBetween(collide.normal, collide.surfaceNormal));
+
+            const glm::vec3 onFlat = facePointOf(kFlatCentre, identity, column, row);
+            const SweepHit flat = scene.query.sweep(volume, at(onFlat + lift), down);
+            REQUIRE(flat.blocked);
+            flatExact += sameBits(flat.surfaceNormal, glm::vec3(0.f, 1.f, 0.f)) ? 1 : 0;
+        }
+    }
+    std::printf("[JoltSpatialQuery.surfaceNormal] castHits=%d collideHits=%d maxCastError=%.3g maxCollideError=%.3g flatExact=%d/%d "
+        "maxGjkAngleRad=%.3g tiltedUp=(%.7f, %.7f, %.7f)\n", castHits, collideHits, double(maxCastError), double(maxCollideError), flatExact,
+        kGridSide * kGridSide, double(maxGjkAngle), double(tiltedUp.x), double(tiltedUp.y), double(tiltedUp.z));
+    CHECK(maxCastError <= 1.e-6f);
+    CHECK(maxCollideError <= 1.e-6f);
+    CHECK(flatExact == kGridSide * kGridSide);
+
+    const SweepHit miss = scene.query.sweep(volume, at(glm::vec3(60.f, 3.f, -0.f)), down);
+    CHECK_FALSE(miss.blocked);
+    CHECK(sameBits(miss.surfaceNormal, glm::vec3(0.f)));
 }
 
 #endif
