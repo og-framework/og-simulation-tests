@@ -266,7 +266,12 @@ TEST_CASE("CorrectionStateBuffer.LayoutAndVersionFence",
     // [og-sim-metres-yup task 26] 8 -> 9 for the native planar chart: the layout did not move,
     // but the brawler movement's `committedStepDir` is mirrored, (x, y) -> (x, -y), against what
     // an 8 peer decodes. No `!= 8u`, for task 17's reason above.
-    REQUIRE(correctionStateBuffer::kWireFormatVersion == 9u);
+    //
+    // [og-ground-aligned-attacks task 10] 9 -> 10 for ground-aligned attacks: the layout did not
+    // move, but on sloped ground the radial and projectile initial conditions a 10 peer predicts
+    // follow the brawler's ground normal, and a 9 peer's do not. No `!= 9u`, for task 17's reason
+    // above.
+    REQUIRE(correctionStateBuffer::kWireFormatVersion == 10u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 3u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 2u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 1u);
