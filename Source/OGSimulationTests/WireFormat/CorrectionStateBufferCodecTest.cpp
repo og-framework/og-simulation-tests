@@ -271,7 +271,12 @@ TEST_CASE("CorrectionStateBuffer.LayoutAndVersionFence",
     // move, but on sloped ground the radial and projectile initial conditions a 10 peer predicts
     // follow the brawler's ground normal, and a 9 peer's do not. No `!= 9u`, for task 17's reason
     // above.
-    REQUIRE(correctionStateBuffer::kWireFormatVersion == 10u);
+    //
+    // [og-ground-aligned-attacks task 30] 10 -> 11 for the exact velocity decomposition: the layout
+    // did not move, but where the brawler's tangent frame is not horizontal across the slope an 11
+    // peer splits the velocity with an exact dual-basis solve and a 10 peer with the old 2x2 solve,
+    // so they predict different velocities. No `!= 10u`, for task 17's reason above.
+    REQUIRE(correctionStateBuffer::kWireFormatVersion == 11u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 3u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 2u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 1u);
