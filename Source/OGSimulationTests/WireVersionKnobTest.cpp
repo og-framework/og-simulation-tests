@@ -8,7 +8,7 @@
 
 TEST_CASE("WireVersionKnob.TheVersionsAreTheOnesTheFlipsReached", "[WireFormat][WireVersionKnob]")
 {
-    REQUIRE(correctionStateBuffer::kWireFormatVersion == 11u);
+    REQUIRE(correctionStateBuffer::kWireFormatVersion == 12u);
     REQUIRE(relayedInputRing::kWireFormatVersion == 3u);
     REQUIRE(inputRedundancyBundle::kWireFormatVersion == 3u);
 }

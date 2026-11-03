@@ -276,7 +276,13 @@ TEST_CASE("CorrectionStateBuffer.LayoutAndVersionFence",
     // did not move, but where the brawler's tangent frame is not horizontal across the slope an 11
     // peer splits the velocity with an exact dual-basis solve and a 10 peer with the old 2x2 solve,
     // so they predict different velocities. No `!= 10u`, for task 17's reason above.
-    REQUIRE(correctionStateBuffer::kWireFormatVersion == 11u);
+    //
+    // [og-ground-aligned-attacks task 14b] 11 -> 12 for the flat swing frame: the layout did not
+    // move, but on flat ground a 12 peer writes the radial initial conditions through the slope
+    // path's quaternion round trip and an 11 peer writes the turn itself, so their angle and axis
+    // differ by rounding (and in the axis's sign on an exact +/-forward aim). No `!= 11u`, for
+    // task 17's reason above.
+    REQUIRE(correctionStateBuffer::kWireFormatVersion == 12u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 3u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 2u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 1u);
