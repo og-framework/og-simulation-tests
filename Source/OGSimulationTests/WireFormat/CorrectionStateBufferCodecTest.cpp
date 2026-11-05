@@ -282,7 +282,23 @@ TEST_CASE("CorrectionStateBuffer.LayoutAndVersionFence",
     // path's quaternion round trip and an 11 peer writes the turn itself, so their angle and axis
     // differ by rounding (and in the axis's sign on an exact +/-forward aim). No `!= 11u`, for
     // task 17's reason above.
-    REQUIRE(correctionStateBuffer::kWireFormatVersion == 12u);
+    //
+    // [og-ground-aligned-attacks task 20] 12 -> 13 for the capsule hit test: the layout did not move,
+    // but a 13 peer registers a melee hit whenever the attack band overlaps the target's movement
+    // capsule and a 12 peer only when the capsule centre is inside the band, so they disagree on
+    // which swings hit. No `!= 12u`, for task 17's reason above.
+    //
+    // [og-ground-aligned-attacks task 20b] 13 -> 14 for the projectile guard rule: the layout did not
+    // move, but a 14 peer lets the struck character's guard entry decide a shot even when its body entry
+    // is listed first, and measures every guard's angle in the guard's plane, so a 13 peer and a 14 peer
+    // disagree on which shots are blocked. No `!= 13u`, for task 17's reason above.
+    //
+    // [og-ground-aligned-attacks task 36] 14 -> 15 for the brawler movement's support law v2 as the default: the
+    // layout did not move, but a 15 peer takes its ground from the exact face, an edge contact and a centre probe,
+    // changes support only on events, writes a knockback once and redirects a velocity into a face along it, so a
+    // 14 peer and a 15 peer predict different movement on slopes, rims and creases and after every knockback. No
+    // `!= 14u`, for task 17's reason above.
+    REQUIRE(correctionStateBuffer::kWireFormatVersion == 15u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 3u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 2u);
     REQUIRE(correctionStateBuffer::kWireFormatVersion != 1u);
