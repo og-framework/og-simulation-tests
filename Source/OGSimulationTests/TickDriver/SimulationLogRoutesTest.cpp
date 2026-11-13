@@ -38,6 +38,8 @@ namespace simulationLogRoutesTest
         { "[InputDrop]",                    SimulationLogRoute::Net,             HostLogLevel::Log },
         { "[DelayShift]",                   SimulationLogRoute::Net,             HostLogLevel::Log },
         { "[InputStats]",                   SimulationLogRoute::Net,             HostLogLevel::Log },
+        { "[InputArrival.Window]",          SimulationLogRoute::Net,             HostLogLevel::Log },
+        { "[InputArrival.BackDate]",        SimulationLogRoute::Net,             HostLogLevel::Log },
         { "[Park]",                         SimulationLogRoute::Net,             HostLogLevel::Verbose },
         { "[Release]",                      SimulationLogRoute::Net,             HostLogLevel::Verbose },
         { "[InputDomain]",                  SimulationLogRoute::Net,             HostLogLevel::Log },
@@ -67,7 +69,7 @@ TEST_CASE("SimulationLogRoutes.Rows.PrefixRouteAndPlainLevelArePinnedInOrder", "
     using namespace simulationLogRoutesTest;
 
     REQUIRE(std::size(kSimulationLogRoutes) == std::size(kPinnedRows));
-    REQUIRE(std::size(kSimulationLogRoutes) == 25u);
+    REQUIRE(std::size(kSimulationLogRoutes) == 27u);
     for (std::size_t row = 0; row < std::size(kPinnedRows); ++row)
     {
         INFO("row " << row << " pinned " << kPinnedRows[row].prefix);
@@ -124,6 +126,8 @@ TEST_CASE("SimulationLogRoutes.FirstMatch.TakesTheSpecificRowIgnoresCaseAndLeave
     CHECK(prefixOfFirstMatch("[ReceiveLocalInput] tick=900") == "[ReceiveLocalInput]");
     CHECK(prefixOfFirstMatch("[DivergenceProbe.Window] n=4") == "[DivergenceProbe");
     CHECK(prefixOfFirstMatch("[TimeResync.Wipe] from=1") == "[TimeResync.");
+    CHECK(prefixOfFirstMatch("[InputArrival.Window] conn=1 samples=2") == "[InputArrival.Window]");
+    CHECK(prefixOfFirstMatch("[InputArrival.BackDate] conn=1 m0P50=-6") == "[InputArrival.BackDate]");
 
     CHECK(prefixOfFirstMatch("[ResimProbe.Gate] x=1") == "<none>");
     CHECK(prefixOfFirstMatch("[RelayProbe.Write] x=1") == "<none>");
@@ -137,6 +141,11 @@ TEST_CASE("SimulationLogRoutes.FirstMatch.TakesTheSpecificRowIgnoresCaseAndLeave
     REQUIRE(resimInput != nullptr);
     CHECK(resimInput->route == SimulationLogRoute::SimTick);
     CHECK(resimInput->plainLevel == HostLogLevel::Verbose);
+
+    const SimulationLogRouteEntry* arrivalWindow = firstMatch("[InputArrival.Window] conn=1 samples=2");
+    REQUIRE(arrivalWindow != nullptr);
+    CHECK(arrivalWindow->route == SimulationLogRoute::Net);
+    CHECK(arrivalWindow->plainLevel == HostLogLevel::Log);
 }
 
 #endif // WITH_LOW_LEVEL_TESTS

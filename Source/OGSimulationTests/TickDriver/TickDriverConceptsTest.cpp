@@ -3,8 +3,11 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
 #include <cstdio>
+#include <future>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -356,6 +359,138 @@ TEST_CASE("TickDriverThreadContext.Scopes.MarkTheRoleAndOpenTheAccessScope", "[T
     }
     CHECK_FALSE(context.isStepRunningOnThisThread());
     CHECK(client.lock().locks() == 2u);
+}
+
+TEST_CASE("TickDriverThreadContext.FreeRunning.TheConfiguringThreadIsTheOwnerAndAnotherThreadIsRefused", "[TickDriver]")
+{
+    TickDriverThreadContext context;
+    std::promise<void> configured;
+    std::future<void> runnerConfigured = configured.get_future();
+    std::promise<void> checkedOnTheTestThread;
+    std::future<void> testThreadChecked = checkedOnTheTestThread.get_future();
+    bool ownerOnRunner = false;
+    bool predicateOnRunner = false;
+    bool freeRunningOnRunner = false;
+    bool stepsInlineOnRunner = true;
+    bool entryCheckSetOnRunner = false;
+    bool entryCheckIsThePredicateOnRunner = false;
+    bool runnerSawTheTestThreadFinish = false;
+    std::thread runner([&]
+    {
+        context.configure<true>(kAuthorityRoleBit, StepThreading::FreeRunning);
+        ownerOnRunner = context.isOwnerThreadForRole();
+        predicateOnRunner = context.stepWorldPredicate()();
+        freeRunningOnRunner = context.threading() == StepThreading::FreeRunning;
+        stepsInlineOnRunner = context.stepsInline();
+        entryCheckSetOnRunner = context.entryCheck() != nullptr;
+        entryCheckIsThePredicateOnRunner = context.entryCheck() == context.stepWorldPredicate();
+        configured.set_value();
+        runnerSawTheTestThreadFinish = testThreadChecked.wait_for(std::chrono::seconds(30)) == std::future_status::ready;
+    });
+    const bool runnerConfiguredInTime = runnerConfigured.wait_for(std::chrono::seconds(30)) == std::future_status::ready;
+
+    const bool ownerOnTestThread = context.isOwnerThreadForRole();
+    const bool predicateOnTestThread = context.stepWorldPredicate() != nullptr && context.stepWorldPredicate()();
+    std::mutex worldMutex;
+    bool predicateUnderTheWorldLock = false;
+    {
+        const WorldLockScope<std::mutex> worldLock(worldMutex, context);
+        predicateUnderTheWorldLock = context.stepWorldPredicate()();
+    }
+    bool predicateInsideAStep = false;
+    {
+        const StepScope step(context);
+        predicateInsideAStep = context.stepWorldPredicate()();
+    }
+    checkedOnTheTestThread.set_value();
+    runner.join();
+
+    REQUIRE(runnerConfiguredInTime);
+    CHECK(runnerSawTheTestThreadFinish);
+    CHECK(ownerOnRunner);
+    CHECK(predicateOnRunner);
+    CHECK(freeRunningOnRunner);
+    CHECK_FALSE(stepsInlineOnRunner);
+    CHECK(entryCheckSetOnRunner);
+    CHECK(entryCheckIsThePredicateOnRunner);
+
+    CHECK_FALSE(ownerOnTestThread);
+    CHECK_FALSE(predicateOnTestThread);
+    CHECK(predicateUnderTheWorldLock);
+    CHECK(predicateInsideAStep);
+    CHECK_FALSE(context.stepWorldPredicate()());
+    CHECK(context.threading() == StepThreading::FreeRunning);
+}
+
+TEST_CASE("TickDriverThreadContext.EntryCheck.IsNullUnlessFreeRunning", "[TickDriver]")
+{
+    SECTION("an Inline authority")
+    {
+        TickDriverThreadContext context;
+        context.configure<true>(kAuthorityRoleBit, StepThreading::Inline);
+        CHECK(context.threading() == StepThreading::Inline);
+        CHECK(context.entryCheck() == nullptr);
+    }
+    SECTION("an Inline client")
+    {
+        TickDriverThreadContext context;
+        context.configure<true>(kClientRoleBit, StepThreading::Inline);
+        CHECK(context.threading() == StepThreading::Inline);
+        CHECK(context.entryCheck() == nullptr);
+    }
+    SECTION("a FrameBounded client")
+    {
+        TickDriverThreadContext context;
+        context.configure<true>(kClientRoleBit, StepThreading::FrameBounded);
+        CHECK(context.threading() == StepThreading::FrameBounded);
+        CHECK(context.entryCheck() == nullptr);
+    }
+    SECTION("a FrameBounded authority")
+    {
+        TickDriverThreadContext context;
+        context.configure<true>(kAuthorityRoleBit, StepThreading::FrameBounded);
+        CHECK(context.threading() == StepThreading::FrameBounded);
+        CHECK(context.entryCheck() == nullptr);
+    }
+    SECTION("an unconfigured context")
+    {
+        const TickDriverThreadContext context;
+        CHECK(context.threading() == StepThreading::FrameBounded);
+        CHECK(context.entryCheck() == nullptr);
+    }
+    SECTION("a FreeRunning authority, the positive control")
+    {
+        TickDriverThreadContext context;
+        context.configure<true>(kAuthorityRoleBit, StepThreading::FreeRunning);
+        CHECK(context.entryCheck() != nullptr);
+        CHECK(context.entryCheck() == context.stepWorldPredicate());
+    }
+}
+
+TEST_CASE("TickDriverThreadContext.Configure.TheBoolOverloadSelectsInlineOrFrameBounded", "[TickDriver]")
+{
+    for (const uint8_t role : { kAuthorityRoleBit, kClientRoleBit })
+    {
+        for (const bool inlineSteps : { true, false })
+        {
+            const int roleBit = role;
+            CAPTURE(roleBit, inlineSteps);
+            TickDriverThreadContext context;
+            context.configure<true>(role, inlineSteps);
+            CHECK(context.threading() == (inlineSteps ? StepThreading::Inline : StepThreading::FrameBounded));
+            CHECK(context.stepsInline() == inlineSteps);
+            CHECK(context.stepWorldPredicate() == TickDriverThreadContext::predicateFor<true>(role, inlineSteps));
+            CHECK(context.shadowPredicate() == TickDriverThreadContext::shadowPredicateFor<true>(role));
+            CHECK(context.entryCheck() == nullptr);
+        }
+    }
+}
+
+TEST_CASE("TickDriverThreadContext.FreeRunning.AClientIsRefused", "[.][TickDriverFreeRunningClientRefused]")
+{
+    TickDriverThreadContext context;
+    context.configure<true>(kClientRoleBit, StepThreading::FreeRunning);
+    FAIL("TickDriverThreadContext::configure accepted a FreeRunning client: its OG_CHECK did not fire");
 }
 
 TEST_CASE("TickRateDoor.ForwardsToTheScheduler", "[TickDriver]")

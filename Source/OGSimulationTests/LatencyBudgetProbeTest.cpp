@@ -8,6 +8,7 @@
 #include <cstdint>
 #include <limits>
 #include <random>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -319,6 +320,113 @@ TEST_CASE("LatencyBudgetProbe.PendingStamps", "[LatencyProbe]")
     }
 }
 
+TEST_CASE("LatencyBudgetProbe.LateHealHopH6L", "[LatencyProbe]")
+{
+    LatencyBudgetProbe probe(kClientHops, smallConfig());
+    REQUIRE(probe.isEnabled(Hop::H6L));
+    REQUIRE_FALSE(LatencyBudgetProbe(kServerHops, smallConfig()).isEnabled(Hop::H6L));
+
+    SECTION("a resim-served stamp closes H6L and leaves H6 open")
+    {
+        probe.stamp(Stream::Input, kLane, 5u, Point::ClientReceived, 1.000);
+        probe.apply(Event::stampHealedIfPending(kLane, 5u, 1.040));
+        probe.forgetLane(kLane);
+
+        const WindowReport report = closeNow(probe);
+        const HopSummary* h6l = findHop(report, Hop::H6L);
+        REQUIRE(h6l != nullptr);
+        CHECK(h6l->n == 1u);
+        CHECK(h6l->p50 == Catch::Approx(40 * kMs));
+        CHECK(h6l->healedByUse == 1u);
+        CHECK(h6l->healedByCorrection == 0u);
+        CHECK(h6l->noEnd == 0u);
+        CHECK(findHop(report, Hop::H6)->n == 0u);
+        CHECK(findHop(report, Hop::H6)->noEnd == 1u);
+        CHECK(report.duplicateStamps == 0u);
+    }
+
+    SECTION("a prediction Hit closes both H6 and H6L")
+    {
+        probe.stamp(Stream::Input, kLane, 5u, Point::ClientReceived, 1.000);
+        probe.apply(Event::stamp(Stream::Input, kLane, 5u, Point::Consumed, 1.012));
+        probe.apply(Event::stamp(Stream::Input, kLane, 5u, Point::Healed, 1.012));
+        probe.apply(Event::stampHealedIfPending(kLane, 5u, 1.050));
+        probe.forgetLane(kLane);
+
+        const WindowReport report = closeNow(probe);
+        const HopSummary* h6l = findHop(report, Hop::H6L);
+        CHECK(findHop(report, Hop::H6)->n == 1u);
+        CHECK(findHop(report, Hop::H6)->p50 == Catch::Approx(12 * kMs));
+        CHECK(h6l->n == 1u);
+        CHECK(h6l->p50 == Catch::Approx(12 * kMs));
+        CHECK(h6l->healedByUse == 1u);
+        CHECK(report.duplicateStamps == 0u);
+    }
+
+    SECTION("a correction at tick X closes H6L for every pending capture <= X - dA and for none above it")
+    {
+        for (uint32_t capture = 10u; capture <= 14u; ++capture)
+            probe.stamp(Stream::Input, kLane, capture, Point::ClientReceived, 1.000 + capture * kMs);
+        probe.stamp(Stream::Input, kLane, 10u, Point::Healed, 1.015);
+        probe.stamp(Stream::Input, 11u, 12u, Point::ClientReceived, 1.000);
+
+        constexpr uint32_t kCorrectionTick = 18u;
+        constexpr uint32_t kDelayTicks     = 6u;
+        probe.stampHealedByCorrection(kLane, kCorrectionTick, kDelayTicks, 1.100);
+        probe.forgetLane(kLane);
+        probe.forgetLane(11u);
+
+        const WindowReport report = closeNow(probe);
+        const HopSummary* h6l = findHop(report, Hop::H6L);
+        CHECK(h6l->n == 3u);
+        CHECK(h6l->healedByUse == 1u);
+        CHECK(h6l->healedByCorrection == 2u);
+        CHECK(h6l->healedByUse + h6l->healedByCorrection == h6l->n);
+        CHECK(h6l->p50 == Catch::Approx(88 * kMs));
+        CHECK(h6l->max == Catch::Approx(89 * kMs));
+        CHECK(h6l->noEnd == 3u);
+    }
+
+    SECTION("a correction older than the delay stamp heals nothing")
+    {
+        probe.stamp(Stream::Input, kLane, 2u, Point::ClientReceived, 1.000);
+        probe.stampHealedByCorrection(kLane, 5u, 6u, 1.100);
+        probe.forgetLane(kLane);
+
+        const WindowReport report = closeNow(probe);
+        CHECK(findHop(report, Hop::H6L)->n == 0u);
+        CHECK(findHop(report, Hop::H6L)->noEnd == 1u);
+    }
+
+    SECTION("a late capture with no later use or correction stays noEnd")
+    {
+        probe.stamp(Stream::Input, kLane, 20u, Point::ClientReceived, 1.000);
+        probe.stampHealedByCorrection(kLane, 25u, 6u, 1.100);
+        probe.apply(Event::stampHealedIfPending(kLane, 21u, 1.120));
+        probe.forgetLane(kLane);
+
+        const WindowReport report = closeNow(probe);
+        const HopSummary* h6l = findHop(report, Hop::H6L);
+        CHECK(h6l->n == 0u);
+        CHECK(h6l->noEnd == 1u);
+        CHECK(h6l->healedByUse == 0u);
+        CHECK(h6l->healedByCorrection == 0u);
+    }
+
+    SECTION("a heal stamp never starts a hop: no ClientReceived, or a receipt after it, heals nothing")
+    {
+        probe.apply(Event::stampHealedIfPending(kLane, 3u, 1.000));
+        probe.stamp(Stream::Input, kLane, 4u, Point::ClientReceived, 1.200);
+        probe.stampHealedByCorrection(kLane, 30u, 6u, 1.100);
+        probe.forgetLane(kLane);
+
+        const WindowReport report = closeNow(probe);
+        CHECK(findHop(report, Hop::H6L)->n == 0u);
+        CHECK(findHop(report, Hop::H6L)->noStart == 0u);
+        CHECK(findHop(report, Hop::H6L)->noEnd == 1u);
+    }
+}
+
 TEST_CASE("LatencyBudgetProbe.LanesAndCapacity", "[LatencyProbe]")
 {
     ProbeConfig config = smallConfig();
@@ -414,6 +522,204 @@ TEST_CASE("LatencyBudgetProbe.ScalarWindowStats", "[LatencyProbe]")
     CHECK(stats.mean() == Catch::Approx(1.0));
     stats.reset();
     CHECK(stats.samples == 0u);
+}
+
+namespace
+{
+    std::vector<std::string> reportedHopNames(const WindowReport& report)
+    {
+        std::vector<std::string> names;
+        for (std::size_t index = 0; index < report.hopCount; ++index)
+            names.emplace_back(hopName(report.hops[index].hop));
+        return names;
+    }
+
+    struct NetHopCase
+    {
+        const char* label;
+        HopMask     mask;
+        Hop         hop;
+        Stream      stream;
+        Point       end;
+    };
+
+    const NetHopCase kNetHopCases[] = {
+        { "N4",  kServerHops | kServerNetHops, Hop::N4,  Stream::Input, Point::ServerReceived },
+        { "N6",  kClientHops | kClientNetHops, Hop::N6,  Stream::Input, Point::ClientReceived },
+        { "N6c", kClientHops | kClientNetHops, Hop::N6c, Stream::State, Point::ClientReceived },
+    };
+}
+
+TEST_CASE("LatencyBudgetProbe.NetHopNamesAndRoutes", "[LatencyProbe]")
+{
+    CHECK(std::string(hopName(Hop::N4)) == "N4");
+    CHECK(std::string(hopName(Hop::N6)) == "N6");
+    CHECK(std::string(hopName(Hop::N6c)) == "N6c");
+    CHECK(std::string(hopName(Hop::Wire)) == "WIRE");
+    CHECK(static_cast<std::size_t>(Point::NetReceived) + 1u == kPointCount);
+    CHECK(static_cast<std::size_t>(Hop::Wire) + 1u == kHopCount);
+    CHECK(kServerNetHops == hopBit(Hop::N4));
+    CHECK(kClientNetHops == (hopBit(Hop::N6) | hopBit(Hop::N6c)));
+    CHECK((kClientHops & (kServerNetHops | kClientNetHops)) == 0u);
+    CHECK((kServerHops & (kServerNetHops | kClientNetHops)) == 0u);
+}
+
+TEST_CASE("LatencyBudgetProbe.NetHopIsTheDrainResidence", "[LatencyProbe]")
+{
+    for (const NetHopCase& netCase : kNetHopCases)
+    {
+        DYNAMIC_SECTION(netCase.label << ": NetReceived then the decode stamp")
+        {
+            LatencyBudgetProbe probe(netCase.mask, smallConfig());
+            probe.stamp(netCase.stream, kLane, 12u, Point::NetReceived, 2.000);
+            probe.stamp(netCase.stream, kLane, 12u, netCase.end, 2.0135);
+
+            const WindowReport report = closeNow(probe);
+            const HopSummary* net = findHop(report, netCase.hop);
+            REQUIRE(net != nullptr);
+            CHECK(net->n == 1u);
+            CHECK(net->p50 == Catch::Approx(13.5 * kMs));
+            CHECK(net->outOfOrder == 0u);
+        }
+        DYNAMIC_SECTION(netCase.label << ": the decode stamp lands first")
+        {
+            LatencyBudgetProbe probe(netCase.mask, smallConfig());
+            probe.stamp(netCase.stream, kLane, 12u, netCase.end, 2.0135);
+            probe.stamp(netCase.stream, kLane, 12u, Point::NetReceived, 2.000);
+
+            const WindowReport report = closeNow(probe);
+            const HopSummary* net = findHop(report, netCase.hop);
+            REQUIRE(net != nullptr);
+            CHECK(net->n == 1u);
+            CHECK(net->p50 == Catch::Approx(13.5 * kMs));
+        }
+        DYNAMIC_SECTION(netCase.label << ": through apply(Event::stamp)")
+        {
+            LatencyBudgetProbe probe(netCase.mask, smallConfig());
+            probe.apply(Event::stamp(netCase.stream, kLane, 12u, netCase.end, 2.0135));
+            probe.apply(Event::stamp(netCase.stream, kLane, 12u, Point::NetReceived, 2.000));
+
+            const WindowReport report = closeNow(probe);
+            const HopSummary* net = findHop(report, netCase.hop);
+            REQUIRE(net != nullptr);
+            CHECK(net->n == 1u);
+            CHECK(net->p50 == Catch::Approx(13.5 * kMs));
+        }
+        DYNAMIC_SECTION(netCase.label << ": NetReceived posted from another thread and drained on the owner")
+        {
+            LatencyBudgetProbe probe(netCase.mask, smallConfig());
+            SpscMailbox<Event, 8> mailbox;
+            const NetHopCase posted = netCase;
+            bool pushed = false;
+            std::thread producer([&mailbox, &pushed, posted] {
+                pushed = mailbox.tryPush(Event::stamp(posted.stream, kLane, 12u, Point::NetReceived, 2.000));
+            });
+            producer.join();
+            REQUIRE(pushed);
+            probe.stamp(netCase.stream, kLane, 12u, netCase.end, 2.0135);
+            CHECK(mailbox.drain([&](const Event& event) { probe.apply(event); }) == 1u);
+            CHECK(mailbox.takeDroppedCount() == 0u);
+
+            const WindowReport report = closeNow(probe);
+            const HopSummary* net = findHop(report, netCase.hop);
+            REQUIRE(net != nullptr);
+            CHECK(net->n == 1u);
+            CHECK(net->p50 == Catch::Approx(13.5 * kMs));
+            CHECK(report.duplicateStamps == 0u);
+        }
+    }
+}
+
+TEST_CASE("LatencyBudgetProbe.DefaultMasksReportTodaysHops", "[LatencyProbe]")
+{
+    SECTION("client")
+    {
+        LatencyBudgetProbe probe(kClientHops, smallConfig());
+        CHECK(reportedHopNames(closeNow(probe))
+            == std::vector<std::string>{ "H1", "H2", "H3", "H6", "H6c", "H7", "H6L", "WIRE" });
+    }
+    SECTION("server")
+    {
+        LatencyBudgetProbe probe(kServerHops, smallConfig());
+        CHECK(reportedHopNames(closeNow(probe))
+            == std::vector<std::string>{ "H3", "H3c", "H4", "H4r", "H5", "H7", "WIRE" });
+    }
+    SECTION("the net masks add their hops before WIRE, in Hop order")
+    {
+        LatencyBudgetProbe client(kClientHops | kClientNetHops, smallConfig());
+        CHECK(reportedHopNames(closeNow(client))
+            == std::vector<std::string>{ "H1", "H2", "H3", "H6", "H6c", "H7", "H6L", "N6", "N6c", "WIRE" });
+        LatencyBudgetProbe server(kServerHops | kServerNetHops, smallConfig());
+        CHECK(reportedHopNames(closeNow(server))
+            == std::vector<std::string>{ "H3", "H3c", "H4", "H4r", "H5", "H7", "N4", "WIRE" });
+    }
+}
+
+TEST_CASE("LatencyBudgetProbe.NetHopsCountMissingStampsOnlyWhenEnabled", "[LatencyProbe]")
+{
+    const auto stampUnpaired = [](LatencyBudgetProbe& probe) {
+        probe.stamp(Stream::Input, kLane, 1u, Point::NetReceived, 1.000);
+        probe.stamp(Stream::Input, kLane, 2u, Point::ServerReceived, 1.010);
+        probe.stamp(Stream::Input, kLane, 3u, Point::ClientReceived, 1.020);
+        probe.stamp(Stream::State, kLane, 4u, Point::NetReceived, 1.030);
+        probe.stamp(Stream::State, kLane, 5u, Point::ClientReceived, 1.040);
+        probe.forgetLane(kLane);
+    };
+
+    SECTION("enabled: each net hop counts its own unpaired starts and ends")
+    {
+        LatencyBudgetProbe probe(kServerNetHops | kClientNetHops, smallConfig());
+        stampUnpaired(probe);
+
+        const WindowReport report = closeNow(probe);
+        REQUIRE(reportedHopNames(report) == std::vector<std::string>{ "N4", "N6", "N6c" });
+        const HopSummary* n4 = findHop(report, Hop::N4);
+        CHECK(n4->n == 0u);
+        CHECK(n4->noEnd == 1u);
+        CHECK(n4->noStart == 1u);
+        const HopSummary* n6 = findHop(report, Hop::N6);
+        CHECK(n6->n == 0u);
+        CHECK(n6->noEnd == 1u);
+        CHECK(n6->noStart == 1u);
+        const HopSummary* n6c = findHop(report, Hop::N6c);
+        CHECK(n6c->n == 0u);
+        CHECK(n6c->noEnd == 1u);
+        CHECK(n6c->noStart == 1u);
+    }
+
+    SECTION("one net hop enabled: the others count nothing")
+    {
+        LatencyBudgetProbe probe(kServerNetHops, smallConfig());
+        stampUnpaired(probe);
+
+        const WindowReport report = closeNow(probe);
+        REQUIRE(reportedHopNames(report) == std::vector<std::string>{ "N4" });
+        CHECK(findHop(report, Hop::N4)->noEnd == 1u);
+        CHECK(findHop(report, Hop::N4)->noStart == 1u);
+    }
+
+    SECTION("default masks: a NetReceived stamp changes no reported counter")
+    {
+        LatencyBudgetProbe withNet(kServerHops, smallConfig());
+        stampUnpaired(withNet);
+        LatencyBudgetProbe withoutNet(kServerHops, smallConfig());
+        withoutNet.stamp(Stream::Input, kLane, 2u, Point::ServerReceived, 1.010);
+        withoutNet.stamp(Stream::Input, kLane, 3u, Point::ClientReceived, 1.020);
+        withoutNet.stamp(Stream::State, kLane, 5u, Point::ClientReceived, 1.040);
+        withoutNet.forgetLane(kLane);
+
+        const WindowReport with    = closeNow(withNet);
+        const WindowReport without = closeNow(withoutNet);
+        REQUIRE(reportedHopNames(with) == reportedHopNames(without));
+        for (std::size_t index = 0; index < with.hopCount; ++index)
+        {
+            CHECK(with.hops[index].n == without.hops[index].n);
+            CHECK(with.hops[index].noStart == without.hops[index].noStart);
+            CHECK(with.hops[index].noEnd == without.hops[index].noEnd);
+        }
+        CHECK(findHop(with, Hop::H4)->noEnd == 1u);
+        CHECK(findHop(with, Hop::N4) == nullptr);
+    }
 }
 
 #endif // WITH_LOW_LEVEL_TESTS

@@ -1703,6 +1703,104 @@ TEST_CASE("RelayMissClass: prediction and resim keep SEPARATE miss classes and d
     REQUIRE(resimDelta.p50 == 2);
 }
 
+TEST_CASE("RelayMargin: prediction reads are counted per sender, and the late share is over reads that formed a probe tick",
+          "[Network][RelayMargin]")
+{
+    RelayReadProbe probe;
+    RelayReadWindowSummary summary;
+    REQUIRE_FALSE(probe.maybeCloseWindow(1000u, summary));
+
+    RemoteInputCache<ProbeTestInput> senderOne(gameZero());
+    senderOne.push(100u, 4u, tagged(100));
+    senderOne.push(104u, 4u, tagged(104));
+    for (std::uint32_t tick : { 104u, 106u, 110u, 108u })
+    {
+        ScheduledRelayedReadReport report;
+        resolveScheduledRelayedInput(senderOne, tick, &report);
+        probe.notePredictionRead(1u, report);
+    }
+
+    RemoteInputCache<ProbeTestInput> senderTwo(gameZero());
+    RemoteInputCache<ProbeTestInput> empty(gameZero());
+    senderTwo.push(200u, 4u, tagged(200));
+    ScheduledRelayedReadReport rungZero;
+    resolveScheduledRelayedInput(empty, 204u, &rungZero);
+    probe.notePredictionRead(2u, rungZero);
+    ScheduledRelayedReadReport hit;
+    resolveScheduledRelayedInput(senderTwo, 204u, &hit);
+    probe.notePredictionRead(2u, hit);
+
+    RemoteInputCache<ProbeTestInput> young(gameZero());
+    young.push(1u, 8u, tagged(1));
+    ScheduledRelayedReadReport underflow;
+    resolveScheduledRelayedInput(young, 3u, &underflow);
+    probe.notePredictionRead(3u, underflow);
+
+    ScheduledRelayedReadReport resimMiss;
+    resolveScheduledRelayedInput(senderOne, 110u, &resimMiss);
+    probe.noteResimRead(resimMiss);
+
+    REQUIRE(probe.trackedSenderCount() == 3u);
+    const RelayReadCounters* one = probe.predictionCountersFor(1u);
+    REQUIRE(one != nullptr);
+    CHECK(one->hit == 2u);
+    CHECK(one->miss == 2u);
+    CHECK(one->delta.sampleCount() == 4u);
+    CHECK(one->lateReads == 2u);
+    CHECK(one->lateShareX1000() == 500u);
+
+    const RelayReadCounters* two = probe.predictionCountersFor(2u);
+    REQUIRE(two != nullptr);
+    CHECK(two->noProbe == 1u);
+    CHECK(two->hit == 1u);
+    CHECK(two->delta.sampleCount() == 1u);
+    CHECK(two->lateShareX1000() == 0u);
+
+    const RelayReadCounters* three = probe.predictionCountersFor(3u);
+    REQUIRE(three != nullptr);
+    CHECK(three->miss == 1u);
+    CHECK(three->delta.sampleCount() == 0u);
+    CHECK(three->lateReads == 0u);
+    CHECK(three->lateShareX1000() == 0u);
+
+    CHECK(probe.predictionCounters().hit == 3u);
+    CHECK(probe.predictionCounters().miss == 3u);
+    CHECK(probe.predictionCounters().noProbe == 1u);
+    CHECK(probe.predictionCounters().lateShareX1000() == 400u);
+    CHECK(probe.resimCounters().miss == 1u);
+    CHECK(probe.resimCounters().lateReads == 1u);
+
+    REQUIRE(probe.maybeCloseWindow(1000u + kRelayReadProbeWindowTicks, summary));
+    REQUIRE(summary.predictionBySender.size() == 3u);
+    CHECK(summary.predictionBySender[0].sender == 1u);
+    CHECK(summary.predictionBySender[1].sender == 2u);
+    CHECK(summary.predictionBySender[2].sender == 3u);
+    CHECK(summary.predictionBySender[0].counters.lateShareX1000() == 500u);
+    RelayDeltaSummary oneDelta;
+    summary.predictionBySender[0].counters.delta.fillSummary(oneDelta);
+    CHECK(oneDelta.samples == 4u);
+    CHECK(oneDelta.minDelta == -4);
+    CHECK(oneDelta.maxDelta == 2);
+
+    SECTION("a sender with no read in a window is absent from the next one")
+    {
+        ScheduledRelayedReadReport again;
+        resolveScheduledRelayedInput(senderTwo, 204u, &again);
+        probe.notePredictionRead(2u, again);
+        REQUIRE(probe.maybeCloseWindow(1000u + 2u * kRelayReadProbeWindowTicks, summary));
+        REQUIRE(summary.predictionBySender.size() == 1u);
+        CHECK(summary.predictionBySender[0].sender == 2u);
+        CHECK(summary.predictionBySender[0].counters.hit == 1u);
+    }
+
+    SECTION("forgetOwner drops the sender's counters")
+    {
+        probe.forgetOwner(1u);
+        CHECK(probe.predictionCountersFor(1u) == nullptr);
+        CHECK(probe.trackedSenderCount() == 2u);
+    }
+}
+
 // ---------------------------------------------------------------------------
 // 11. THE SIGNED-DELTA HISTOGRAM.
 // ---------------------------------------------------------------------------

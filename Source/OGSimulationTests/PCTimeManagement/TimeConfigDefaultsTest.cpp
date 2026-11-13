@@ -2,7 +2,9 @@
 #if WITH_LOW_LEVEL_TESTS
 
 #include "catch_amalgamated.hpp"
+#include "OGSimulation/InputRedundancyBundleCodec.h"
 #include "OGSimulation/PCTimeManagement/TimeConfig.h"
+#include "OGSimulation/SimulationManager.h"
 
 // ---------------------------------------------------------------------------
 // TimeConfig default-drift gate (R-P1) + R-D3 ordering sanity test.
@@ -79,6 +81,9 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     // TimeConfig.h default to 3 in the same atomic change.
     REQUIRE(tc.redundancyDepthTicks == 3);
 
+    // [og-input-latency task 4] 0 = today's `redundancyDepthTicks`, exactly.
+    REQUIRE(tc.redundancyFrames == 0);
+
     // --- Outbound input relay (FRelayedInputRing) --------------------------
     // ⛔ THERE IS DELIBERATELY NO relay-ring retention-depth ASSERTION here,
     // because there is no such field any more (og-netcode-v2-input-relay item
@@ -95,6 +100,9 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     // (§3.3: ~7-8 to cover 80 ms) waits on playtest + the T9 cadence probe — if
     // this assertion ever fails, the change must come WITH that evidence.
     REQUIRE(tc.relayDelayFloorTicks == 0);
+
+    // [og-input-latency task 4] 0 = today's flush: nothing already flushed is re-sent.
+    REQUIRE(tc.relayResendEntries == 0);
 
     // [T39] The correction-state rotation width. A DECIDED number, not a
     // placeholder. [T34] LOWERED 2 -> 1 FOR THE PRE-DIET WINDOW, and it goes back
@@ -177,6 +185,10 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     REQUIRE(tc.muteEchoOnDegradedTier == true);
     REQUIRE(tc.lanZeroDelayOverride == false);
 
+    // --- Back-dating detection (og-input-latency P3) -----------------------
+    // [og-input-latency P3-1] The m0 p50 threshold; its detector is P3-6.
+    REQUIRE(tc.backDateM0P50ThresholdTicks == -5);
+
     // --- Stage 4 observability (fields only, no consumer yet) --------------
     REQUIRE(tc.sn1BroadcastPolicy == TimeConfig::Sn1BroadcastPolicy::RttTiered);
     REQUIRE(tc.sn1IdleBroadcastIntervalTicks == 6);
@@ -191,6 +203,92 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     REQUIRE(tc.recordRedundancyHits == false);
     REQUIRE(tc.aggregateSiblingInputBundles == false);
     REQUIRE(tc.hashLogRingCapacity == 600);
+}
+
+// [og-input-latency task 4] The two latency knobs' shared clamp, which the ini
+// intake and the manager's setters both call.
+TEST_CASE("PCTM.TimeConfig.LatencyKnobClampsAreBoundedAndIdempotent", "[PCTM][TimeConfig]")
+{
+    static_assert(latencyKnobs::kMaxRedundancyFrames == inputRedundancyBundle::kMaxSlots,
+        "A frame count above kMaxSlots can only ask for more slots than the bundle holds, so the "
+        "redundancyFrames ceiling is kMaxSlots. Was the range argument in TimeConfig-rationale section 12.");
+    static_assert(latencyKnobs::clampRedundancyFrames(-1) == 0);
+    static_assert(latencyKnobs::clampRelayResendEntries(3) == 2);
+
+    REQUIRE(latencyKnobs::clampRedundancyFrames(-5) == 0);
+    REQUIRE(latencyKnobs::clampRedundancyFrames(0) == 0);
+    REQUIRE(latencyKnobs::clampRedundancyFrames(3) == 3);
+    REQUIRE(latencyKnobs::clampRedundancyFrames(8) == 8);
+    REQUIRE(latencyKnobs::clampRedundancyFrames(9) == 8);
+
+    REQUIRE(latencyKnobs::clampRelayResendEntries(-1) == 0);
+    REQUIRE(latencyKnobs::clampRelayResendEntries(0) == 0);
+    REQUIRE(latencyKnobs::clampRelayResendEntries(1) == 1);
+    REQUIRE(latencyKnobs::clampRelayResendEntries(2) == 2);
+    REQUIRE(latencyKnobs::clampRelayResendEntries(99) == 2);
+
+    for (int32_t raw = -20; raw <= 20; ++raw)
+    {
+        const int32_t frames = latencyKnobs::clampRedundancyFrames(raw);
+        REQUIRE(latencyKnobs::clampRedundancyFrames(frames) == frames);
+        const int32_t entries = latencyKnobs::clampRelayResendEntries(raw);
+        REQUIRE(latencyKnobs::clampRelayResendEntries(entries) == entries);
+    }
+}
+
+namespace
+{
+    struct LatencyKnobMockIntegrationExec {};
+    struct LatencyKnobMockNetSync {};
+    struct LatencyKnobMockInputResolution { void wipeAllForResync(unsigned int) {} };
+    struct LatencyKnobMockReconciliation { void wipeAllForResync(unsigned int) {} };
+    struct LatencyKnobMockSystemsExec {};
+    struct LatencyKnobMockStorage {};
+    struct LatencyKnobMockStaticData {};
+
+    using LatencyKnobTestManager = SimulationManager<
+        LatencyKnobMockIntegrationExec, LatencyKnobMockNetSync, LatencyKnobMockInputResolution, LatencyKnobMockReconciliation, LatencyKnobMockSystemsExec,
+        LatencyKnobMockStorage, LatencyKnobMockStaticData>;
+
+    struct LatencyKnobManagerRig
+    {
+        LatencyKnobMockIntegrationExec integration{};
+        LatencyKnobMockNetSync         netSync{};
+        LatencyKnobMockInputResolution inputResolution{};
+        LatencyKnobMockReconciliation  reconciliation{};
+        LatencyKnobMockSystemsExec     systemsExec{};
+        LatencyKnobMockStorage         storage{};
+        LatencyKnobMockStaticData      staticData{};
+
+        LatencyKnobTestManager manager{
+            /*shouldRunPrediction=*/false,
+            /*tickFrequency (fixed dt, seconds)=*/1.0 / 60.0,
+            LatencyKnobTestManager::Params{ integration, netSync, inputResolution, reconciliation, systemsExec,
+                                            storage, staticData, nullptr } };
+    };
+}
+
+// [og-input-latency task 4] The setter half of each knob's config path (ini intake ->
+// shared clamp -> setter -> proof line); the intake and the proof line are UE-side.
+TEST_CASE("PCTM.TimeConfig.LatencyKnobSettersClamp", "[PCTM][TimeConfig]")
+{
+    LatencyKnobManagerRig rig;
+    REQUIRE(rig.manager.getTimeConfig().redundancyFrames == TimeConfig{}.redundancyFrames);
+    REQUIRE(rig.manager.getTimeConfig().relayResendEntries == TimeConfig{}.relayResendEntries);
+
+    rig.manager.setRedundancyFrames(3);
+    REQUIRE(rig.manager.getTimeConfig().redundancyFrames == 3);
+    rig.manager.setRedundancyFrames(-1);
+    REQUIRE(rig.manager.getTimeConfig().redundancyFrames == 0);
+    rig.manager.setRedundancyFrames(99);
+    REQUIRE(rig.manager.getTimeConfig().redundancyFrames == latencyKnobs::kMaxRedundancyFrames);
+
+    rig.manager.setRelayResendEntries(1);
+    REQUIRE(rig.manager.getTimeConfig().relayResendEntries == 1);
+    rig.manager.setRelayResendEntries(-3);
+    REQUIRE(rig.manager.getTimeConfig().relayResendEntries == 0);
+    rig.manager.setRelayResendEntries(7);
+    REQUIRE(rig.manager.getTimeConfig().relayResendEntries == latencyKnobs::kMaxRelayResendEntries);
 }
 
 // NOTE: the R-D3 HardResync ordering invariant that previously lived here has
