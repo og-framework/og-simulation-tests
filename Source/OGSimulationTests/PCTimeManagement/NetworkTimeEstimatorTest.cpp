@@ -4,9 +4,12 @@
 #include "catch_amalgamated.hpp"
 #include "OGSimulation/PCTimeManagement/NetworkTimeEstimator.h"
 
+#include <algorithm>
+#include <atomic>
 #include <cmath>
 #include <limits>
 #include <string>
+#include <thread>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -718,6 +721,86 @@ TEST_CASE("PCTM.NetworkTimeEstimator.Outlier.WindowSummaryIsReportedAndBounded",
     // And the estimate survived all of it untouched.
     REQUIRE(est.getSmoothedRTT() == 0.010);
     REQUIRE(est.getPredictionOffsetTicks() == cfg.predOffsetFloorTicks);
+}
+
+TEST_CASE("PCTM.NetworkTimeEstimator.TwoThreads.TheReaderSeesOnlyValuesTheWriterWrote", "[Network]")
+{
+    constexpr int kSamples = 100000;
+    NetworkTimeEstimator est(t21Config(), nullptr);
+
+    const auto readRTT    = [&est] { return est.getSmoothedRTT(); };
+    const auto readJitter = [&est] { return est.getSmoothedJitter(); };
+    const auto readFlag   = [&est] { return est.hasFirstRTTSample(); };
+
+    std::vector<double> writtenRTT{ 0.0 };
+    std::vector<double> writtenJitter{ 0.0 };
+    writtenRTT.reserve(kSamples + 1);
+    writtenJitter.reserve(kSamples + 1);
+    std::atomic<bool> writerDone{ false };
+
+    std::thread writer([&] {
+        for (int i = 0; i < kSamples; ++i)
+        {
+            est.updateRTT(0.010 + 0.000001 * static_cast<double>(i % 977) + 0.0000003 * static_cast<double>(i % 13));
+            writtenRTT.push_back(est.getSmoothedRTT());
+            writtenJitter.push_back(est.getSmoothedJitter());
+        }
+        writerDone.store(true, std::memory_order_release);
+    });
+
+    std::vector<double> seenRTT;
+    std::vector<double> seenJitter;
+    std::size_t reads = 0;
+    bool flagFellBack = false;
+    bool lastFlag = false;
+    double lastRTT = -1.0;
+    double lastJitter = -1.0;
+    for (bool done = false; !done;)
+    {
+        done = writerDone.load(std::memory_order_acquire);
+        const double rtt = readRTT();
+        const double jitter = readJitter();
+        const bool flag = readFlag();
+        if (rtt != lastRTT)
+        {
+            seenRTT.push_back(rtt);
+            lastRTT = rtt;
+        }
+        if (jitter != lastJitter)
+        {
+            seenJitter.push_back(jitter);
+            lastJitter = jitter;
+        }
+        flagFellBack = flagFellBack || (lastFlag && !flag);
+        lastFlag = flag;
+        ++reads;
+    }
+    writer.join();
+
+    const double finalRTT = writtenRTT.back();
+    const double finalJitter = writtenJitter.back();
+    std::sort(writtenRTT.begin(), writtenRTT.end());
+    std::sort(writtenJitter.begin(), writtenJitter.end());
+    std::size_t tornRTT = 0;
+    for (const double value : seenRTT)
+    {
+        tornRTT += std::binary_search(writtenRTT.begin(), writtenRTT.end(), value) ? 0u : 1u;
+    }
+    std::size_t tornJitter = 0;
+    for (const double value : seenJitter)
+    {
+        tornJitter += std::binary_search(writtenJitter.begin(), writtenJitter.end(), value) ? 0u : 1u;
+    }
+
+    INFO("reads=" << reads << " distinctRTT=" << seenRTT.size() << " distinctJitter=" << seenJitter.size());
+    CHECK(est.getOutlierRejectedSampleCount() == 0u);
+    CHECK(est.getRejectedRTTSampleCount() == 0u);
+    CHECK(tornRTT == 0u);
+    CHECK(tornJitter == 0u);
+    CHECK_FALSE(flagFellBack);
+    CHECK(lastFlag);
+    CHECK(lastRTT == finalRTT);
+    CHECK(lastJitter == finalJitter);
 }
 
 #endif // WITH_LOW_LEVEL_TESTS

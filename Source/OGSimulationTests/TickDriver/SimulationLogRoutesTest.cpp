@@ -44,6 +44,7 @@ namespace simulationLogRoutesTest
         { "[Release]",                      SimulationLogRoute::Net,             HostLogLevel::Verbose },
         { "[InputDomain]",                  SimulationLogRoute::Net,             HostLogLevel::Log },
         { "[RelaySkip]",                    SimulationLogRoute::Net,             HostLogLevel::Log },
+        { "[RelayFlush]",                   SimulationLogRoute::Net,             HostLogLevel::Log },
         { "[DivergenceProbe",               SimulationLogRoute::DivergenceProbe, HostLogLevel::Log },
     };
 
@@ -69,7 +70,7 @@ TEST_CASE("SimulationLogRoutes.Rows.PrefixRouteAndPlainLevelArePinnedInOrder", "
     using namespace simulationLogRoutesTest;
 
     REQUIRE(std::size(kSimulationLogRoutes) == std::size(kPinnedRows));
-    REQUIRE(std::size(kSimulationLogRoutes) == 27u);
+    REQUIRE(std::size(kSimulationLogRoutes) == 28u);
     for (std::size_t row = 0; row < std::size(kPinnedRows); ++row)
     {
         INFO("row " << row << " pinned " << kPinnedRows[row].prefix);
