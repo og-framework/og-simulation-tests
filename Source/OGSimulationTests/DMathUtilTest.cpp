@@ -3,6 +3,7 @@
 
 #include "catch_amalgamated.hpp"
 #include "OGSimulation/DMathUtil.h"
+#include "OGSimulation/SimTrig.h"
 #include "glm/glm.hpp"
 #include "glm/gtc/matrix_transform.hpp"
 
@@ -23,9 +24,9 @@ namespace
         if (fromEqualsTo)
             outTransform = glm::mat4(1.0f);
 
-        const float angle = glm::acos(dot);
+        const float angle = simTrig::acos(dot);
         const glm::vec3 rotationAxis = glm::normalize(glm::cross(fromDirection, toDirection));
-        outTransform = glm::rotate(glm::mat4(1.f), angle, rotationAxis);
+        outTransform = simTrig::rotate(glm::mat4(1.f), angle, rotationAxis);
     }
 
     glm::vec3 fromBits(std::uint32_t x, std::uint32_t y, std::uint32_t z)
