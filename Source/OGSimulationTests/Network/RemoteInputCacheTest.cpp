@@ -97,7 +97,7 @@ namespace
     }
 
     // UE-free byte buffer satisfying the codec's BUFFER CONCEPT — the same four
-    // methods FRelayedInputRing exposes over its TArray<uint8>.
+    // methods og-sim's RelayRingBuffer exposes over its fixed array.
     struct StoreTestRing
     {
         std::vector<std::uint8_t> bytes;

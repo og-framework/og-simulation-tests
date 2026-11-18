@@ -6,6 +6,14 @@
 #include "OGSimulation/Network/ReplicatedTierConsumer.h"
 #include "OGSimulation/PCTimeManagement/ClientPredictionClock.h"
 #include "OGSimulation/PCTimeManagement/NetworkTimeEstimator.h"
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <cstdlib>
+#include <limits>
+#include <random>
+#include <string>
 #include <vector>
 
 // ---------------------------------------------------------------------------
@@ -824,6 +832,757 @@ TEST_CASE("ClientPredictionClock.Events.TheEventCountersCannotReachAnyClockDecis
     driveTracedClockLifecycle(sensitivity, 0u, 0u, 0u, 1u);
     REQUIRE(sensitivity.values.size() == clean.values.size());
     REQUIRE_FALSE(sensitivity == clean);
+}
+
+// ---------------------------------------------------------------------------
+// og-input-latency task 27 — the one-shot re-centre (TimeConfig::recentreSettleSamples)
+//
+// The rig replays a join the way the host drives it: one frame is at most one
+// clock sample (the og-sim-net client coalesces, SimNetClient-rationale.md §8)
+// and then that frame's steps. The join frame runs a catch-up BATCH of steps
+// after the hard resync, with no new sample in between, which is the Ph3 gate's
+// landing mechanism. After the join the server advances one tick per frame and
+// the client steps once per frame.
+// ---------------------------------------------------------------------------
+namespace recentreTest
+{
+    struct JoinRig
+    {
+        explicit JoinRig(uint32_t settleSamples)
+        {
+            cfg.recentreSettleSamples = settleSamples;
+        }
+
+        TimeConfig cfg;
+        std::vector<std::string> lines;
+        NetworkTimeEstimator est{cfg, nullptr};
+        ClientPredictionClock clock{cfg, est, [this](const char* line) { lines.emplace_back(line); }};
+        std::vector<ClientPredictionClock::AdvanceResult> results;
+        std::vector<unsigned int> predictionTicks;
+        unsigned int authority = 1502u;
+        int inputDrift = 0;
+        std::vector<int> leadErrors;   // leadMinusTarget() at every frame
+        std::vector<unsigned int> offsets;   // the prediction offset at every frame
+        bool consistent = true;
+
+        // One frame: a sample (an RTT reading and an authority tick), then `steps` advances.
+        void frame(double rttSeconds, unsigned int authorityTick, unsigned int steps)
+        {
+            est.updateRTT(rttSeconds);
+            est.recordAuthorityTick(authorityTick);
+            inputDrift = static_cast<int>(est.getTargetPredictionTick()) - static_cast<int>(clock.getPredictionTick());
+            leadErrors.push_back(leadMinusTarget());
+            offsets.push_back(est.getPredictionOffsetTicks());
+            for (unsigned int step = 0; step < steps; ++step)
+                advance();
+        }
+
+        void advance()
+        {
+            const ClientPredictionClock::DriftAction action = clock.evaluateDrift();
+            const bool owedStall = clock.getRequiredInputDelayIncreaseStallTicks() > 0u;
+            const ClientPredictionClock::AdvanceResult result = clock.advancePrediction();
+            using A = ClientPredictionClock::AdvanceResult;
+            using D = ClientPredictionClock::DriftAction;
+            if (action == D::None && result != A::Normal) consistent = false;
+            if (result == A::Skip && action != D::Skip) consistent = false;
+            if (result == A::Stall && !owedStall && action != D::Stall) consistent = false;
+            if ((result == A::HardResync) != (action == D::HardResync)) consistent = false;
+            results.push_back(result);
+            predictionTicks.push_back(clock.getPredictionTick());
+        }
+
+        // Steady frames after the join: the server moves one tick, the client steps once.
+        void steady(double rttSeconds, unsigned int frames)
+        {
+            for (unsigned int i = 0; i < frames; ++i)
+                frame(rttSeconds, ++authority, 1u);
+        }
+
+        // The last frame's lead minus its target, in ticks: the tick a Normal advance
+        // steps (the last stepped tick + 1) minus the target, read where the clock
+        // reads its drift. This is estimator_trace.py's lead - (target - server).
+        int leadMinusTarget() const
+        {
+            return 1 - inputDrift;
+        }
+
+        // The median lead minus target over the last `frames` frames (odd), as P5-25's AC reads it.
+        int p50LeadMinusTarget(size_t frames) const
+        {
+            std::vector<int> last(leadErrors.end() - static_cast<std::ptrdiff_t>(frames), leadErrors.end());
+            std::sort(last.begin(), last.end());
+            return last[frames / 2u];
+        }
+
+        // The median and the mean lead minus target over frames [from, to).
+        int p50LeadMinusTarget(size_t from, size_t to) const
+        {
+            std::vector<int> span(leadErrors.begin() + static_cast<std::ptrdiff_t>(from),
+                                  leadErrors.begin() + static_cast<std::ptrdiff_t>(to));
+            std::sort(span.begin(), span.end());
+            return span[span.size() / 2u];
+        }
+
+        double meanLeadMinusTarget(size_t from, size_t to) const
+        {
+            double sum = 0.0;
+            for (size_t i = from; i < to; ++i)
+                sum += leadErrors[i];
+            return sum / static_cast<double>(to - from);
+        }
+
+        size_t count(ClientPredictionClock::AdvanceResult kind, size_t from = 0u) const
+        {
+            size_t n = 0u;
+            for (size_t i = from; i < results.size(); ++i)
+                n += results[i] == kind ? 1u : 0u;
+            return n;
+        }
+
+        std::vector<std::string> recentreLines() const
+        {
+            std::vector<std::string> out;
+            for (const std::string& line : lines)
+            {
+                if (line.find("[Clock.Recentre]") != std::string::npos)
+                    out.push_back(line);
+            }
+            return out;
+        }
+    };
+
+    // The Ph3 join (gate_Ph3 §3.1): sixteen queued clock messages coalesce to the
+    // newest one, read with a 0 ms smoothed RTT, and the join frame runs a batch of
+    // 16 steps; then a 10 ms link.
+    void ph3Join(JoinRig& rig)
+    {
+        rig.frame(0.0, rig.authority, 16u);
+        rig.steady(0.010, 300u);
+    }
+
+    // P4-12's inflated first RTT: the first reading is the 104 ms first-bucket
+    // value (under the cold-start ceiling, so it seeds the estimate), then the
+    // link's 10 ms. The hard resync lands on the inflated target, which then falls.
+    void inflatedFirstRttJoin(JoinRig& rig)
+    {
+        rig.frame(0.104, rig.authority, 1u);
+        rig.steady(0.010, 300u);
+    }
+
+    // A join whose lead error flickers across a tick boundary (review_27 F3): the
+    // join frame reads the fresh authority tick and runs `batchSteps`, so the lead
+    // lands batchSteps - 1 above target; afterwards the authority tick arrives one
+    // tick stale on `staleFrames` of every `period` frames, which reads one tick more.
+    void flickeringJoin(JoinRig& rig, unsigned int batchSteps, unsigned int staleFrames, unsigned int period)
+    {
+        rig.frame(0.010, rig.authority, batchSteps);
+        for (unsigned int i = 0; i < 300u; ++i)
+        {
+            ++rig.authority;
+            const bool stale = (i % period) < staleFrames;
+            rig.frame(0.010, stale ? rig.authority - 1u : rig.authority, 1u);
+        }
+    }
+
+    // A raw RTT reading held for a run of samples (an averaged ping's one-second bucket).
+    struct RttRun
+    {
+        double       ms;
+        unsigned int samples;
+    };
+
+    // The Ph3 gate's shaped rendered (b) client1s (P5-25 rework 1, Ph3_b_C1_27 and Ph3_b_C2_27): the
+    // raw RTT their first 1300 NTE lines imply (the smoothed RTT's EWMA inverted, runs merged within
+    // 0.6 ms). The first real reading is an outlier against the 0 seed: rejected 29 times, the 30th
+    // re-seeds onto it and fills the window, so it decides on the start-up spike. Then the RTT falls
+    // about 50 ms over 4 s and settles at 78-87 ms (offset 5-6).
+    const RttRun kPh3bC1Rtt[] = {
+        {0.000, 28u}, {131.571, 51u}, {106.000, 50u}, {96.523, 42u}, {90.000, 45u}, {77.214, 44u},
+        {78.285, 46u}, {81.500, 44u}, {85.071, 91u}, {85.785, 45u}, {83.643, 192u}, {84.714, 47u},
+        {87.211, 93u}, {86.143, 48u}, {85.429, 45u}, {84.000, 47u}, {85.429, 48u}, {82.214, 41u},
+        {84.358, 45u}, {82.214, 48u}, {80.429, 50u}, {83.285, 50u}, {79.000, 48u}, {82.215, 12u},
+    };
+    const RttRun kPh3bC2Rtt[] = {
+        {0.000, 28u}, {139.857, 47u}, {112.286, 49u}, {100.667, 48u}, {94.892, 45u}, {78.964, 47u},
+        {80.750, 48u}, {83.286, 45u}, {85.071, 48u}, {86.142, 49u}, {84.357, 45u}, {81.857, 48u},
+        {79.357, 46u}, {80.786, 95u}, {82.214, 45u}, {84.358, 45u}, {82.214, 88u}, {80.786, 45u},
+        {80.072, 45u}, {80.785, 46u}, {77.929, 48u}, {80.423, 94u}, {82.571, 49u}, {85.072, 46u},
+        {81.856, 61u},
+    };
+
+    // Their 10-30 s window, in samples (frames here).
+    constexpr size_t kPh3bSettledFrom = 440u;
+    constexpr size_t kPh3bSettledTo   = 1250u;
+
+    // One sample per frame: the join frame runs `batchSteps` (its landing above the floor target),
+    // then the server moves one tick and the client steps once per frame.
+    template <size_t N>
+    void rttReplay(JoinRig& rig, unsigned int batchSteps, const RttRun (&runs)[N])
+    {
+        bool joinFrame = true;
+        for (const RttRun& run : runs)
+        {
+            for (unsigned int i = 0; i < run.samples; ++i)
+            {
+                if (joinFrame)
+                    rig.frame(run.ms / 1000.0, rig.authority, batchSteps);
+                else
+                    rig.frame(run.ms / 1000.0, ++rig.authority, 1u);
+                joinFrame = false;
+            }
+        }
+    }
+
+    // The Ph3 gate's loopback (c) main client Ph3_c_C1_27b client1 (P5-25 rework 2, R13), its first 900 NTE lines (15 s)
+    // as its log has them, one sample each: the raw RTT the smoothed RTT's EWMA implies (41 zero readings, the 89 ms
+    // reading rejected 29 times then re-seeded, then the once-a-second ping buckets, runs merged within 0.05 ms), the
+    // authority tick it carried and the advances the client ran before the next sample. Replayed through rework 3's
+    // clock and estimator, the unmerged lines reproduce all 900 target ticks, every advance (16 Stalls, 1 Skip) and the
+    // three [Clock.Recentre] lines byte for byte.
+    const RttRun kPh3cC1Rtt[] = {
+        {0.000, 41u}, {89.429, 59u}, {52.069, 59u}, {40.094, 60u}, {33.390, 60u}, {15.073, 179u}, {15.431, 120u}, {15.782, 60u},
+        {15.426, 60u}, {15.782, 202u},
+    };
+    constexpr unsigned int kPh3cC1FirstAuthority = 1508u;
+    constexpr unsigned int kPh3cC1JoinSteps      = 16u;   // the hard resync and its catch-up batch
+    // One character per sample after the first: 'a' + 3 * (the advances after it) + (the authority ticks it moved - 1).
+    const char kPh3cC1Frames[] =
+        "lgagadddgagdagdagdagdagdagdagdagdddddddddddddddddddddddddddddddddddddddddddddddeddgdeddddddddddddddddgadgadgad"
+        "gadgadgadgadgdagdagdagdagddddddddddddddddddddddddddddddddddddddddddedddgadgadgadgadgadgadgadgadgdagdagdagdagda"
+        "gdagdagdagdagdagdagdagddddddddddddddddddddddddddddddddddddddddgaddddddddddddddddddddeddddddddddddddddddddddddd"
+        "gadgadgadgadgdagdagdagdddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddedddgadgadgadgadgad"
+        "gadgdagdagdagdagdagdagddddddddddddddddddddddddddddddedddddddddddddddddddddddddddddddddgadgadgadgadgadgadgadgad"
+        "gadgdagdagdagdagdagddddddddddddddddddddddddddddddddddddddddddddddddddddedddddddddddgadgadgadgadgadgdagdagdagda"
+        "gdagdagdddddddddddddddddddddeddddddddddddgadgadgadgadgadgadgadgdagdagdagdagddddddddddddddddddddddddddhdddddded"
+        "dddddddgadgadgadgadgadgdagdagdagddddddddddddddddddddddddddddddddddddddddddedddddddddgadgadddddddgadgadgadgadga"
+        "dgadgadgdagdagdagda";
+    static_assert(sizeof(kPh3cC1Frames) == 900u, "one character per sample after the first (899) plus the terminator");
+
+    void ph3cC1Replay(JoinRig& rig)
+    {
+        rig.authority = kPh3cC1FirstAuthority;
+        size_t sample = 0u;
+        for (const RttRun& run : kPh3cC1Rtt)
+        {
+            for (unsigned int i = 0; i < run.samples; ++i, ++sample)
+            {
+                if (sample == 0u)
+                {
+                    rig.frame(run.ms / 1000.0, rig.authority, kPh3cC1JoinSteps);
+                    continue;
+                }
+                const int code = kPh3cC1Frames[sample - 1u] - 'a';
+                rig.authority += static_cast<unsigned int>(code % 3 + 1);
+                rig.frame(run.ms / 1000.0, rig.authority, static_cast<unsigned int>(code / 3));
+            }
+        }
+    }
+
+    // review_27 R1's jittery steady links (task 27 rework 3), one RTT reading per frame from a seeded
+    // mt19937_64 (its output is fixed by the standard; the uniform and the exponential are written
+    // out here because the <random> distributions are not).
+    struct JitteryLink
+    {
+        explicit JitteryLink(uint64_t seed) : rng(seed) {}
+
+        std::mt19937_64 rng;
+
+        double uniform() { return static_cast<double>(rng() >> 11) * 0x1.0p-53; }
+        double exponential() { return -std::log(1.0 - uniform()); }
+
+        // 70 ms + Exp(30 ms): a heavy-tailed link with no RTT step.
+        double exp30Ms() { return 70.0 + 30.0 * exponential(); }
+
+        // Bursty Wi-Fi: 75 ms + Exp(5 ms), with an Exp(80 ms) burst on 5 % of the readings.
+        double wifiMs()
+        {
+            const bool burst = uniform() < 0.05;
+            return 75.0 + (burst ? 80.0 : 5.0) * exponential();
+        }
+    };
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Recentre.ThePh3JoinLandsOnTargetAfterTheSettleWindow",
+          "[PCTM][ClientPredictionClock][Recentre]")
+{
+    using A = ClientPredictionClock::AdvanceResult;
+
+    recentreTest::JoinRig today(0u);
+    recentreTest::ph3Join(today);
+    INFO("recentreSettleSamples=0 lead - target " << today.leadMinusTarget());
+    CHECK(today.leadMinusTarget() == 4);               // the dead band holds the batch's overshoot
+    CHECK(today.count(A::HardResync) == 1u);
+    CHECK(today.count(A::Skip) == 0u);
+    CHECK(today.recentreLines().empty());
+
+    recentreTest::JoinRig fixed(TimeConfig{}.recentreSettleSamples);
+    recentreTest::ph3Join(fixed);
+    INFO("default lead - target " << fixed.leadMinusTarget());
+    CHECK(std::abs(fixed.leadMinusTarget()) * 2 <= 1); // the settled lead within +/-0.5 tick of the target
+    CHECK(fixed.count(A::HardResync) == 1u);
+    CHECK(fixed.count(A::Skip) == 0u);
+    CHECK(fixed.count(A::Stall) == today.count(A::Stall) + 4u);   // exactly the four ticks the dead band held
+    CHECK(fixed.consistent);
+    CHECK_FALSE(fixed.clock.isRecentreArmed());
+    CHECK_FALSE(fixed.clock.isRecentring());
+
+    const std::vector<std::string> lines = fixed.recentreLines();
+    REQUIRE(lines.size() == 1u);
+    CHECK(lines[0] == "[Warning][Clock.Recentre] fromLead=9 toLead=4 owed=5 target=1536 rttMs=9.924 samples=30 cause=join");
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Recentre.AnInflatedFirstRttJoinRecentresToTarget",
+          "[PCTM][ClientPredictionClock][Recentre]")
+{
+    using A = ClientPredictionClock::AdvanceResult;
+
+    recentreTest::JoinRig today(0u);
+    recentreTest::inflatedFirstRttJoin(today);
+    INFO("recentreSettleSamples=0 lead - target " << today.leadMinusTarget());
+    CHECK(today.leadMinusTarget() == 3);
+    CHECK(today.recentreLines().empty());
+
+    recentreTest::JoinRig fixed(TimeConfig{}.recentreSettleSamples);
+    recentreTest::inflatedFirstRttJoin(fixed);
+    INFO("default lead - target " << fixed.leadMinusTarget());
+    CHECK(std::abs(fixed.leadMinusTarget()) * 2 <= 1);
+    CHECK(fixed.count(A::Skip) == 0u);
+    CHECK(fixed.count(A::Stall) == today.count(A::Stall) + 3u);
+    CHECK(fixed.consistent);
+    CHECK(fixed.recentreLines().size() == 1u);
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Recentre.ALandingBelowTargetSkipsUpToIt",
+          "[PCTM][ClientPredictionClock][Recentre]")
+{
+    using A = ClientPredictionClock::AdvanceResult;
+
+    // The IpNetDriver pattern: the first sample is two ticks stale, so the resync
+    // lands two ticks low, and the dead band keeps it there.
+    const auto join = [](recentreTest::JoinRig& rig) {
+        rig.frame(0.010, rig.authority - 2u, 1u);
+        rig.steady(0.010, 300u);
+    };
+
+    recentreTest::JoinRig today(0u);
+    join(today);
+    CHECK(today.leadMinusTarget() == -2);
+    CHECK(today.count(A::Skip) == 0u);
+
+    recentreTest::JoinRig fixed(TimeConfig{}.recentreSettleSamples);
+    join(fixed);
+    CHECK(fixed.leadMinusTarget() == 0);
+    CHECK(fixed.count(A::Skip) == 2u);
+    CHECK(fixed.count(A::Stall) == 0u);
+    CHECK(fixed.consistent);
+    REQUIRE(fixed.recentreLines().size() == 1u);
+    CHECK(fixed.recentreLines()[0].find("fromLead=2 toLead=4 ") != std::string::npos);
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Recentre.ZeroReadingsDoNotFillTheWindow",
+          "[PCTM][ClientPredictionClock][Recentre]")
+{
+    using A = ClientPredictionClock::AdvanceResult;
+
+    // An averaged ping reads 0 until its first bucket fills (60 frames here), then
+    // the link's 100 ms. The window starts at the first real reading, so the
+    // decision sees the 100 ms target, not the floor. The outlier gate re-seeds
+    // onto 100 ms on the window's last sample, so this case also pins that the
+    // decision takes its own frame's offset, not the median run's.
+    const auto join = [](recentreTest::JoinRig& rig) {
+        rig.frame(0.0, rig.authority, 1u);
+        rig.steady(0.0, 59u);
+        rig.steady(0.100, 300u);
+    };
+
+    recentreTest::JoinRig today(0u);
+    join(today);
+    CHECK(today.leadMinusTarget() == -2);
+
+    recentreTest::JoinRig fixed(TimeConfig{}.recentreSettleSamples);
+    join(fixed);
+    CHECK(fixed.leadMinusTarget() == 0);
+    CHECK(fixed.count(A::Skip) == 2u);
+    CHECK(fixed.consistent);
+    const std::vector<std::string> lines = fixed.recentreLines();
+    REQUIRE(lines.size() == 1u);
+    CHECK(lines[0] == "[Warning][Clock.Recentre] fromLead=4 toLead=6 owed=-2 target=1597 rttMs=100.000 samples=30 cause=join");
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Recentre.AJoinOnTargetDoesNothing",
+          "[PCTM][ClientPredictionClock][Recentre]")
+{
+    const auto join = [](recentreTest::JoinRig& rig) {
+        rig.frame(0.010, rig.authority, 1u);
+        rig.steady(0.010, 300u);
+    };
+
+    recentreTest::JoinRig today(0u);
+    join(today);
+    recentreTest::JoinRig fixed(TimeConfig{}.recentreSettleSamples);
+    join(fixed);
+
+    CHECK(today.leadMinusTarget() == 0);
+    CHECK(fixed.leadMinusTarget() == 0);
+    CHECK(fixed.results == today.results);
+    CHECK(fixed.predictionTicks == today.predictionTicks);
+    CHECK(fixed.consistent);
+    const std::vector<std::string> lines = fixed.recentreLines();
+    REQUIRE(lines.size() == 1u);
+    CHECK(lines[0] == "[Warning][Clock.Recentre] fromLead=4 toLead=4 owed=0 target=1536 rttMs=10.000 samples=30 cause=join skipped=within1");
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Recentre.AHardResyncReArmsItAndSteadyStateNeverFiresIt",
+          "[PCTM][ClientPredictionClock][Recentre]")
+{
+    using A = ClientPredictionClock::AdvanceResult;
+
+    recentreTest::JoinRig rig(TimeConfig{}.recentreSettleSamples);
+    recentreTest::ph3Join(rig);
+    REQUIRE(rig.leadMinusTarget() == 0);
+    REQUIRE(rig.recentreLines().size() == 1u);
+
+    // Steady state: the server holds its tick for two frames, the client keeps
+    // stepping, so the lead rises by two inside the dead band. No second re-centre.
+    rig.frame(0.010, rig.authority, 1u);
+    rig.frame(0.010, rig.authority, 1u);
+    rig.steady(0.010, 300u);
+    CHECK(rig.leadMinusTarget() == 2);
+    CHECK(rig.recentreLines().size() == 1u);
+    CHECK_FALSE(rig.clock.isRecentreArmed());
+
+    // A hard resync re-arms it: the server jumps 40 ticks and the client runs a
+    // six-step batch in that frame.
+    const size_t before = rig.results.size();
+    rig.authority += 40u;
+    rig.frame(0.010, rig.authority, 6u);
+    CHECK(rig.count(A::HardResync, before) == 1u);
+    CHECK(rig.clock.isRecentreArmed());
+    rig.steady(0.010, 300u);
+    CHECK(rig.leadMinusTarget() == 0);
+    REQUIRE(rig.recentreLines().size() == 2u);
+    CHECK(rig.recentreLines()[1].find(" cause=resync") != std::string::npos);
+    CHECK(rig.consistent);
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Recentre.ZeroDisablesItExactly",
+          "[PCTM][ClientPredictionClock][Recentre]")
+{
+    // 0 never arms it, so the clock is the pre-re-centre clock: the same results,
+    // ticks and lines as a window that can never fill.
+    recentreTest::JoinRig off(0u);
+    recentreTest::JoinRig never(std::numeric_limits<uint32_t>::max());
+    for (recentreTest::JoinRig* rig : {&off, &never})
+    {
+        recentreTest::ph3Join(*rig);
+        rig->authority += 40u;
+        rig->frame(0.010, rig->authority, 6u);
+        rig->steady(0.010, 300u);
+    }
+    CHECK(off.results == never.results);
+    CHECK(off.predictionTicks == never.predictionTicks);
+    CHECK(off.lines == never.lines);
+    CHECK(off.recentreLines().empty());
+    CHECK_FALSE(off.clock.isRecentreArmed());
+    CHECK(off.consistent);
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Recentre.AFlickeringLeadIsDecidedOnItsMedianAndPaidInFull",
+          "[PCTM][ClientPredictionClock][Recentre]")
+{
+    using A = ClientPredictionClock::AdvanceResult;
+
+    // review_27 F3: a lead error that flickers across a tick boundary frame to frame.
+    // The decision reads the median of the last frames, not one frame, and the
+    // correction it owes is paid in full: no single on-target frame ends it.
+    struct Scenario
+    {
+        unsigned int batchSteps;
+        unsigned int staleFrames;
+        unsigned int period;
+        int          landing;   // the p50 lead minus target the dead band keeps
+        const char*  line;      // decided on steady frame 29, a fresh one: server 1532, offset 4
+    };
+    const Scenario scenarios[] = {
+        // +1 on 2 frames of 3, on target on the third
+        {1u, 2u, 3u, 1, "[Warning][Clock.Recentre] fromLead=5 toLead=4 owed=1 target=1536 rttMs=10.000 samples=30 cause=join"},
+        // +1 on 4 frames of 5
+        {1u, 4u, 5u, 1, "[Warning][Clock.Recentre] fromLead=5 toLead=4 owed=1 target=1536 rttMs=10.000 samples=30 cause=join"},
+        // a Ph3-style +4 landing that reads +3 on 1 frame of 3
+        {4u, 2u, 3u, 4, "[Warning][Clock.Recentre] fromLead=8 toLead=4 owed=4 target=1536 rttMs=10.000 samples=30 cause=join"},
+    };
+    for (const Scenario& s : scenarios)
+    {
+        INFO("batch " << s.batchSteps << ", stale on " << s.staleFrames << " of " << s.period << " frames");
+
+        recentreTest::JoinRig today(0u);
+        recentreTest::flickeringJoin(today, s.batchSteps, s.staleFrames, s.period);
+        CHECK(today.p50LeadMinusTarget(121u) == s.landing);
+        CHECK(today.count(A::Stall) == 0u);
+
+        recentreTest::JoinRig fixed(TimeConfig{}.recentreSettleSamples);
+        recentreTest::flickeringJoin(fixed, s.batchSteps, s.staleFrames, s.period);
+        CHECK(fixed.p50LeadMinusTarget(121u) == 0);
+        CHECK(fixed.count(A::Stall) == static_cast<size_t>(s.landing));   // exactly the median's ticks
+        CHECK(fixed.count(A::Skip) == 0u);
+        CHECK(fixed.consistent);
+        CHECK_FALSE(fixed.clock.isRecentring());
+        const std::vector<std::string> lines = fixed.recentreLines();
+        REQUIRE(lines.size() == 1u);
+        CHECK(lines[0] == s.line);
+    }
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Recentre.ThePh3bJoinsReArmWhenTheirStartUpRttSpikeSettles",
+          "[PCTM][ClientPredictionClock][Recentre]")
+{
+    using A = ClientPredictionClock::AdvanceResult;
+
+    // Ph3 R10 (task 27 rework 2): both (b) client1s decided on the start-up RTT spike, offset 8 and 9,
+    // and the target then fell 2-4 ticks, which the dead band held at +2 for the session. The replay
+    // reproduces both logged join decisions exactly; the re-arm re-decides once the RTT-only offset
+    // has stood 2 ticks away for 15 advances (C2 twice: 9 -> 7, then 7 -> 5). Re-pinned in rework 3
+    // (the RTT-only trigger): each re-arm lands 12-14 frames sooner, because the full offset's
+    // jitter term, which the RTT's fall itself raises, no longer holds the run back.
+    struct Client
+    {
+        const char*              name;
+        unsigned int             batchSteps;   // the join's landing above the floor target, plus one
+        size_t                   skips;
+        size_t                   stalls;
+        std::vector<std::string> lines;
+    };
+    const Client clients[] = {
+        {"Ph3_b_C1_27 client1", 5u, 0u, 2u,
+         {"[Warning][Clock.Recentre] fromLead=8 toLead=8 owed=0 target=1567 rttMs=131.571 samples=30 cause=join skipped=within1",
+          "[Warning][Clock.Recentre] fromLead=8 toLead=6 owed=2 target=1687 rttMs=91.513 samples=30 cause=rearm fromTarget=8 toTarget=6"}},
+        {"Ph3_b_C2_27 client1", 4u, 2u, 4u,
+         {"[Warning][Clock.Recentre] fromLead=7 toLead=9 owed=-2 target=1568 rttMs=139.857 samples=30 cause=join",
+          "[Warning][Clock.Recentre] fromLead=9 toLead=7 owed=2 target=1639 rttMs=104.395 samples=30 cause=rearm fromTarget=9 toTarget=7",
+          "[Warning][Clock.Recentre] fromLead=7 toLead=5 owed=2 target=1775 rttMs=79.961 samples=30 cause=rearm fromTarget=7 toTarget=5"}},
+    };
+    for (const Client& c : clients)
+    {
+        INFO(c.name);
+        recentreTest::JoinRig rig(TimeConfig{}.recentreSettleSamples);
+        if (c.batchSteps == 5u)
+            recentreTest::rttReplay(rig, c.batchSteps, recentreTest::kPh3bC1Rtt);
+        else
+            recentreTest::rttReplay(rig, c.batchSteps, recentreTest::kPh3bC2Rtt);
+
+        const int    p50  = rig.p50LeadMinusTarget(recentreTest::kPh3bSettledFrom, recentreTest::kPh3bSettledTo);
+        const double mean = rig.meanLeadMinusTarget(recentreTest::kPh3bSettledFrom, recentreTest::kPh3bSettledTo);
+        INFO("settled lead - target p50 " << p50 << " mean " << mean);
+        CHECK(std::abs(p50) <= 1);            // P5-25's reading of task 27's AC (lead 13:12): every client within +/-1
+        CHECK(std::abs(mean) <= 0.5);         // and the mean within +/-0.5
+        CHECK(rig.count(A::HardResync) == 1u);
+        CHECK(rig.count(A::Skip) == c.skips);
+        CHECK(rig.count(A::Stall) == c.stalls);
+        CHECK(rig.consistent);
+        CHECK(rig.recentreLines() == c.lines);
+    }
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Recentre.AOneTickOffsetWobbleNeverReArmsIt",
+          "[PCTM][ClientPredictionClock][Recentre]")
+{
+    using A = ClientPredictionClock::AdvanceResult;
+
+    // A steady link whose RTT swings in one-second buckets: the offset's ceil() wobbles one tick
+    // around the decision's offset (or one tick off it) and never stands two away, so it never re-arms.
+    struct Wobble
+    {
+        double       joinMs;
+        double       highMs;
+        double       lowMs;
+        unsigned int decisionOffset;
+        unsigned int lowestOffset;
+        unsigned int highestOffset;
+    };
+    const Wobble wobbles[] = {
+        {80.0, 88.0, 78.0, 5u, 5u, 6u},    // decided at 5, wobbles 5..6
+        {88.0, 100.0, 78.0, 6u, 5u, 7u},   // decided at 6, wobbles 5..7
+    };
+    for (const Wobble& w : wobbles)
+    {
+        INFO("join " << w.joinMs << " ms, wobble " << w.lowMs << ".." << w.highMs << " ms");
+        recentreTest::JoinRig rig(TimeConfig{}.recentreSettleSamples);
+        rig.frame(w.joinMs / 1000.0, rig.authority, 1u);
+        rig.steady(w.joinMs / 1000.0, 59u);
+        REQUIRE(rig.recentreLines().size() == 1u);
+        CHECK(rig.offsets.back() == w.decisionOffset);
+        for (int i = 0; i < 10; ++i)
+        {
+            rig.steady(w.highMs / 1000.0, 50u);
+            rig.steady(w.lowMs / 1000.0, 50u);
+        }
+        const auto [lo, hi] = std::minmax_element(rig.offsets.begin() + 100, rig.offsets.end());
+        CHECK(*lo == w.lowestOffset);
+        CHECK(*hi == w.highestOffset);
+        CHECK(rig.recentreLines().size() == 1u);
+        CHECK(rig.recentreLines()[0].find(" cause=join") != std::string::npos);
+        CHECK_FALSE(rig.clock.isRecentreArmed());
+        CHECK(rig.count(A::Skip) == 0u);
+        CHECK(rig.count(A::Stall) == 0u);
+        CHECK(rig.consistent);
+    }
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Recentre.AMidSessionRttStepReArmsItOnce",
+          "[PCTM][ClientPredictionClock][Recentre]")
+{
+    using A = ClientPredictionClock::AdvanceResult;
+
+    // task 27's F2: an RTT step long after the join's decision, 80 -> 120 ms (offset 5 -> 8). The
+    // graduated path takes the two ticks outside the dead band, as before; the re-arm takes the rest.
+    // Re-pinned in rework 3 (the RTT-only trigger): it re-arms 3 frames later and logs the RTT-only
+    // offsets, toTarget=8 where the full offset read 9.
+    const auto session = [](recentreTest::JoinRig& rig) {
+        rig.frame(0.080, rig.authority, 1u);
+        rig.steady(0.080, 300u);
+        rig.steady(0.120, 600u);
+    };
+
+    recentreTest::JoinRig rig(TimeConfig{}.recentreSettleSamples);
+    session(rig);
+    INFO("lead - target " << rig.leadMinusTarget());
+    CHECK(rig.p50LeadMinusTarget(700u, 901u) == 0);
+    CHECK(rig.meanLeadMinusTarget(700u, 901u) == 0.0);
+    CHECK(rig.count(A::Skip) == 3u);
+    CHECK(rig.count(A::Stall) == 0u);
+    CHECK(rig.consistent);
+    CHECK_FALSE(rig.clock.isRecentreArmed());
+    const std::vector<std::string> lines = rig.recentreLines();
+    REQUIRE(lines.size() == 2u);
+    CHECK(lines[0] == "[Warning][Clock.Recentre] fromLead=5 toLead=5 owed=0 target=1537 rttMs=80.000 samples=30 cause=join skipped=within1");
+    CHECK(lines[1] == "[Warning][Clock.Recentre] fromLead=7 toLead=8 owed=-1 target=1859 rttMs=119.986 samples=30 cause=rearm fromTarget=5 toTarget=8");
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Recentre.AJitterySteadyLinkDoesNotReArmIt",
+          "[PCTM][ClientPredictionClock][Recentre]")
+{
+    using A = ClientPredictionClock::AdvanceResult;
+
+    // review_27 R1 (task 27 rework 3): ten minutes of a jittery link with no RTT step. The full
+    // prediction offset carries twice the jitter EWMA and swings over 10 ticks here (5..21), so a
+    // re-arm on it fired 62-108 times a session (rework 2). The re-arm reads the RTT-only offset:
+    // at most two re-arms, and no more than 5 Skips + Stalls beyond the clock before the re-arm
+    // (task 27 rework 1: the same seeds through the same clock and estimator in a standalone harness).
+    enum class Link { Exp30, Wifi };
+    struct Session
+    {
+        const char* name;
+        Link        link;
+        uint64_t    seed;
+        size_t      noRearmSkipsAndStalls;
+    };
+    const Session sessions[] = {
+        {"70 ms + Exp(30 ms), seed 1",  Link::Exp30, 1u,  76u},
+        {"70 ms + Exp(30 ms), seed 2",  Link::Exp30, 2u,  80u},
+        {"70 ms + Exp(30 ms), seed 27", Link::Exp30, 27u, 82u},
+        {"bursty Wi-Fi, seed 1",        Link::Wifi,  1u,  107u},
+        {"bursty Wi-Fi, seed 2",        Link::Wifi,  2u,  69u},
+        {"bursty Wi-Fi, seed 27",       Link::Wifi,  27u, 94u},
+    };
+    for (const Session& s : sessions)
+    {
+        recentreTest::JitteryLink link(s.seed);
+        const auto readingMs = [&]() { return s.link == Link::Exp30 ? link.exp30Ms() : link.wifiMs(); };
+
+        recentreTest::JoinRig rig(TimeConfig{}.recentreSettleSamples);
+        rig.frame(readingMs() / 1000.0, rig.authority, 1u);
+        for (unsigned int i = 1; i < 60u * 600u; ++i)
+            rig.frame(readingMs() / 1000.0, ++rig.authority, 1u);
+
+        const std::vector<std::string> lines = rig.recentreLines();
+        size_t rearms = 0u;
+        for (const std::string& line : lines)
+            rearms += line.find(" cause=rearm") != std::string::npos ? 1u : 0u;
+        const size_t skipsAndStalls = rig.count(A::Skip) + rig.count(A::Stall);
+        const auto [lo, hi] = std::minmax_element(rig.offsets.begin() + 600, rig.offsets.end());
+        INFO(s.name << ": re-arms " << rearms << ", Skips + Stalls " << skipsAndStalls << " (before the re-arm "
+                    << s.noRearmSkipsAndStalls << "), full offset " << *lo << ".." << *hi);
+        CHECK(*hi - *lo >= 10u);                   // the full offset does swing
+        CHECK(lines.size() == rearms + 1u);       // one join decision, then only re-arms
+        CHECK(rearms <= 2u);
+        CHECK(skipsAndStalls <= s.noRearmSkipsAndStalls + 5u);
+        CHECK(rig.count(A::HardResync) == 1u);
+        CHECK(rig.consistent);
+    }
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Recentre.ThePh3cMainClientDoesNotReArmUnderTheOffsetFloor",
+          "[PCTM][ClientPredictionClock][Recentre]")
+{
+    using A = ClientPredictionClock::AdvanceResult;
+
+    // Ph3 R13 (task 27 rework 4): the loopback RTT fell 52 -> 15 ms after the client's second decision, which moved
+    // ceil(smoothedRTT * tickFrequency) 4 -> 2 while the target offset stayed on predOffsetFloorTicks (4). Rework 3's
+    // re-arm fired on it and decided on a 0/-1 lead flicker: `fromLead=3 toLead=4 owed=-1 target=1841 rttMs=15.085 ...
+    // cause=rearm fromTarget=4 toTarget=2`, one Skip, and the client sat at +1 (p50 +1, mean +0.59 over samples
+    // 400-900). The re-arm's offset is floored as the target's is, so that move cannot re-arm: two decisions.
+    recentreTest::JoinRig rig(TimeConfig{}.recentreSettleSamples);
+    recentreTest::ph3cC1Replay(rig);
+    REQUIRE(rig.leadErrors.size() == 900u);
+
+    const int    p50  = rig.p50LeadMinusTarget(400u, 900u);
+    const double mean = rig.meanLeadMinusTarget(400u, 900u);
+    INFO("lead - target over samples 400-900: p50 " << p50 << " mean " << mean);
+    CHECK(p50 == 0);
+    CHECK(std::abs(mean) <= 0.5);
+    CHECK(rig.count(A::HardResync) == 1u);
+    CHECK(rig.count(A::Skip) == 0u);
+    CHECK(rig.count(A::Stall) == 16u);      // the hard resync's catch-up and the two decisions' 2 + 2
+    CHECK(rig.consistent);
+    CHECK_FALSE(rig.clock.isRecentreArmed());
+    const std::vector<std::string> lines = rig.recentreLines();
+    REQUIRE(lines.size() == 2u);
+    CHECK(lines[0] == "[Warning][Clock.Recentre] fromLead=8 toLead=6 owed=2 target=1586 rttMs=89.429 samples=30 cause=join");
+    CHECK(lines[1] == "[Warning][Clock.Recentre] fromLead=6 toLead=4 owed=2 target=1665 rttMs=52.080 samples=30 cause=rearm fromTarget=6 toTarget=4");
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Recentre.AnRttFallUnderTheOffsetFloorReArmsOnlyOnTheFlooredOffset",
+          "[PCTM][ClientPredictionClock][Recentre]")
+{
+    using A = ClientPredictionClock::AdvanceResult;
+
+    // Task 27 rework 4: an RTT that falls from above the floor to under it, 15 ms (ceil 1, floored to 4). It re-arms only
+    // when the floored offset moved 2 or more from the decision's. From 6 it does, and logs the floored offset. From 5
+    // the target falls one tick, inside the dead band, as a one-tick fall above the floor does: no re-arm, the lead
+    // stays +1 (src-29's). From 4 the target does not move at all. Rework 3 re-armed on all three (toTarget=2).
+    struct Fall
+    {
+        double      joinMs;
+        size_t      stalls;
+        int         settled;      // the p50 lead minus target after the fall
+        const char* rearm;        // the re-arm's line, or nullptr
+    };
+    const Fall falls[] = {
+        {90.0, 2u, 0, "[Warning][Clock.Recentre] fromLead=6 toLead=4 owed=2 target=1852 rttMs=15.036 samples=30 cause=rearm fromTarget=6 toTarget=4"},
+        {75.0, 0u, 1, nullptr},
+        {55.0, 0u, 0, nullptr},
+    };
+    for (const Fall& f : falls)
+    {
+        INFO("join " << f.joinMs << " ms, then 15 ms");
+        recentreTest::JoinRig rig(TimeConfig{}.recentreSettleSamples);
+        rig.frame(f.joinMs / 1000.0, rig.authority, 1u);
+        rig.steady(f.joinMs / 1000.0, 299u);
+        rig.steady(0.015, 600u);
+
+        CHECK(rig.p50LeadMinusTarget(600u, 900u) == f.settled);
+        CHECK(rig.count(A::Skip) == 0u);
+        CHECK(rig.count(A::Stall) == f.stalls);
+        CHECK(rig.consistent);
+        CHECK_FALSE(rig.clock.isRecentreArmed());
+        const std::vector<std::string> lines = rig.recentreLines();
+        REQUIRE(lines.size() == (f.rearm != nullptr ? 2u : 1u));
+        CHECK(lines[0].find(" owed=0 ") != std::string::npos);
+        CHECK(lines[0].find(" cause=join skipped=within1") != std::string::npos);
+        if (f.rearm != nullptr)
+            CHECK(lines[1] == f.rearm);
+    }
 }
 
 #endif // WITH_LOW_LEVEL_TESTS

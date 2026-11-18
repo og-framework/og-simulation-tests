@@ -123,8 +123,8 @@ namespace
 
     using BundleCoordinator = ServerReceptionCoordinator<FStandaloneTestHandle, BundleSim>;
 
-    // UE-free byte buffer satisfying the codec's Buffer concept — what the
-    // FInputRedundancyBundle USTRUCT supplies in production, without the engine.
+    // UE-free byte buffer satisfying the codec's Buffer concept — what og-sim's
+    // InputBundleBuffer supplies in production (SimNetServer::receiveBundle).
     struct TestBundleBuffer
     {
         std::vector<std::uint8_t> bytes;

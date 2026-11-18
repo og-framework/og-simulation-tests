@@ -60,6 +60,7 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     REQUIRE(tc.softDriftThresholdTicks == 3);
     REQUIRE(tc.gradualCorrectionRate == 4);
     REQUIRE(tc.minTicksBeforeDriftCheck == 60);
+    REQUIRE(tc.recentreSettleSamples == 30);
 
     // --- Tick frequency ----------------------------------------------------
     // Struct default is the long-term 60 Hz target. The runtime overrides this
@@ -75,7 +76,7 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     // --- HardResync failsafe backstop (bumped 15 -> 21 in T1) --------------
     REQUIRE(tc.hardResyncThresholdTicks == 21);
 
-    // --- Input redundancy (FInputRedundancyBundle) -------------------------
+    // --- Input redundancy (InputBundleBuffer) ------------------------------
     // 60 Hz ratified target (active default since Stage 2 / T15). The historical
     // 100 Hz interim value was 5; T15 flipped both this assertion and the
     // TimeConfig.h default to 3 in the same atomic change.
@@ -84,7 +85,7 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     // [og-input-latency task 4] 0 = today's `redundancyDepthTicks`, exactly.
     REQUIRE(tc.redundancyFrames == 0);
 
-    // --- Outbound input relay (FRelayedInputRing) --------------------------
+    // --- Outbound input relay (RelayRingBuffer) ----------------------------
     // ⛔ THERE IS DELIBERATELY NO relay-ring retention-depth ASSERTION here,
     // because there is no such field any more (og-netcode-v2-input-relay item
     // 63 / RN-13, 2026-08-16: retired — its old identifier is on record in

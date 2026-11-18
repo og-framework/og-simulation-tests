@@ -13,22 +13,24 @@
 #include <vector>
 
 //////////////////////////////////////////////////////////////////////////////
-// Stage 1 / Task 12: FInputRedundancyBundle wire-type regression suite.
+// Stage 1 / Task 12: input-bundle wire-type regression suite (Was FInputRedundancyBundle's;
+// that USTRUCT was deleted by og-input-latency task P5-9).
 //
 // These exercise the ENGINE-AGNOSTIC bundle codec
 // (OGSimulation/InputRedundancyBundleCodec.h) — the exact append / dedup /
-// iterate / version logic that the UE-side FInputRedundancyBundle USTRUCT
-// delegates to. Running against the codec (not the USTRUCT) lets these tests
+// iterate / version logic that og-sim's InputBundleBuffer delegates to (and the
+// UE-side USTRUCT did until P5-9). Running against the codec (not a wrapper) lets these tests
 // live in the pure-C++ Low-Level-Tests target, which deliberately does NOT link
 // the engine-coupled OGSimulationUnreal module (bCompileAgainstEngine = false).
 //
-// DEFERRED (UE-coupled, not in this file): the watermark-trim NetSerialize +
-// version-byte-offset regressions for FSimulationStateSyncBuffer (Backlog T12
+// DEFERRED, then MOOT (UE-coupled, not in this file): the watermark-trim NetSerialize +
+// version-byte-offset regressions for FSimulationStateSyncBuffer (deleted by og-input-latency task P5-9; Backlog T12
 // "WireFormat_Buffers.cpp"; the input sync buffer it also named was retired in
 // og-syncedInput-rework task 9). Those need
 // FArchive + the USTRUCT NetSerialize, which require an engine-coupled LLT
 // target that does not exist yet (docs/low-level-tests.md "Future: testing
 // UE-coupled code"). Deferred per user direction 2026-06-22; see impl notes.
+// Its engine-free successor, CorrectionStateBuffer, is tested in SimPayloadBuffersTest.cpp.
 //
 // NOTE on R-T5 / kMaxSlots enforcement: appendSlot() hard-fails via OG_CHECK
 // (→ assert / checkf, which ABORT — they do not throw). The suite has no
@@ -61,8 +63,7 @@ struct SerializableFields<TestInput>
 namespace
 {
     // UE-free byte buffer satisfying the codec's "BUFFER CONCEPT". Mirrors what
-    // the FInputRedundancyBundle USTRUCT supplies (TArray-backed) without any
-    // engine dependency.
+    // og-sim's InputBundleBuffer supplies, over a std::vector.
     struct TestBundleBuffer
     {
         std::vector<std::uint8_t> bytes;
@@ -107,7 +108,8 @@ namespace
     }
 
     // Feeds every slot of a bundle into the queue, mirroring the server's
-    // ServerReceiveRemoteMove → forEachSlot → queueMove path (Task 9 + Task 10).
+    // forEachSlot → queueMove path as Task 9 + Task 10 built it (entered from
+    // ServerReceiveRemoteMove until og-input-latency task P5-8).
     void deliverBundle(const TestBundleBuffer& bundle, RemoteMoveQueue<TestInput>& queue)
     {
         inputRedundancyBundle::forEachSlot<TestInput>(

@@ -27,10 +27,10 @@
 // KU1CrossArch mode ([Determinism][KU1CrossArch], Task 4) stay OPT-IN and are NOT
 // pulled in by [@og].
 // Note on [WireFormat]: Stage 1 wire-type regression tests (Task 12). The
-// engine-agnostic FInputRedundancyBundle codec tests carry [WireFormat][Bundle]
-// and run by default. The UE-coupled buffer-NetSerialize tests ([WireFormat]
-// [Buffers]) are deferred to a future engine-coupled LLT target (see Task 12
-// impl notes / docs/low-level-tests.md "Future: testing UE-coupled code").
+// engine-agnostic bundle codec tests carry [WireFormat][Bundle] and run by default.
+// The UE-coupled buffer-NetSerialize tests ([WireFormat][Buffers]) were deferred (Task 12
+// impl notes / docs/low-level-tests.md "Future: testing UE-coupled code"); those buffers went
+// with og-input-latency task P5-9, and SimPayloadBuffersTest.cpp tests their successors.
 // Note on [Network]: Stage 3 per-connection netcode surface (og-netcode-v2 tasks
 // 2/4/5/10) — the NetConfig concept plus the engine-agnostic ConnectionTierTable
 // / ServerInputDelayQueue templates, all exercised over the engine-free

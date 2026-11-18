@@ -29,7 +29,7 @@ order:
 Both links have a constant delay of one tick.
 
 **The client builds bundles as production does.** `UplinkClient::buildAndRelease` is the engine-free
-equivalent of `buildRedundancyBundle` followed by the release in `sendLocalInputToAuthorityAll`: the depth is
+equivalent of `SimNetChannel::sendLocalInputToAuthority` followed by the release in `sendLocalInputToAuthorityAll`: the depth is
 clamped to `kMaxSlots`, `forEachRecent` walks the newest entries into `appendSlot`, and then
 `releaseAllButRecent` keeps the **unclamped** depth. The depth is `TimeConfig::redundancyDepthTicks`, 3 today;
 case (i) asserts that.

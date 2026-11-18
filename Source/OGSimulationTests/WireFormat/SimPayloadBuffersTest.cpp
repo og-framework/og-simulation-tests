@@ -70,7 +70,8 @@ namespace simPayloadBuffersTest
     using SpbState = SimulationComposite<SpbPosition, SpbHealth>;
 
     static_assert(CorrectionStateSyncedBufferConcept<CorrectionStateBuffer, SpbState>,
-        "CorrectionStateBuffer must satisfy the correction buffer concept NetSync binds, as FSimulationStateSyncBuffer does");
+        "CorrectionStateBuffer must satisfy the correction buffer concept NetSync binds. Was 'as "
+        "FSimulationStateSyncBuffer does' (deleted by og-input-latency task P5-9)");
     static_assert(CompositeSyncedBufferConcept<CorrectionStateBuffer, SpbState>,
         "CorrectionStateBuffer must satisfy the composite buffer concept the correction concept refines");
 

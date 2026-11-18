@@ -15,8 +15,8 @@
 // og-netcode-v2-input-relay / T1: the OUTBOUND relay payload — a replace-latest,
 // depth-configurable ring of (captureTick, dA, input) entries.
 //
-// WHAT THESE TESTS EXIST TO PIN (fable finding B2). The inbound
-// FInputRedundancyBundle is append-only and immutable per capture tick: it
+// WHAT THESE TESTS EXIST TO PIN (fable finding B2). The inbound bundle
+// (og-sim's InputBundleBuffer) is append-only and immutable per capture tick: it
 // OG_CHECK-fails on a duplicate and hard-caps at kMaxSlots = 8. The outbound
 // relay is a PERSISTENT replicated property written again on every newer capture
 // tick, so those two properties would make it overflow and assert within 8 ticks.
@@ -34,12 +34,11 @@
 // so the round-trip tests assert the stamp explicitly and the derivation is
 // checked against its two operands rather than against a stored field.
 //
-// These run against the ENGINE-AGNOSTIC codec, which is the same code the UE
-// USTRUCT (FRelayedInputRing) delegates to — a std::vector-backed buffer here
-// versus its TArray-backed one, per the codec's BUFFER CONCEPT. The USTRUCT's
-// UE-only half (NetSerialize) is not reachable from this target and follows the
-// existing deferral for engine-coupled wire tests (see WireFormat_Bundle.cpp /
-// docs/low-level-tests.md "Future: testing UE-coupled code").
+// These run against the ENGINE-AGNOSTIC codec, which is the same code og-sim's
+// RelayRingBuffer (Network/SimPayloadBuffers.h) delegates to — a std::vector-backed
+// buffer here versus its fixed array, per the codec's BUFFER CONCEPT. (Was the UE
+// USTRUCT FRelayedInputRing, deleted by og-input-latency task P5-9; its UE-only half,
+// NetSerialize, was never reachable from this target.)
 //////////////////////////////////////////////////////////////////////////////
 
 namespace
@@ -81,7 +80,7 @@ struct SerializableFields<RingTestPart>
 namespace
 {
     // UE-free byte buffer satisfying the codec's BUFFER CONCEPT — the same four
-    // methods FRelayedInputRing exposes over its TArray<uint8>.
+    // methods og-sim's RelayRingBuffer exposes over its fixed array.
     struct RingTestBuffer
     {
         std::vector<std::uint8_t> bytes;
@@ -108,8 +107,8 @@ namespace
         }
 
         // [T34] The FIFTH concept method, required only by the flush path
-        // (`resetEntries` / `flushStagedInto`). Mirrors FRelayedInputRing's
-        // TArray-backed one, including its shrink-only semantics: a request above
+        // (`resetEntries` / `flushStagedInto`). Mirrors RelayRingBuffer's
+        // (GrowableBytes::bundleTruncateTo), including its shrink-only semantics: a request above
         // the current size is ignored, because every caller is shrinking and a
         // silent grow would hand the codec uninitialized bytes. `std::vector::
         // resize` down keeps capacity, which is the std equivalent of
@@ -205,7 +204,7 @@ TEST_CASE("RelayRing.ReplaceRoundTripCarriesTheStamp", "[WireFormat][RelayRing]"
     REQUIRE(value.value == 9);
 
     // A REVISION of the resident capture tick is legal and updates in place — the
-    // exact operation FInputRedundancyBundle::appendSlot OG_CHECK-fails on. This
+    // exact operation InputBundleBuffer::appendSlot OG_CHECK-fails on. This
     // is what a re-stamp after a tier change does: same capture tick, new dA.
     REQUIRE(relayedInputRing::writeLatest<RingTestInput>(ring, 101u, 2u, RingTestInput{ 11 }, kDepth1));
     REQUIRE(relayedInputRing::entryCount(ring) == 1u);
@@ -441,7 +440,7 @@ TEST_CASE("RelayRing.NeverGrowsBeyondDepth", "[WireFormat][RelayRing]")
 {
     RingTestBuffer ring;
 
-    // Well past FInputRedundancyBundle::kMaxSlots (8) — the count where the
+    // Well past InputBundleBuffer::kMaxSlots (8) — the count where the
     // append-only inbound payload would have overflowed and asserted (fable B2).
     bool allAccepted = true;
     for (std::uint32_t tick = 0; tick < 1000u; ++tick)
@@ -463,7 +462,7 @@ TEST_CASE("RelayRing.NeverGrowsBeyondDepth", "[WireFormat][RelayRing]")
 //////////////////////////////////////////////////////////////////////////////
 // og-netcode-v2-input-relay / T29: THE MALFORMED-LENGTH BOUND.
 //
-// This rule used to live inside FRelayedInputRing::NetSerialize as an inline
+// This rule used to live inside FRelayedInputRing::NetSerialize (deleted by og-input-latency task P5-9) as an inline
 // `used > kMaxWireBytes` comparison, where this target could not see it — and
 // where, from the day Iris replication went live, it did not even RUN, because
 // Iris resolves custom serializers from a name registry and never called that
@@ -471,8 +470,11 @@ TEST_CASE("RelayRing.NeverGrowsBeyondDepth", "[WireFormat][RelayRing]")
 //
 // The lesson worth pinning in a test rather than a comment: a guard is two
 // separate claims — that the RULE is right, and that the rule RUNS. These cases
-// cover the first. The second is a property of the transport and is proved at
-// runtime by the one-shot `[IrisSerializerProof]` report inside NetSerialize.
+// cover the first. The second is a property of the transport: it was proved at
+// runtime by the one-shot `[IrisSerializerProof]` report inside NetSerialize until
+// og-input-latency task P5-9 deleted both, and since then og-sim's
+// RelayRingBuffer::assignFromWire applies the bound on every receipt
+// (SimNetChannel::storeRing; SimPayloadBuffersTest.cpp).
 //////////////////////////////////////////////////////////////////////////////
 
 TEST_CASE("RelayRing.WireLengthBoundAcceptsWellFormedPayloads", "[WireFormat][RelayRing]")

@@ -12,7 +12,8 @@
 #include <vector>
 
 //////////////////////////////////////////////////////////////////////////////
-// Stage 3 / Task 3 (D3.11): FInputRedundancyBundle append-only invariant.
+// Stage 3 / Task 3 (D3.11): the input bundle's append-only invariant (Was
+// FInputRedundancyBundle's, deleted by og-input-latency task P5-9; og-sim's InputBundleBuffer now).
 //
 // R-T5 states that inputs written into a bundle are append-only and immutable
 // per capture-tick: a producer must never revise the input value for a
@@ -62,7 +63,7 @@ struct SerializableFields<BuilderTestInput>
 namespace
 {
     // UE-free byte buffer satisfying the codec's "BUFFER CONCEPT" — the same
-    // adapter surface FInputRedundancyBundle exposes over its TArray<uint8>.
+    // adapter surface og-sim's InputBundleBuffer exposes over its fixed array.
     struct BuilderTestBuffer
     {
         std::vector<std::uint8_t> bytes;
@@ -200,9 +201,10 @@ TEST_CASE("Bundle.DropAppliesToEveryOccupiedTickNotJustTheLast", "[WireFormat][B
 // 9th slot and produced a bounded-but-malformed over-budget payload (the
 // TArray-backed storage grows, so this was never an out-of-bounds write).
 //
-// This is defence in depth, not a live production fix: buildRedundancyBundle
-// already clamps depth to min(redundancyDepthTicks, kMaxSlots), so the overflow
-// is unreachable through the current call graph. These cases pin the kernel's
+// This is defence in depth, not a live production fix: the sole production caller,
+// og-sim-net's SimNetChannel::sendLocalInputToAuthority, already clamps the depth to
+// kMaxSlots, so the overflow is unreachable through the current call graph (Was
+// buildRedundancyBundle, deleted by og-input-latency task P5-8). These cases pin the kernel's
 // behavior for a future caller that skips that clamp.
 //////////////////////////////////////////////////////////////////////////////
 
