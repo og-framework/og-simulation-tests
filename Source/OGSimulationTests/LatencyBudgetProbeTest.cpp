@@ -555,11 +555,12 @@ TEST_CASE("LatencyBudgetProbe.NetHopNamesAndRoutes", "[LatencyProbe]")
     CHECK(std::string(hopName(Hop::N4)) == "N4");
     CHECK(std::string(hopName(Hop::N6)) == "N6");
     CHECK(std::string(hopName(Hop::N6c)) == "N6c");
+    CHECK(std::string(hopName(Hop::N6u)) == "N6u");
     CHECK(std::string(hopName(Hop::Wire)) == "WIRE");
     CHECK(static_cast<std::size_t>(Point::NetReceived) + 1u == kPointCount);
     CHECK(static_cast<std::size_t>(Hop::Wire) + 1u == kHopCount);
     CHECK(kServerNetHops == hopBit(Hop::N4));
-    CHECK(kClientNetHops == (hopBit(Hop::N6) | hopBit(Hop::N6c)));
+    CHECK(kClientNetHops == (hopBit(Hop::N6) | hopBit(Hop::N6c) | hopBit(Hop::N6u)));
     CHECK((kClientHops & (kServerNetHops | kClientNetHops)) == 0u);
     CHECK((kServerHops & (kServerNetHops | kClientNetHops)) == 0u);
 }
@@ -648,7 +649,7 @@ TEST_CASE("LatencyBudgetProbe.DefaultMasksReportTodaysHops", "[LatencyProbe]")
     {
         LatencyBudgetProbe client(kClientHops | kClientNetHops, smallConfig());
         CHECK(reportedHopNames(closeNow(client))
-            == std::vector<std::string>{ "H1", "H2", "H3", "H6", "H6c", "H7", "H6L", "N6", "N6c", "WIRE" });
+            == std::vector<std::string>{ "H1", "H2", "H3", "H6", "H6c", "H7", "H6L", "N6", "N6c", "N6u", "WIRE" });
         LatencyBudgetProbe server(kServerHops | kServerNetHops, smallConfig());
         CHECK(reportedHopNames(closeNow(server))
             == std::vector<std::string>{ "H3", "H3c", "H4", "H4r", "H5", "H7", "N4", "WIRE" });
@@ -672,7 +673,7 @@ TEST_CASE("LatencyBudgetProbe.NetHopsCountMissingStampsOnlyWhenEnabled", "[Laten
         stampUnpaired(probe);
 
         const WindowReport report = closeNow(probe);
-        REQUIRE(reportedHopNames(report) == std::vector<std::string>{ "N4", "N6", "N6c" });
+        REQUIRE(reportedHopNames(report) == std::vector<std::string>{ "N4", "N6", "N6c", "N6u" });
         const HopSummary* n4 = findHop(report, Hop::N4);
         CHECK(n4->n == 0u);
         CHECK(n4->noEnd == 1u);
@@ -685,6 +686,10 @@ TEST_CASE("LatencyBudgetProbe.NetHopsCountMissingStampsOnlyWhenEnabled", "[Laten
         CHECK(n6c->n == 0u);
         CHECK(n6c->noEnd == 1u);
         CHECK(n6c->noStart == 1u);
+        const HopSummary* n6u = findHop(report, Hop::N6u);
+        CHECK(n6u->n == 0u);
+        CHECK(n6u->noEnd == 1u);
+        CHECK(n6u->noStart == 0u);
     }
 
     SECTION("one net hop enabled: the others count nothing")
@@ -719,6 +724,94 @@ TEST_CASE("LatencyBudgetProbe.NetHopsCountMissingStampsOnlyWhenEnabled", "[Laten
         }
         CHECK(findHop(with, Hop::H4)->noEnd == 1u);
         CHECK(findHop(with, Hop::N4) == nullptr);
+    }
+}
+
+TEST_CASE("LatencyBudgetProbe.N6uIsEachRelayedInputsArrivalToItsUse", "[LatencyProbe]")
+{
+    const HopMask clientMask = kClientHops | kClientNetHops;
+
+    SECTION("per input, N6u is N6 + H6 exactly: og-net arrival -> the drain -> the use step")
+    {
+        LatencyBudgetProbe probe(clientMask, smallConfig());
+        const double arrivals[] = { 2.000, 2.010, 2.012 };
+        const double drains[]   = { 2.008, 2.017, 2.017 };
+        const double uses[]     = { 2.030, 2.050, 2.067 };
+        for (uint32_t index = 0; index < 3u; ++index)
+        {
+            const uint32_t tick = 20u + index;
+            probe.stamp(Stream::Input, kLane, tick, Point::NetReceived, arrivals[index]);
+            probe.stamp(Stream::Input, kLane, tick, Point::ClientReceived, drains[index]);
+            probe.stamp(Stream::Input, kLane, tick, Point::Consumed, uses[index]);
+        }
+
+        const WindowReport report = closeNow(probe);
+        const HopSummary* n6u = findHop(report, Hop::N6u);
+        REQUIRE(n6u != nullptr);
+        CHECK(n6u->n == 3u);
+        CHECK(n6u->p50 == Catch::Approx(40.0 * kMs));
+        CHECK(n6u->max == Catch::Approx(55.0 * kMs));
+        CHECK(findHop(report, Hop::N6)->p50 == Catch::Approx(7.0 * kMs));
+        CHECK(findHop(report, Hop::H6)->p50 == Catch::Approx(33.0 * kMs));
+        CHECK(n6u->noStart == 0u);
+        CHECK(n6u->noEnd == 0u);
+        CHECK(n6u->outOfOrder == 0u);
+    }
+
+    SECTION("the first arrival and the first use count; a redundant copy or a re-read does not move either")
+    {
+        LatencyBudgetProbe probe(clientMask, smallConfig());
+        probe.stamp(Stream::Input, kLane, 30u, Point::NetReceived, 3.000);
+        probe.stamp(Stream::Input, kLane, 30u, Point::NetReceived, 3.016);
+        probe.stamp(Stream::Input, kLane, 30u, Point::Consumed, 3.050);
+        probe.stamp(Stream::Input, kLane, 30u, Point::Consumed, 3.067);
+
+        const WindowReport report = closeNow(probe);
+        const HopSummary* n6u = findHop(report, Hop::N6u);
+        REQUIRE(n6u != nullptr);
+        CHECK(n6u->n == 1u);
+        CHECK(n6u->p50 == Catch::Approx(50.0 * kMs));
+        CHECK(report.duplicateStamps == 2u);
+    }
+
+    SECTION("the use stamp may be applied before the arrival (two mailboxes): the sample is the same")
+    {
+        LatencyBudgetProbe probe(clientMask, smallConfig());
+        probe.apply(Event::stamp(Stream::Input, kLane, 40u, Point::Consumed, 4.040));
+        probe.apply(Event::stamp(Stream::Input, kLane, 40u, Point::NetReceived, 4.000));
+
+        const WindowReport report = closeNow(probe);
+        const HopSummary* n6u = findHop(report, Hop::N6u);
+        REQUIRE(n6u != nullptr);
+        CHECK(n6u->n == 1u);
+        CHECK(n6u->p50 == Catch::Approx(40.0 * kMs));
+    }
+
+    SECTION("a local input (no og-net arrival) and a correction are not N6u samples")
+    {
+        LatencyBudgetProbe probe(clientMask, smallConfig());
+        probe.stamp(Stream::Input, kLane, 50u, Point::Captured, 5.000);
+        probe.stamp(Stream::Input, kLane, 50u, Point::Consumed, 5.001);
+        probe.stamp(Stream::State, kLane, 51u, Point::NetReceived, 5.002);
+        probe.stamp(Stream::State, kLane, 51u, Point::Consumed, 5.030);
+        probe.forgetLane(kLane);
+
+        const WindowReport report = closeNow(probe);
+        const HopSummary* n6u = findHop(report, Hop::N6u);
+        REQUIRE(n6u != nullptr);
+        CHECK(n6u->n == 0u);
+        CHECK(n6u->noStart == 1u);
+        CHECK(n6u->noEnd == 0u);
+    }
+
+    SECTION("off in the default client mask: the window reports no N6u")
+    {
+        LatencyBudgetProbe probe(kClientHops, smallConfig());
+        probe.stamp(Stream::Input, kLane, 60u, Point::NetReceived, 6.000);
+        probe.stamp(Stream::Input, kLane, 60u, Point::Consumed, 6.040);
+
+        const WindowReport report = closeNow(probe);
+        CHECK(findHop(report, Hop::N6u) == nullptr);
     }
 }
 

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #if WITH_LOW_LEVEL_TESTS
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -1703,6 +1704,145 @@ TEST_CASE("ANewestCaptureThatIsAlsoLateIsNotParkedNorRelayed", "[Network][Recept
         if (s.find("[Park]") != std::string::npos)
         {
             REQUIRE(s.find("id=78") != std::string::npos);
+        }
+    }
+}
+
+namespace
+{
+    std::vector<std::string> releaseLines(const std::vector<std::string>& lines)
+    {
+        std::vector<std::string> out;
+        for (const std::string& line : lines)
+        {
+            if (line.rfind("[Release]", 0) == 0)
+                out.push_back(line);
+        }
+        return out;
+    }
+}
+
+TEST_CASE("ReceptionCoordinator Release lines carry the host's step time only when the host passes it (og-input-latency P5-37)",
+    "[Network][ReceptionCoordinator]")
+{
+    TimeConfig cfg;
+    const std::int32_t delay = cfg.rttTierInputDelays[kMaxConnectionTierIndex];
+    const auto parkTwo = [&](TestCoordinator& coord) {
+        const FStandaloneTestHandle wire = live(1);
+        REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 1).parked);
+        REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/101, 2).parked);
+    };
+    const std::string tick104 = "[Release] id=10 captureTick=100 releaseTick=" + std::to_string(100 + delay) + " late=0";
+    const std::string tick105 = "[Release] id=10 captureTick=101 releaseTick=" + std::to_string(101 + delay) + " late=0";
+
+    SECTION("without a step time the line is byte-identical to the line before the field existed")
+    {
+        TestCoordinator coord(cfg);
+        std::vector<std::string> logged;
+        coord.setLogger([&logged](const char* m) { logged.emplace_back(m); });
+        parkTwo(coord);
+        RecordingDeliver deliver;
+        coord.releaseDelayedInputs<MockSimA>(100 + delay, /*numSteps=*/2, std::ref(deliver));
+
+        REQUIRE(deliver.calls.size() == 2);
+        CHECK(releaseLines(logged) == std::vector<std::string>{ tick104, tick105 });
+    }
+
+    SECTION("with a step time every line of the drain ends with it, six decimals, the same value on each")
+    {
+        TestCoordinator coord(cfg);
+        std::vector<std::string> logged;
+        coord.setLogger([&logged](const char* m) { logged.emplace_back(m); });
+        parkTwo(coord);
+        RecordingDeliver deliver;
+        coord.releaseDelayedInputs<MockSimA>(100 + delay, /*numSteps=*/2, std::ref(deliver), 16777300.25);
+
+        REQUIRE(deliver.calls.size() == 2);
+        CHECK(releaseLines(logged) == std::vector<std::string>{
+            tick104 + " stepSeconds=16777300.250000", tick105 + " stepSeconds=16777300.250000" });
+    }
+
+    SECTION("the step time changes only the [Release] lines: every other line of the drain is unchanged")
+    {
+        std::vector<std::string> without;
+        std::vector<std::string> with;
+        for (std::vector<std::string>* sink : { &without, &with })
+        {
+            TestCoordinator coord(cfg);
+            coord.setLogger([sink](const char* m) { sink->emplace_back(m); });
+            parkTwo(coord);
+            RecordingDeliver deliver;
+            if (sink == &with)
+                coord.releaseDelayedInputs<MockSimA>(100 + delay, /*numSteps=*/2, std::ref(deliver), 1.0);
+            else
+                coord.releaseDelayedInputs<MockSimA>(100 + delay, /*numSteps=*/2, std::ref(deliver));
+        }
+        REQUIRE(without.size() == with.size());
+        for (std::size_t index = 0; index < without.size(); ++index)
+        {
+            if (without[index].rfind("[Release]", 0) == 0)
+                CHECK(with[index] == without[index] + " stepSeconds=1.000000");
+            else
+                CHECK(with[index] == without[index]);
+        }
+    }
+}
+
+TEST_CASE("ReceptionCoordinator ServerReceive lines carry the host's receive time only when the host passes it (og-input-latency P5-38)",
+    "[Network][ReceptionCoordinator]")
+{
+    TimeConfig cfg;
+    const FStandaloneTestHandle wire = live(1);
+    const std::string tick100 = "[ServerReceive] id=10 tick=100";
+    const std::string tick101 = "[ServerReceive] id=10 tick=101";
+    const auto receiveLines = [](const std::vector<std::string>& lines) {
+        std::vector<std::string> out;
+        for (const std::string& line : lines)
+        {
+            if (line.rfind("[ServerReceive]", 0) == 0)
+                out.push_back(line);
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+
+    SECTION("without a receive time the line is byte-identical to the line before the field existed")
+    {
+        BundleCoordinator coord(cfg);
+        std::vector<std::string> logged;
+        coord.setLogger([&logged](const char* m) { logged.emplace_back(m); });
+        RecordingDeliverySink deliver;
+        coord.receiveInputBundle<BundleSim>(/*id=*/10, wire, /*slot=*/0, makeBundle({ { 100u, 42 }, { 101u, 43 } }), deliver);
+
+        CHECK(receiveLines(logged) == std::vector<std::string>{ tick100, tick101 });
+    }
+
+    SECTION("with a receive time every slot's line ends with it, six decimals, and no other line changes")
+    {
+        std::vector<std::string> without;
+        std::vector<std::string> with;
+        for (std::vector<std::string>* sink : { &without, &with })
+        {
+            BundleCoordinator coord(cfg);
+            coord.setLogger([sink](const char* m) { sink->emplace_back(m); });
+            RecordingDeliverySink deliver;
+            const TestBundleBuffer bundle = makeBundle({ { 100u, 42 }, { 101u, 43 } });
+            if (sink == &with)
+                coord.receiveInputBundle<BundleSim>(/*id=*/10, wire, /*slot=*/0, bundle, deliver, NullRemoteInputRelaySink{},
+                    16777300.25);
+            else
+                coord.receiveInputBundle<BundleSim>(/*id=*/10, wire, /*slot=*/0, bundle, deliver);
+        }
+
+        CHECK(receiveLines(with) == std::vector<std::string>{
+            tick100 + " recvSeconds=16777300.250000", tick101 + " recvSeconds=16777300.250000" });
+        REQUIRE(without.size() == with.size());
+        for (std::size_t index = 0; index < without.size(); ++index)
+        {
+            if (without[index].rfind("[ServerReceive]", 0) == 0)
+                CHECK(with[index] == without[index] + " recvSeconds=16777300.250000");
+            else
+                CHECK(with[index] == without[index]);
         }
     }
 }

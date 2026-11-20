@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -734,6 +735,40 @@ TEST_CASE("SimulationManager.SystemsExecutorReceivesTheManagerRole",
 			[](const std::pair<bool, bool>& f) { return f.second; });
 		REQUIRE(resimFires == 2);   // pre + post of the one replay tick
 	}
+}
+
+// ---------------------------------------------------------------------------
+// og-input-latency P5-37: the host's step time on [AuthoritySimulation]. The authority rig of this
+// file, with a logger: a noted time is written on the next authority step's line only, then
+// cleared; an un-noted step writes the line as it was before the field.
+// ---------------------------------------------------------------------------
+TEST_CASE("SimulationManager.AuthorityLineCarriesANotedStepTimeOnTheNextStepOnly",
+	"[CorrectionCache][ResimGate]")
+{
+	ManagerRig rig(/*shouldRunPrediction=*/false);
+	std::vector<std::string> lines;
+	rig.manager.setLogger([&lines](const char* line) {
+		if (std::string(line).rfind("[AuthoritySimulation]", 0) == 0)
+			lines.emplace_back(line);
+	});
+	const auto step = [&rig] {
+		rig.manager.onGameSimulation(SimulationUpdateInfo(/*isResimulation=*/false, /*isFirstResimulationStep=*/false));
+	};
+
+	step();
+	rig.manager.noteAuthorityStepSeconds(16777300.25);
+	step();
+	step();
+	rig.manager.noteAuthorityStepSeconds(2.0);
+	rig.manager.noteAuthorityStepSeconds(3.5);
+	step();
+
+	REQUIRE(lines == std::vector<std::string>{
+		"[AuthoritySimulation] tick=1",
+		"[AuthoritySimulation] tick=2 stepSeconds=16777300.250000",
+		"[AuthoritySimulation] tick=3",
+		"[AuthoritySimulation] tick=4 stepSeconds=3.500000",
+	});
 }
 
 #endif // WITH_LOW_LEVEL_TESTS
