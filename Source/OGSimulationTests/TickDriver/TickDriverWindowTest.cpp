@@ -149,6 +149,9 @@ TEST_CASE("TickDriverWindow.FrameAndFirstStepLines.Goldens", "[TickDriverWindow]
     CHECK(std::string(client.formatFrameLine(0.03125, 240u)) ==
         "[SimHost.Frame] role=Client stepping=worker dt=0.031250 maxCatchUpSteps=240 rateScale=[0.75,1.25] "
         "timeBase=worldDelta");
+    CHECK(std::string(client.formatFrameLine(0.03125, 240u, 0.0, false, true)) ==
+        "[SimHost.Frame] role=Client stepping=worker dt=0.031250 maxCatchUpSteps=240 rateScale=[0.75,1.25] "
+        "timeBase=worldDelta frameWait=thisFramesSingleStep");
 
     CHECK(std::string(client.formatCatchUpCapWarningLine(0, 240u, 1u)) ==
         "[SimHost.Frame] og.Sim.MaxCatchUpSteps=0 is outside [1, 240]; using 1");
@@ -272,6 +275,8 @@ TEST_CASE("TickDriverWindow.Samples.OverflowIsCountedWithoutAllocationAfterConst
             CHECK(line.find(" replayDepth=18446744073709551616.00/4294967295 ") != std::string::npos);
 
             CHECK(std::string(window.formatFrameLine(-DBL_MAX, std::numeric_limits<uint32_t>::max())).size() <=
+                tickDriverWindow::kFrameLineReserve);
+            CHECK(std::string(window.formatFrameLine(-DBL_MAX, std::numeric_limits<uint32_t>::max(), 0.0, true, true)).size() <=
                 tickDriverWindow::kFrameLineReserve);
             CHECK(std::string(window.formatCatchUpCapWarningLine(std::numeric_limits<int32_t>::min(),
                 std::numeric_limits<uint32_t>::max(), std::numeric_limits<uint32_t>::max())).size() <=

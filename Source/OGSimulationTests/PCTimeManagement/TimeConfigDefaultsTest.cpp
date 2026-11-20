@@ -40,6 +40,7 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     REQUIRE(tc.rttSmoothingAlpha == 0.15);
     REQUIRE(tc.jitterSmoothingAlpha == 0.15);
     REQUIRE(tc.jitterMultiplier == 2.0);
+    REQUIRE(tc.simClockJitterMultiplier == 0.5);
     REQUIRE(tc.predOffsetFloorTicks == 4);
 
     // --- Outlier RTT rejection (T26b) --------------------------------------
@@ -55,6 +56,9 @@ TEST_CASE("PCTM.TimeConfig.DefaultsMatchSynthesisRecommendation", "[PCTM][TimeCo
     REQUIRE(tc.rttOutlierColdStartCeilingSeconds == 0.5);
     REQUIRE(tc.rttOutlierConsecutiveLimit == 30);
     REQUIRE(tc.rttOutlierLogWindowSamples == 600);
+    // og-input-latency P3-10: SimClock since the flip (part B's shadow smoke: the SimClock RTT
+    // below the engine's by about one server frame). Was Engine.
+    REQUIRE(tc.clockRttSource == TimeConfig::ClockRttSource::SimClock);
 
     // --- Drift correction (ClientPredictionClock) --------------------------
     REQUIRE(tc.softDriftThresholdTicks == 3);

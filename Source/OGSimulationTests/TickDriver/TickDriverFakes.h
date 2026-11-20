@@ -697,6 +697,60 @@ namespace tickDriverFakes
     using RecordingIdleGame = BasicRecordingIdleGame<true>;
     using RecordingIdleGameNoDiagnostics = BasicRecordingIdleGame<false>;
 
+    template <typename GameT>
+    class BasicSamplingGame : public GameT
+    {
+    public:
+        template <typename... ArgsT>
+        explicit BasicSamplingGame(Events& events, ArgsT&&... args)
+            : GameT(events, std::forward<ArgsT>(args)...)
+            , m_sampleEvents(&events)
+        {
+        }
+
+        void sampleInput()
+        {
+            m_sampleEvents->push_back("sampleInput");
+            ++sampleInputCalls;
+        }
+
+        uint32_t sampleInputCalls = 0u;
+
+    private:
+        Events* m_sampleEvents;
+    };
+
+    using SamplingGame = BasicSamplingGame<RecordingGame>;
+    using SamplingIdleGame = BasicSamplingGame<RecordingIdleGame>;
+
+    template <typename GameT>
+    class BasicReceivingGame : public GameT
+    {
+    public:
+        template <typename... ArgsT>
+        explicit BasicReceivingGame(Events& events, ArgsT&&... args)
+            : GameT(events, std::forward<ArgsT>(args)...)
+            , m_receiveEvents(&events)
+        {
+        }
+
+        void receiveForStep()
+        {
+            m_receiveEvents->push_back("receiveForStep");
+            ++receiveForStepCalls;
+            if (onReceive)
+                onReceive();
+        }
+
+        std::function<void()> onReceive;
+        uint32_t receiveForStepCalls = 0u;
+
+    private:
+        Events* m_receiveEvents;
+    };
+
+    using ReceivingGame = BasicReceivingGame<RecordingGame>;
+
     class FakePresenter
     {
     public:
@@ -1087,4 +1141,14 @@ namespace tickDriverFakes
     static_assert(TickDriverRunnerHost<RealRunnerHost>, "RealRunnerHost must model TickDriverRunnerHost");
     static_assert(TickDriverIdleGame<RecordingIdleGame>, "RecordingIdleGame must model TickDriverIdleGame");
     static_assert(TickDriverIdleGame<RecordingIdleGameNoDiagnostics>, "RecordingIdleGameNoDiagnostics must model TickDriverIdleGame");
+    static_assert(TickDriverSampleGame<SamplingGame>, "SamplingGame must model TickDriverSampleGame");
+    static_assert(TickDriverSampleGame<SamplingIdleGame> && TickDriverIdleGame<SamplingIdleGame>,
+        "SamplingIdleGame must model both TickDriverSampleGame and TickDriverIdleGame");
+    static_assert(!TickDriverSampleGame<RecordingGame> && !TickDriverSampleGame<RecordingIdleGame>,
+        "RecordingGame and RecordingIdleGame must not sample, so every existing trace keeps its events");
+    static_assert(TickDriverReceiveGame<ReceivingGame> && !TickDriverSampleGame<ReceivingGame>,
+        "ReceivingGame must model TickDriverReceiveGame and nothing else the plain game does not");
+    static_assert(!TickDriverReceiveGame<RecordingGame> && !TickDriverReceiveGame<RecordingIdleGame>
+            && !TickDriverReceiveGame<SamplingGame>,
+        "RecordingGame, RecordingIdleGame and SamplingGame must not receive, so every existing trace keeps its events");
 } // namespace tickDriverFakes

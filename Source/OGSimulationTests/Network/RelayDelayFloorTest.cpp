@@ -438,7 +438,8 @@ TEST_CASE("RelayDelayFloor: clampRelayDelayFloorTicks is the shared intake guard
     REQUIRE(clampRelayDelayFloorTicks(-1000, cfg) == 0);
 
     // BOTH INTAKE POINTS CALL EXACTLY THIS. The ini override at the composition
-    // root and the client's floor OnRep are UE-side (no engine-coupled LLT target
+    // root and the client's floor arrival (og-sim-net's RelayFloor message, into
+    // UESimulationSession::onRelayDelayFloorReceived) are UE-side (no engine-coupled LLT target
     // exists to drive them), but neither owns a private rule — they hand their
     // value to this function and then to
     // SimulationManager::setRelayDelayFloorTicks, which calls it again.

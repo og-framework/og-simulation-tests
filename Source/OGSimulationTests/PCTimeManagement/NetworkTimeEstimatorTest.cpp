@@ -220,28 +220,80 @@ TEST_CASE("PCTM.NetworkTimeEstimator.RttGate.EngineSentinelIsRejected",
 }
 
 // ---------------------------------------------------------------------------
-// POSITIVE CONTROL, and the discrimination that matters most: a genuine 0 ms
-// reading is a VALID sample and must be accepted. Rejecting it would be the
-// obvious over-correction here, and it would be indistinguishable from the
-// silent-zero bug this task exists to remove — which is exactly why the
-// sentinel is negative rather than zero.
+// POSITIVE CONTROL, and the discrimination that matters most: a 0 ms reading is
+// a VALID sample, not the engine's "no reading" sentinel. It is never counted or
+// warned about as rejected, which is exactly why the sentinel is negative rather
+// than zero. Since og-input-latency P5-28 a 0 does not SEED (an averaged ping
+// reads 0 before it has measured anything), so before the first reading above 0
+// it latches nothing; after a seed it is an ordinary low reading (T21 shipped
+// this case as GenuineZeroIsAccepted, with a 0 seed).
 // ---------------------------------------------------------------------------
-TEST_CASE("PCTM.NetworkTimeEstimator.RttGate.GenuineZeroIsAccepted",
+TEST_CASE("PCTM.NetworkTimeEstimator.RttGate.ZeroIsValidButDoesNotSeed",
           "[PCTM][NetworkTimeEstimator]")
 {
     const TimeConfig cfg = t21Config();
     CapturingLogger  log;
     NetworkTimeEstimator est(cfg, log.fn());
 
-    est.updateRTT(0.0);         // a real sub-millisecond loopback reading
+    est.updateRTT(0.0);
 
-    REQUIRE(est.hasFirstRTTSample() == true);
+    REQUIRE(est.hasFirstRTTSample() == false);
     REQUIRE(est.getSmoothedRTT() == 0.0);
     REQUIRE(est.getRejectedRTTSampleCount() == 0u);
+    REQUIRE(est.getMeasuredRTTSampleCount() == 0u);
     REQUIRE(log.countContaining("REJECTED an invalid RTT sample") == 0);
-
-    // Latched a real (if tiny) reading, so the floor legitimately applies.
     REQUIRE(est.getPredictionOffsetTicks() == cfg.predOffsetFloorTicks);
+
+    // After a seed, a 0 moves both EMAs like any low reading.
+    est.updateRTT(0.010);
+    REQUIRE(est.hasFirstRTTSample() == true);
+    REQUIRE(est.getSmoothedRTT() == 0.010);
+    est.updateRTT(0.0);
+    REQUIRE(est.getSmoothedRTT() == Catch::Approx(0.0085));
+    REQUIRE(est.getSmoothedJitter() == Catch::Approx(0.0015));
+    REQUIRE(est.getRejectedRTTSampleCount() == 0u);
+    REQUIRE(est.getOutlierRejectedSampleCount() == 0u);
+}
+
+// ---------------------------------------------------------------------------
+// og-input-latency P5-28 (review_P5-25 N5): the start-up sequence of one
+// adapter's averaged ping (UE `FNetPing`, `RoundTrip=PlayerStateAvg`): the
+// "no reading" sentinel until the first ack, then a 0 (its first average,
+// taken over empty buckets) held until the next bucket closes, then the link's
+// readings, here 75-89 ms as on Ph3's shaped (a) links. Before P5-28 the 0
+// seeded, every real reading was then implausible against 4 * 0 + 30 ms, and
+// the 30th forced a re-seed: 29 rejects and 1 escape.
+// ---------------------------------------------------------------------------
+TEST_CASE("PCTM.NetworkTimeEstimator.StartUp.TheFirstRealReadingAfterAZeroSeeds",
+          "[PCTM][NetworkTimeEstimator]")
+{
+    const TimeConfig cfg = t21Config();
+    const auto readingSeconds = [](int i) { return 0.001 * static_cast<double>(75 + i % 15); };
+
+    for (const int zeros : {1, 46})
+    {
+        INFO(zeros << " zero reading(s)");
+        NetworkTimeEstimator est(cfg, nullptr);
+        feedStableRTT(est, -1.0, 3);
+        feedStableRTT(est, 0.0, zeros);
+        CHECK(est.hasFirstRTTSample() == false);
+        CHECK(est.getPredictionOffsetTicks() == cfg.predOffsetFloorTicks);
+
+        est.updateRTT(readingSeconds(0));
+        CHECK(est.hasFirstRTTSample() == true);
+        CHECK(est.getSmoothedRTT() == readingSeconds(0));   // seeded verbatim
+        CHECK(est.getSmoothedJitter() == 0.0);
+        CHECK(est.getPredictionOffsetTicks() == 5u);   // ceil(0.075 * 60) = ceil(4.5)
+
+        for (int i = 1; i < 60; ++i)
+            est.updateRTT(readingSeconds(i));
+        CHECK(est.getOutlierRejectedSampleCount() == 0u);
+        CHECK(est.getOutlierEscapeCount() == 0u);
+        CHECK(est.getRejectedRTTSampleCount() == 3u);
+        CHECK(est.getMeasuredRTTSampleCount() == 60u);
+        CHECK(est.getSmoothedRTT() > 0.075);
+        CHECK(est.getSmoothedRTT() < 0.089);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -314,8 +366,9 @@ TEST_CASE("PCTM.NetworkTimeEstimator.RttGate.SentinelDoesNotDisturbConvergedStat
 }
 
 // ---------------------------------------------------------------------------
-// The warning is ONE-SHOT. OnRep_Buffer runs at the timing relay's 100 Hz
-// replication rate, so an unthrottled warning would be the same per-tick
+// The warning is ONE-SHOT. The engine reading arrives with every clock tick the
+// server sends (the timing relay's OnRep_Buffer at 100 Hz until og-input-latency
+// P5-7), so an unthrottled warning would be the same per-tick
 // firehose class that produced the 28k-line log T17 had to clean up. The
 // running count stays available so throttling does not cost the magnitude.
 // ---------------------------------------------------------------------------
@@ -386,8 +439,8 @@ TEST_CASE("PCTM.NetworkTimeEstimator.NoSamplePathReturnsFloor",
     SECTION("THE HARMFUL CASE the ruling is about — authority is live, the ping "
             "source is not")
     {
-        // The timing relay's OnRep delivers authorityTick AND reads the ping in
-        // the same handler, so this combination is reachable in production: a
+        // The clock arrival (the timing relay's OnRep until og-input-latency P5-7)
+        // delivers authorityTick AND the ping reading in the same call, so this combination is reachable in production: a
         // real, advancing authority tick with no usable RTT reading behind it.
         CapturingLogger  log;
         NetworkTimeEstimator est(cfg, log.fn());
@@ -425,9 +478,9 @@ TEST_CASE("PCTM.NetworkTimeEstimator.NoSamplePathReturnsFloor",
 
         // ...deliberately. The distinction that matters is exposed separately,
         // so a consumer that needs it is not forced to infer it from a magic
-        // offset value. (T21's positive control, GenuineZeroIsAccepted above,
-        // pins the same discrimination from the other side: a genuine 0 ms
-        // reading is ACCEPTED, not treated as absent.)
+        // offset value. (T21's positive control, ZeroIsValidButDoesNotSeed
+        // above, pins the sentinel/0 discrimination: a 0 ms reading is never
+        // REJECTED, and since P5-28 it does not seed either.)
         REQUIRE(noReading.hasFirstRTTSample() == false);
         REQUIRE(realReading.hasFirstRTTSample() == true);
     }
@@ -801,6 +854,379 @@ TEST_CASE("PCTM.NetworkTimeEstimator.TwoThreads.TheReaderSeesOnlyValuesTheWriter
     CHECK(lastFlag);
     CHECK(lastRTT == finalRTT);
     CHECK(lastJitter == finalJitter);
+}
+
+// ---------------------------------------------------------------------------
+// og-input-latency P3-10: the clock RTT source (TimeConfig::clockRttSource),
+// noteRttSourceChanged() and the SimClock shadow (P3 design §7.1).
+// ---------------------------------------------------------------------------
+namespace clockSourceTest
+{
+    using Source = TimeConfig::ClockRttSource;
+
+    // One ping/pong as og-sim-net's simNetClock::sampleOf forms it: the client sends at
+    // clientSendSeconds, the server's clock reads serverOffsetSeconds ahead of the client's,
+    // the server turns it round in turnaroundSeconds.
+    SimClockRttSample pingPong(double clientSendSeconds, double upSeconds, double downSeconds,
+                               double serverOffsetSeconds = 0.75, double turnaroundSeconds = 0.001)
+    {
+        SimClockRttSample s;
+        s.t0Seconds    = clientSendSeconds;
+        s.t1Seconds    = clientSendSeconds + upSeconds + serverOffsetSeconds;
+        s.t2Seconds    = s.t1Seconds + turnaroundSeconds;
+        s.t3Seconds    = clientSendSeconds + upSeconds + turnaroundSeconds + downSeconds;
+        s.rttSeconds   = (s.t3Seconds - s.t0Seconds) - (s.t2Seconds - s.t1Seconds);
+        s.thetaSeconds = ((s.t1Seconds - s.t0Seconds) + (s.t2Seconds - s.t3Seconds)) / 2.0;
+        return s;
+    }
+
+    // A symmetric ping/pong whose RTT field is exactly rttSeconds.
+    SimClockRttSample ofRtt(double rttSeconds)
+    {
+        SimClockRttSample s = pingPong(10.0, rttSeconds / 2.0, rttSeconds / 2.0);
+        s.rttSeconds = rttSeconds;
+        return s;
+    }
+
+    TimeConfig simClockConfig()
+    {
+        TimeConfig cfg = t21Config();
+        cfg.clockRttSource = Source::SimClock;
+        return cfg;
+    }
+}
+
+// The switch keeps the estimator: no re-seed, the first-sample flag and the counts stay,
+// the first SimClock sample moves the RTT EMA by alpha of the step and leaves the jitter
+// EMA alone (the step is the two sources' bias, not jitter). Seen failing with
+// noteRttSourceChanged() emptied: the jitter EMA takes the 4 ms step.
+TEST_CASE("PCTM.NetworkTimeEstimator.ClockSource.ASwitchNeverResetsTheEstimator",
+          "[PCTM][NetworkTimeEstimator][ClockSource]")
+{
+    using clockSourceTest::Source;
+    const TimeConfig cfg = clockSourceTest::simClockConfig();
+    CapturingLogger log;
+    NetworkTimeEstimator est(cfg, log.fn());
+
+    for (int i = 0; i < 200; ++i)
+        est.noteEngineRttSample(i % 2 == 0 ? 0.082 : 0.086);
+    REQUIRE(est.getActiveRttSource() == Source::Engine);
+    const double       rtt0      = est.getSmoothedRTT();
+    const double       jitter0   = est.getSmoothedJitter();
+    const unsigned int measured0 = est.getMeasuredRTTSampleCount();
+    REQUIRE(jitter0 > 0.001);
+
+    const SimClockRttSample first = clockSourceTest::ofRtt(0.080);
+    est.noteSimClockSample(first);
+    CHECK(est.getActiveRttSource() == Source::SimClock);
+    CHECK(est.hasFirstRTTSample());
+    CHECK(est.getSmoothedRTT() == Catch::Approx(cfg.rttSmoothingAlpha * first.rttSeconds
+                                                + (1.0 - cfg.rttSmoothingAlpha) * rtt0).margin(1e-12));
+    CHECK(est.getSmoothedJitter() == jitter0);
+    CHECK(est.getOutlierEscapeCount() == 0u);
+    CHECK(est.getOutlierRejectedSampleCount() == 0u);
+    CHECK(est.getRejectedRTTSampleCount() == 0u);
+    CHECK(est.getMeasuredRTTSampleCount() == measured0 + 1u);
+    CHECK(log.countContaining("[ClockSource.Switch]") == 1);
+    CHECK(log.countContaining("hasFirstRTTSample=1") == 1);
+
+    // The next SimClock sample is an ordinary one: its distance moves the jitter EMA.
+    const double rtt1 = est.getSmoothedRTT();
+    est.noteSimClockSample(first);
+    CHECK(est.getSmoothedJitter() == Catch::Approx(cfg.jitterSmoothingAlpha * std::abs(first.rttSeconds - rtt1)
+                                                   + (1.0 - cfg.jitterSmoothingAlpha) * jitter0).margin(1e-12));
+
+    // Engine readings no longer reach the estimate, sentinel included.
+    const double rtt2 = est.getSmoothedRTT();
+    est.noteEngineRttSample(0.5);
+    est.noteEngineRttSample(-1.0);
+    CHECK(est.getSmoothedRTT() == rtt2);
+    CHECK(est.getRejectedRTTSampleCount() == 0u);
+
+    // One switch per session.
+    for (int i = 0; i < 50; ++i)
+        est.noteSimClockSample(first);
+    CHECK(log.countContaining("[ClockSource.Switch]") == 1);
+    CHECK(est.getOutlierEscapeCount() == 0u);
+}
+
+// P3 §7.1: "A step down is accepted and slews in ~7 samples" - the EMA's time constant,
+// 1 / rttSmoothingAlpha = 6.7: the 7th sample is the first to have covered 1 - 1/e of the step.
+// The ~4 ms step is P5-27's measured engine-lane turnaround (an engine ping above SimClock).
+TEST_CASE("PCTM.NetworkTimeEstimator.ClockSource.AStepDownSlewsInAboutSevenSamples",
+          "[PCTM][NetworkTimeEstimator][ClockSource]")
+{
+    const TimeConfig cfg = clockSourceTest::simClockConfig();
+    NetworkTimeEstimator est(cfg, nullptr);
+    for (int i = 0; i < 300; ++i)
+        est.noteEngineRttSample(0.084);
+    const double from = est.getSmoothedRTT();
+    REQUIRE(from == Catch::Approx(0.084).margin(1e-12));
+    CHECK(est.getPredictionOffsetTicks() == 6u);   // ceil(5.04)
+
+    const double to = 0.080;
+    int    coveredAt = 0;
+    double previous  = from;
+    for (int k = 1; k <= 30; ++k)
+    {
+        est.noteSimClockSample(clockSourceTest::ofRtt(to));
+        const double remaining = (est.getSmoothedRTT() - to) / (from - to);
+        INFO("sample " << k << " remaining " << remaining);
+        CHECK(remaining == Catch::Approx(std::pow(1.0 - cfg.rttSmoothingAlpha, k)).margin(1e-9));
+        CHECK(est.getSmoothedRTT() < previous);
+        previous = est.getSmoothedRTT();
+        if (coveredAt == 0 && remaining <= std::exp(-1.0))
+            coveredAt = k;
+    }
+    CHECK(coveredAt == 7);
+    CHECK(est.getOutlierRejectedSampleCount() == 0u);
+    CHECK(est.getOutlierEscapeCount() == 0u);
+    CHECK(est.getPredictionOffsetTicks() == 5u);   // ceil(4.8): one tick, inside the dead band
+}
+
+// P3 §7.1: "A step up beyond the plausibility bound for rttOutlierConsecutiveLimit samples
+// re-seeds, which breaks 'no reset'". The control shows each step is beyond the bound (the
+// gate re-seeds on it); after the switch the re-based gate takes it as an ordinary slew.
+// Seen failing with noteRttSourceChanged() emptied: 29 rejects and the re-seed.
+TEST_CASE("PCTM.NetworkTimeEstimator.ClockSource.AStepUpBeyondTheBoundDoesNotReSeedAfterTheReBase",
+          "[PCTM][NetworkTimeEstimator][ClockSource]")
+{
+    struct Step
+    {
+        double from;
+        double to;
+    };
+    for (const Step step : {Step{0.020, 0.200}, Step{0.010, 0.400}})
+    {
+        INFO(step.from * 1000.0 << " ms -> " << step.to * 1000.0 << " ms");
+        const TimeConfig cfg = clockSourceTest::simClockConfig();
+
+        NetworkTimeEstimator control(t21Config(), nullptr);
+        feedStableRTT(control, step.from, 300);
+        REQUIRE(step.to > cfg.rttOutlierMultiplier * control.getSmoothedRTT() + cfg.rttOutlierMarginSeconds);
+        feedStableRTT(control, step.to, 40);
+        CHECK(control.getOutlierEscapeCount() == 1u);
+        CHECK(control.getOutlierRejectedSampleCount() == 29u);
+
+        NetworkTimeEstimator est(cfg, nullptr);
+        for (int i = 0; i < 300; ++i)
+            est.noteEngineRttSample(step.from);
+        const double from         = est.getSmoothedRTT();
+        const double jitterBefore = est.getSmoothedJitter();
+        est.noteSimClockSample(clockSourceTest::ofRtt(step.to));
+        CHECK(est.getSmoothedRTT() == Catch::Approx(cfg.rttSmoothingAlpha * step.to
+                                                    + (1.0 - cfg.rttSmoothingAlpha) * from).margin(1e-12));
+        CHECK(est.getSmoothedJitter() == jitterBefore);
+        for (int i = 1; i < 200; ++i)
+            est.noteSimClockSample(clockSourceTest::ofRtt(step.to));
+        CHECK(est.getOutlierEscapeCount() == 0u);
+        CHECK(est.getOutlierRejectedSampleCount() == 0u);
+        CHECK(est.hasFirstRTTSample());
+        CHECK(est.getSmoothedRTT() == Catch::Approx(step.to).margin(1e-6));
+
+        // The re-base has lapsed: a frame-hitch reading is filtered again.
+        const double settled = est.getSmoothedRTT();
+        est.noteSimClockSample(clockSourceTest::ofRtt(2.0));
+        CHECK(est.getOutlierRejectedSampleCount() == 1u);
+        CHECK(est.getSmoothedRTT() == settled);
+    }
+}
+
+// A first new-source reading above the cold-start ceiling earns no re-base (it would earn no
+// seed): the ordinary gate rejects it, and the next reading is the one that skips the jitter update.
+TEST_CASE("PCTM.NetworkTimeEstimator.ClockSource.AHitchOnTheFirstNewSourceReadingIsNotReBasedOn",
+          "[PCTM][NetworkTimeEstimator][ClockSource]")
+{
+    const TimeConfig cfg = clockSourceTest::simClockConfig();
+    NetworkTimeEstimator est(cfg, nullptr);
+    for (int i = 0; i < 300; ++i)
+        est.noteEngineRttSample(i % 2 == 0 ? 0.018 : 0.022);
+    const double rtt0    = est.getSmoothedRTT();
+    const double jitter0 = est.getSmoothedJitter();
+    REQUIRE(jitter0 > 0.001);
+
+    est.noteSimClockSample(clockSourceTest::ofRtt(0.6));
+    CHECK(est.getOutlierRejectedSampleCount() == 1u);
+    CHECK(est.getSmoothedRTT() == rtt0);
+
+    est.noteSimClockSample(clockSourceTest::ofRtt(0.016));
+    CHECK(est.getSmoothedJitter() == jitter0);
+    est.noteSimClockSample(clockSourceTest::ofRtt(2.0));
+    CHECK(est.getOutlierRejectedSampleCount() == 2u);
+    CHECK(est.getOutlierEscapeCount() == 0u);
+}
+
+// Before the first seed there is nothing to keep: the first SimClock sample seeds verbatim.
+// The engine's averaged ping reads 0 for about a second (P5-28), so this is the usual join.
+TEST_CASE("PCTM.NetworkTimeEstimator.ClockSource.ASwitchBeforeTheFirstSeedSeedsNormally",
+          "[PCTM][NetworkTimeEstimator][ClockSource]")
+{
+    const TimeConfig cfg = clockSourceTest::simClockConfig();
+    CapturingLogger log;
+    NetworkTimeEstimator est(cfg, log.fn());
+    for (int i = 0; i < 30; ++i)
+        est.noteEngineRttSample(0.0);
+    REQUIRE_FALSE(est.hasFirstRTTSample());
+
+    est.noteSimClockSample(clockSourceTest::ofRtt(0.080));
+    CHECK(est.getActiveRttSource() == clockSourceTest::Source::SimClock);
+    CHECK(est.getSmoothedRTT() == 0.080);
+    CHECK(est.getSmoothedJitter() == 0.0);
+    CHECK(log.countContaining("[ClockSource.Switch]") == 1);
+    CHECK(log.countContaining("hasFirstRTTSample=0") == 1);
+
+    est.noteSimClockSample(clockSourceTest::ofRtt(0.084));
+    CHECK(est.getSmoothedJitter() == Catch::Approx(cfg.jitterSmoothingAlpha * (0.084 - 0.080)).margin(1e-12));
+}
+
+// At Engine (the shipped default until P3-10's flip, still the ini's `Engine`): a SimClock
+// sample feeds the shadow and nothing else. Every estimator output equals a twin fed only
+// updateRTT with the engine readings.
+TEST_CASE("PCTM.NetworkTimeEstimator.ClockSource.AtEngineTheShadowNeverMovesTheEstimate",
+          "[PCTM][NetworkTimeEstimator][ClockSource]")
+{
+    TimeConfig cfg = t21Config();
+    cfg.clockRttSource = clockSourceTest::Source::Engine;
+    NetworkTimeEstimator est(cfg, nullptr);
+    NetworkTimeEstimator twin(cfg, nullptr);
+
+    const double engine[] = {-1.0, 0.0, 0.0, 0.081, 0.083, 0.9, 0.082, 0.0, 0.086, 0.079};
+    int index = 0;
+    for (int i = 0; i < 400; ++i, index = (index + 1) % 10)
+    {
+        est.noteSimClockSample(clockSourceTest::ofRtt(0.040 + 0.0001 * (i % 7)));
+        est.noteEngineRttSample(engine[index]);
+        twin.updateRTT(engine[index]);
+        est.recordAuthorityTick(1000u + static_cast<unsigned int>(i));
+        twin.recordAuthorityTick(1000u + static_cast<unsigned int>(i));
+        CHECK(est.getSmoothedRTT() == twin.getSmoothedRTT());
+        CHECK(est.getSmoothedJitter() == twin.getSmoothedJitter());
+        CHECK(est.getTargetPredictionTick() == twin.getTargetPredictionTick());
+    }
+    CHECK(est.getActiveRttSource() == clockSourceTest::Source::Engine);
+    CHECK(est.hasFirstRTTSample() == twin.hasFirstRTTSample());
+    CHECK(est.getRejectedRTTSampleCount() == twin.getRejectedRTTSampleCount());
+    CHECK(est.getOutlierRejectedSampleCount() == twin.getOutlierRejectedSampleCount());
+    CHECK(est.getOutlierEscapeCount() == twin.getOutlierEscapeCount());
+    CHECK(est.getMeasuredRTTSampleCount() == twin.getMeasuredRTTSampleCount());
+    CHECK(est.getClockSourceShadow().samples == 400u);
+}
+
+// The shadow: the SimClock RTT's EMA, the NTP offset of the minimum-RTT sample of the last 8,
+// and RFC 3550's interarrival jitter per direction (J += (|D| - J) / 16, D the change of a
+// direction's transit time). The values below are worked by hand from the lags.
+TEST_CASE("PCTM.NetworkTimeEstimator.ClockSource.TheShadowReadsTheRttTheOffsetAndTheOwdVariation",
+          "[PCTM][NetworkTimeEstimator][ClockSource]")
+{
+    TimeConfig cfg = t21Config();
+    cfg.clockRttSource = clockSourceTest::Source::Engine; // the shadow alone; was the default until P3-10's flip
+    NetworkTimeEstimator est(cfg, nullptr);
+    CHECK(est.getClockSourceShadow().samples == 0u);
+
+    // Up / down one-way lags (ms); the server's clock is 750 ms ahead, a 1 ms turnaround.
+    const double up[]   = {20.0, 22.0, 20.0, 25.0};
+    const double down[] = {30.0, 30.0, 31.0, 30.0};
+    double send = 10.0;
+    for (int i = 0; i < 4; ++i, send += 0.05)
+        est.noteSimClockSample(clockSourceTest::pingPong(send, up[i] / 1000.0, down[i] / 1000.0));
+
+    ClockSourceShadow shadow = est.getClockSourceShadow();
+    CHECK(shadow.samples == 4u);
+    CHECK(shadow.invalidSamples == 0u);
+    // up: D = 2, 2, 5 ms: J = 0.125, 0.2421875, 0.53955078125 ms
+    CHECK(shadow.owdVarUpSeconds == Catch::Approx(0.53955078125e-3).margin(1e-12));
+    // down: D = 0, 1, 1 ms: J = 0, 0.0625, 0.12109375 ms
+    CHECK(shadow.owdVarDownSeconds == Catch::Approx(0.12109375e-3).margin(1e-12));
+    // theta = 750 + (up - down) / 2 ms; the minimum RTT is the first sample's 50 ms: 745 ms
+    CHECK(shadow.offsetSeconds == Catch::Approx(0.745).margin(1e-9));
+    // EMA of 50, 52, 51, 55 ms at alpha 0.15
+    const double ema = 0.15 * 0.055 + 0.85 * (0.15 * 0.051 + 0.85 * (0.15 * 0.052 + 0.85 * 0.050));
+    CHECK(shadow.simClockRttSeconds == Catch::Approx(ema).margin(1e-9));
+
+    // 60 ms samples whose RTT field is exactly 60 ms, so that ties are exact.
+    const auto sixty = [&send](double serverOffsetSeconds = 0.75) {
+        SimClockRttSample s = clockSourceTest::pingPong(send, 0.030, 0.030, serverOffsetSeconds);
+        s.rttSeconds = 0.060;
+        send += 0.05;
+        return s;
+    };
+
+    // Four fill the 8; the 50 ms one is still in them.
+    for (int i = 0; i < 4; ++i)
+        est.noteSimClockSample(sixty());
+    CHECK(est.getClockSourceShadow().offsetSeconds == Catch::Approx(0.745).margin(1e-9));
+
+    // The 9th pushes it out: the 51 ms sample (750 + (20 - 31) / 2 = 744.5 ms).
+    est.noteSimClockSample(sixty());
+    CHECK(est.getClockSourceShadow().offsetSeconds == Catch::Approx(0.7445).margin(1e-9));
+    est.noteSimClockSample(sixty());
+    CHECK(est.getClockSourceShadow().offsetSeconds == Catch::Approx(0.7445).margin(1e-9));
+    // The 11th: the 55 ms sample (747.5 ms); the 12th leaves only 60 ms ones, a tie read on the newest.
+    est.noteSimClockSample(sixty());
+    CHECK(est.getClockSourceShadow().offsetSeconds == Catch::Approx(0.7475).margin(1e-9));
+    est.noteSimClockSample(sixty(0.752));
+    CHECK(est.getClockSourceShadow().offsetSeconds == Catch::Approx(0.752).margin(1e-9));
+
+    // Invalid samples are counted and ignored, and never switch a SimClock config.
+    SimClockRttSample nan = clockSourceTest::ofRtt(0.050);
+    nan.rttSeconds = std::numeric_limits<double>::quiet_NaN();
+    const SimClockRttSample zero = clockSourceTest::ofRtt(0.0);
+    est.noteSimClockSample(nan);
+    est.noteSimClockSample(zero);
+    shadow = est.getClockSourceShadow();
+    CHECK(shadow.samples == 12u);
+    CHECK(shadow.invalidSamples == 2u);
+    CHECK_FALSE(est.hasFirstRTTSample());
+
+    const TimeConfig simCfg = clockSourceTest::simClockConfig();
+    NetworkTimeEstimator sim(simCfg, nullptr);
+    sim.noteSimClockSample(nan);
+    sim.noteSimClockSample(zero);
+    CHECK(sim.getActiveRttSource() == clockSourceTest::Source::Engine);
+    CHECK_FALSE(sim.hasFirstRTTSample());
+}
+
+// og-input-latency P3-13: each RTT source's own jitter multiplier. With both EMAs at 1 the
+// estimate is the last reading (1/16 s) and the jitter its distance from the one before
+// (1/32 s), so every offset ceil((1/16 + m/32) * 60) = ceil(3.75 + 1.875 m) is exact.
+TEST_CASE("PCTM.NetworkTimeEstimator.ClockSource.EachSourceHasItsOwnJitterMultiplier",
+          "[PCTM][NetworkTimeEstimator][ClockSource]")
+{
+    struct Row { double multiplier; unsigned int offset; };
+    const Row rows[] = { { 2.0, 8u }, { 1.5, 7u }, { 1.0, 6u }, { 0.5, 5u }, { 0.0, 4u } };
+    for (const Row& row : rows)
+    {
+        INFO("multiplier " << row.multiplier);
+        TimeConfig cfg = clockSourceTest::simClockConfig();
+        cfg.rttSmoothingAlpha    = 1.0;
+        cfg.jitterSmoothingAlpha = 1.0;
+        cfg.predOffsetFloorTicks = 1u;
+
+        cfg.jitterMultiplier         = 2.0;
+        cfg.simClockJitterMultiplier = row.multiplier;
+        NetworkTimeEstimator sim(cfg, nullptr);
+        sim.noteSimClockSample(clockSourceTest::ofRtt(1.0 / 32.0));
+        sim.noteSimClockSample(clockSourceTest::ofRtt(1.0 / 16.0));
+        REQUIRE(sim.getActiveRttSource() == clockSourceTest::Source::SimClock);
+        REQUIRE(sim.getSmoothedRTT() == 1.0 / 16.0);
+        REQUIRE(sim.getSmoothedJitter() == 1.0 / 32.0);
+        CHECK(sim.getPredictionOffsetTicks() == row.offset);
+        CHECK(sim.getTargetPredictionTick() == row.offset);
+
+        cfg.jitterMultiplier         = row.multiplier;
+        cfg.simClockJitterMultiplier = 2.0;
+        NetworkTimeEstimator engine(cfg, nullptr);
+        engine.noteEngineRttSample(1.0 / 32.0);
+        engine.noteEngineRttSample(1.0 / 16.0);
+        REQUIRE(engine.getActiveRttSource() == clockSourceTest::Source::Engine);
+        REQUIRE(engine.getSmoothedJitter() == 1.0 / 32.0);
+        CHECK(engine.getPredictionOffsetTicks() == row.offset);
+    }
+
+    CHECK(clockJitter::clampJitterMultiplier(1.5) == 1.5);
+    CHECK(clockJitter::clampJitterMultiplier(-0.5) == 0.0);
+    CHECK(clockJitter::clampJitterMultiplier(std::numeric_limits<double>::quiet_NaN()) == 0.0);
+    CHECK(clockJitter::clampJitterMultiplier(9.0) == 4.0);
 }
 
 #endif // WITH_LOW_LEVEL_TESTS

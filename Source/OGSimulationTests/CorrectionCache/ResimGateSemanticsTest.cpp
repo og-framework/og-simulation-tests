@@ -123,7 +123,7 @@ namespace
 		cache.pushPredictionState(GateState{ value });
 	}
 
-	// A landed, DISAGREEING correction for `tick` — the OnRep path
+	// A landed, DISAGREEING correction for `tick` — the correction-arrival path
 	// (`SimulationReconciliation::injectCorrectionState`).
 	void landCorrection(GateCache& cache, std::uint32_t tick)
 	{

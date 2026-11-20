@@ -4,7 +4,9 @@
 Source: `TickDriverFakes.h`, the tick-driver suites' own fake host kit. This file has no guards document:
 the kit's contracts are its `static_assert`s (every fake models its concept), so nothing in it needs a
 `⛔` tag. The kit's own cases are in `TickDriverConceptsTest.cpp` (`TickDriverFakes.Engine.*`,
-`TickDriverFakes.RecordingGameAndHosts.*`) and, for the `FreeRunning` fakes of §6, in `TickDriverFakesTest.cpp`.
+`TickDriverFakes.RecordingGameAndHosts.*`) and, for the `FreeRunning` fakes of §6, in `TickDriverFakesTest.cpp`. The
+sampling games (§1) have no case of their own; `SimulationTickDriverSampleTest.cpp` runs them. Nor do the receiving
+games (§1); `SimulationTickDriverReceiveTest.cpp` runs them.
 
 Everything is in namespace `tickDriverFakes`. The kit includes `StepDriverTestSupport.h` and reuses its
 `LoggedWorld` and `Events`; it does not copy them, and it does not use the anonymous-namespace rigs of
@@ -25,6 +27,8 @@ the step-driver suites.
 | `FakeRunnerHost` (`BasicFakeRunnerHost<true>`), `FakeRunnerHostNoDiagnostics` (`<false>`) | `TickDriverRunnerHost` | constructed over `(BasicFakeEngine&, Events* = nullptr)`; `sleepUntil(s)` records `s` in `sleeps`, appends `sleepUntil` when it has an event list, and advances the engine's `now` to `max(now, s)` |
 | `RealRunnerHost` | `TickDriverRunnerHost` | `sleepUntil(s)` sleeps the calling thread until the real clock reaches `s`; counts `sleepCalls` |
 | `RecordingIdleGame` (`BasicRecordingIdleGame<true, ManagerT, StorageT, RenderSnapshotT>`), `RecordingIdleGameNoDiagnostics` (`<false>`) | `TickDriverIdleGame` | a `BasicRecordingGame` with `idleUntil(deadline)`, which follows an `IdleScript` (§6.2) and records an `IdleCall` in `idleCalls`; constructed over `(Events&, Manager&, Storage&, BasicFakeEngine&, IdleScript = HonourDeadline)`, or over `(Events&, Manager&, Storage&, IdleScript)` for the real-clock scripts; `setScript`, `wake()`, `beforePumpHook`, `setStopAfterSteps(stop, n)`, the atomic `stepsEnded`, `scriptExhaustedCalls` |
+| `SamplingGame` (`BasicSamplingGame<RecordingGame>`), `SamplingIdleGame` (`BasicSamplingGame<RecordingIdleGame>`); `BasicSamplingGame<GameT>` over any recording game | `TickDriverSampleGame` (and `TickDriverIdleGame` over an idle game) | derives from `GameT` and adds `sampleInput()`, which appends one event and counts `sampleInputCalls`; constructed over `(Events&, …)`, the rest forwarded to `GameT`'s constructor, so a case picks the base game's manager type, as `BasicSamplingGame<BasicRecordingGame<TestManager>>`. `RecordingGame` and `RecordingIdleGame` themselves do not sample (a `static_assert`), so no existing trace gains an event |
+| `ReceivingGame` (`BasicReceivingGame<RecordingGame>`); `BasicReceivingGame<GameT>` over any recording game | `TickDriverReceiveGame` (and `TickDriverIdleGame` over an idle game) | derives from `GameT` and adds `receiveForStep()`, which appends one event, counts `receiveForStepCalls` and then calls the injectable `onReceive` (a case's "network": it writes what the step should then read); constructed like `BasicSamplingGame`. `RecordingGame`, `RecordingIdleGame` and `SamplingGame` do not receive (a `static_assert`), so no existing trace gains an event |
 | `FakeRenderSink` | `TickDriverRenderSink` | `addTarget(id, position, displayName)`, `removeTarget(id)`, `targets`; records `applies`; optional `holdRule(held, requested)` for an engine that does not take every write |
 
 Helpers: `LockUnlockOnly` (a mutex with only `Lock`/`Unlock`, the shape of an engine mutex; not
@@ -43,6 +47,8 @@ hooks, the world, the presenter and the world host in one comparison. The spelli
 |---|---|
 | `RecordingGame` | `beforePump`, `onFrameStepsDue:<firstTick>,<steps>`, `afterInlineBatch:<firstTick>`, `releaseInputs:<tick>`, `onStepStarted`, `onStepEnded`, `onPostPhysics` |
 | `RecordingIdleGame` | the `RecordingGame` events, and `idleUntil:<wake>` (`Deadline`, `Activity` or `Unavailable`) after each idle; `beforePumpHook` runs after `beforePump` is recorded |
+| `SamplingGame`, `SamplingIdleGame` | the base game's events, and `sampleInput` for each `sampleInput()` |
+| `ReceivingGame` | the base game's events, and `receiveForStep` for each `receiveForStep()`, before `onReceive` runs |
 | `FakeRunnerHost` | `sleepUntil`, when constructed with an event list |
 | `FakePresenter` | `captureCorrection:<physicsStep>`, `publish:<tick>` |
 | `FakeWorldHost` | `hostAfterTick:<tick>`, `afterRunTick:<physicsStep>`; and, for the backend's calls, `configure:<role>:<stepping>` (role `authority` or `client`, stepping `inline`, `worker` or `runner`), `bindIntegratedTickSource`, `rootDeclarationIndex`, `acquire:<key>:<slot>` or `acquire:<key>:wait`, `bind:<slot>:<id>`, `release:<key>:<slot>:<id>`, `registerVizVolume:<slot>`, `editVizQuery`, `getVizReader`, `restore:<frame>`, `overwriteShadowPoses` |

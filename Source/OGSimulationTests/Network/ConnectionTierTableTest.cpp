@@ -460,7 +460,7 @@ TEST_CASE("DeltaHonoursLanZeroDelayOverride", "[Network][ConnectionTierTable]")
 
 TEST_CASE("TierDelayDeltaTicksIsAntisymmetric", "[Network][ConnectionTierTable]")
 {
-    // The shared helper the client half will use for the OnRep delta must agree
+    // The shared helper the client half uses for the tier-arrival delta must agree
     // with the server's per-sample report, in both directions and under both
     // override settings.
     for (const bool lanOverride : { false, true })
@@ -482,8 +482,8 @@ TEST_CASE("TierDelayDeltaTicksIsAntisymmetric", "[Network][ConnectionTierTable]"
 
 // item 69 / og-netcode-v2-input-relay (filed from item 62's review finding 1).
 //
-// `onConnectionTierReceived`'s `oldTier` is the replicated property's
-// COMPILED DEFAULT (0) on a fresh connection's first real OnRep, not a tier
+// `onConnectionTierReceived`'s `oldTier` is 0 on a fresh connection's first
+// tier arrival (og-sim-net's client has no prior tier: `SimNetClient::onTier`), not a tier
 // the client ever actually ran at — the client was running the pre-arrival
 // no-tier fallback instead. Feeding that 0 into `tierDelayDeltaTicks` as if
 // it were a real prior tier requests a spurious multi-tick client prediction

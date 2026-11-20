@@ -539,12 +539,15 @@ TEST_CASE("RelayRing.WireLengthBoundRejectsOversizePayloads", "[WireFormat][Rela
 //////////////////////////////////////////////////////////////////////////////
 // ⭐ og-netcode-v2-input-relay / T34 — FLUSH-ON-POLL (BARE C1, R = 0).
 //
-// The relay tap runs on the RPC receipt path (paced by packet arrival) while Iris
-// polls the replicated ring once per server game-thread frame. Under the retired
-// replace-latest write path a second arrival in one frame overwrote the first in
-// server memory before replication ever compared the property — measured at
-// ~11.6 % of relayed inputs, and indistinguishable from a wire drop at the client.
-// Flush-on-poll STAGES every arrival and publishes the whole burst at the poll.
+// The relay tap ran on the RPC receipt path (paced by packet arrival) while Iris
+// polled the replicated ring once per server game-thread frame (until
+// og-input-latency P5-7). Under the retired replace-latest write path a second
+// arrival in one frame overwrote the first in server memory before replication ever
+// compared the property — measured at ~11.6 % of relayed inputs, and
+// indistinguishable from a wire drop at the client. Flush-on-poll STAGES every
+// arrival and publishes the whole burst at the poll. og-sim-net's server keeps the
+// shape (`RelayRingStager`): `SimNetServer::flushRelays` publishes once per
+// frame-locked `flushFrame`, and per accepted bundle in immediate mode.
 //
 // WHAT THESE CASES PIN, in order of how expensive getting it wrong would be:
 //

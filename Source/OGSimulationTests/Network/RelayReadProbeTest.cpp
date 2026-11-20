@@ -478,7 +478,7 @@ TEST_CASE("RelayProbe: the arrival gap is measured in CAPTURE ticks, not local t
     RelayArrivalWindowSummary summary;
 
     // THE INVERSE, so neither direction can be passed by coincidence. Arrivals are
-    // 4 LOCAL ticks apart (a laggy OnRep cadence) but each carries only ONE new
+    // 4 LOCAL ticks apart (a laggy arrival cadence) but each carries only ONE new
     // capture tick, because the sender is producing captures no faster than that.
     // A local-tick implementation reports 4; the capture-tick answer is 1.
     std::uint32_t localTick   = 0u;
@@ -609,7 +609,7 @@ TEST_CASE("RelayProbe: arrivals that advance no capture tick are not cadence sam
     RelayArrivalWindowSummary summary;
 
     probe.noteArrival(1u, 300u, /*delivered=*/1u, summary);       // seed
-    // A dA RE-STAMP of an already-resident tick: the ring changed, so OnRep fired,
+    // A dA RE-STAMP of an already-resident tick: a ring arrived, so the callback ran,
     // but no new capture tick was delivered. Counting it as a gap of 0 would drag
     // every percentile down and understate the depth requirement.
     REQUIRE_FALSE(probe.noteArrival(1u, 300u, /*delivered=*/1u, summary));
@@ -1255,8 +1255,8 @@ TEST_CASE("RelayProbe: the ingest report counts NEW capture ticks, not entries p
     REQUIRE(a.entriesIngested == 3u);
     REQUIRE(a.newCaptureTicksIngested == 3u);
 
-    // THE SAME RING AGAIN — the shape a suppressed-but-still-OnRep'd round, or a
-    // re-replication, produces. Three entries are pushed again and NOTHING is new.
+    // THE SAME RING AGAIN — the shape an unchanged ring arriving again produces.
+    // Three entries are pushed again and NOTHING is new.
     const RelayedInputIngestReport b =
         populateRemoteInputCache<ProbeTestInput>(store, first);
     REQUIRE(b.entriesIngested == 3u);
@@ -1314,7 +1314,7 @@ TEST_CASE("RelayProbe: the ingest report drives the cadence probe end to end",
     RelayArrivalProbe                 probe(/*windowSamples=*/3u);
     RelayArrivalWindowSummary         summary;
 
-    // THE WHOLE CHAIN, as the OnRep callback runs it: ring -> real ingest -> report
+    // THE WHOLE CHAIN, as the relay arrival callback runs it: ring -> real ingest -> report
     // -> probe. The capture ticks advance by 5 per arrival while the arrivals
     // themselves are consecutive, so once more the capture answer (5) and any
     // local-tick answer (1) differ.

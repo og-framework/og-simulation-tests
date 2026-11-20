@@ -23,7 +23,7 @@
 // covers the thing that isolation cannot reach: the queue wired into the shape
 // the server actually runs it in, end to end —
 //
-//     RPC arrival  -> ServerInputDelayQueue::enqueue          (game thread)
+//     bundle arrival -> ServerInputDelayQueue::enqueue        (game thread)
 //     pre-step     -> tryDequeueForTick -> RemoteMoveQueue    (game thread)
 //     authority    -> collectInputAll pops RemoteMoveQueue    (physics thread)
 //

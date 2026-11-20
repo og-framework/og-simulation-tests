@@ -36,9 +36,10 @@
 //   4. Wire-value robustness: an out-of-range tier byte must clamp, not index
 //      the TimeConfig arrays out of bounds.
 //
-// WHAT IT DELIBERATELY DOES NOT COVER. The UE transport itself — the
-// COND_OwnerOnly UPROPERTY and OnRep_ConnectionTier on UOGBrawlerSimulatableComponent
-// — is engine surface this suite links none of. That is PIE-only. This suite
+// WHAT IT DELIBERATELY DOES NOT COVER. The transport itself — og-sim-net's
+// ConnectionTier message (og-sim-net's own client tests) and the Unreal client
+// host's hand-off into UESimulationSession::onConnectionTierReceived (PIE-only)
+// — is not linked into this suite. This suite
 // pins the contract that sits UNDER the transport.
 //
 // ALL ASSERTIONS READ `cfg` RATHER THAN LITERALS, so a future TimeConfig default

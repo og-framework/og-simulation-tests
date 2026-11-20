@@ -42,8 +42,8 @@
 //      value lookupTierIndex can return survives the narrowing intact.
 //   3. PUBLISH-ON-CHANGE EQUIVALENCE. The core publish path (T23:
 //      ServerReceptionCoordinator::noteRttSample) skips the send when the tier is
-//      unchanged for that owner (so an unchanged tier does not dirty the
-//      replicated property every input RPC). This pins that the resulting
+//      unchanged for that owner (so an unchanged tier is not re-sent on every
+//      input bundle). This pins that the resulting
 //      sequence of DISTINCT published values is identical to publishing on
 //      every sample — i.e. the bandwidth optimization drops no transition.
 //
@@ -87,7 +87,7 @@ namespace
     };
 
     // Drives `sampleCount` samples of a constant RTT, one per tick, exactly as
-    // the server does on the input-RPC receive path.
+    // the server does on the input-bundle receive path.
     void driveConstantRtt(TestTierTable& table,
                           const FStandaloneTestHandle& handle,
                           double rttMs,
@@ -212,7 +212,7 @@ TEST_CASE("Every derivable tier index survives the uint8 publish narrowing", "[N
 TEST_CASE("Publish-on-change drops no tier transition", "[Network][ServerTierDerivation]")
 {
     // The production setter skips writes when the tier is unchanged. That is a
-    // bandwidth optimization on a property replicated per input RPC, so it must
+    // bandwidth optimization on a value otherwise sent per input bundle, so it must
     // be transition-preserving: the sequence of distinct values a client
     // observes has to match publishing unconditionally.
     const TimeConfig cfg;
