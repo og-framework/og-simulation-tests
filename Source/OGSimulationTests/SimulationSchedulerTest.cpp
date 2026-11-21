@@ -191,6 +191,29 @@ TEST_CASE("SimulationScheduler.RateScaleScalesTheStepRate", "[Scheduler]")
     }
 }
 
+TEST_CASE("SimulationScheduler.CurrentStepIntervalIsTheNewestSegmentsInterval", "[Scheduler]")
+{
+    SimulationScheduler scheduler = makeScheduler(2u);
+    CHECK(scheduler.currentStepInterval() == kDt);
+
+    scheduler.setRateScale(1.05);
+    CHECK(scheduler.currentStepInterval() == kDt / 1.05);
+    const double deadline = scheduler.nextDeadline();
+    CHECK(scheduler.pump(deadline + 10.0 * kDt) == 2u);
+    REQUIRE(scheduler.lostTime().steps > 0u);
+    CHECK(scheduler.currentStepInterval() == kDt / 1.05);
+    const uint64_t next = scheduler.physicsStepCount();
+    CHECK(scheduler.stepDeadline(next + 1u) - scheduler.stepDeadline(next) == Catch::Approx(kDt / 1.05).epsilon(1e-9));
+
+    scheduler.reanchor(scheduler.nextDeadline() + 1.0);
+    CHECK(scheduler.currentStepInterval() == kDt / 1.05);
+
+    scheduler.setRateScale(2.0);
+    CHECK(scheduler.currentStepInterval() == kDt / 1.1);
+    scheduler.setRateScale(std::numeric_limits<double>::quiet_NaN());
+    CHECK(scheduler.currentStepInterval() == kDt / 1.1);
+}
+
 TEST_CASE("SimulationScheduler.BackwardTimeIsIgnoredAndCounted", "[Scheduler]")
 {
     SimulationScheduler scheduler = makeScheduler(8u);

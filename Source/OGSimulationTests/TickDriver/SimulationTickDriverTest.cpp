@@ -598,14 +598,10 @@ namespace
     }
 
     template <typename RunT>
-    void rateScaleSession(RunT& run, uint32_t frames, std::optional<uint32_t> rateFrame)
+    void doorSession(RunT& run, uint32_t frames, std::function<void(uint32_t, TickRateDoor&)> onDoor)
     {
         uint32_t frame = 0u;
-        run.side.game.onBeforePump = [&frame, rateFrame](double, TickRateDoor& rate)
-        {
-            if (rateFrame.has_value() && frame == *rateFrame)
-                rate.setRateScale(1.1);
-        };
+        run.side.game.onBeforePump = [&frame, &onDoor](double, TickRateDoor& rate) { onDoor(frame, rate); };
         FakeCompletion completion;
         for (; frame < frames; ++frame)
         {
@@ -618,6 +614,55 @@ namespace
         run.events.push_back("stop");
         run.pipeline.stop();
         run.side.game.onBeforePump = nullptr;
+    }
+
+    template <typename RunT>
+    void rateScaleSession(RunT& run, uint32_t frames, std::optional<uint32_t> rateFrame, double scale = 1.1)
+    {
+        doorSession(run, frames, [rateFrame, scale](uint32_t frame, TickRateDoor& rate)
+        {
+            if (rateFrame.has_value() && frame == *rateFrame)
+                rate.setRateScale(scale);
+        });
+    }
+
+    struct DoorReading
+    {
+        double nextDeadline = 0.0;
+        double currentInterval = 0.0;
+        int64_t tickOffset = 0;
+        uint64_t refusedRateChanges = 0u;
+    };
+
+    template <typename RunT>
+    std::vector<DoorReading> readingDoorSession(RunT& run, uint32_t frames, uint32_t rateFrame, double scale,
+        std::optional<uint64_t>& refusedAfterTheCall)
+    {
+        std::vector<DoorReading> readings;
+        doorSession(run, frames, [&readings, &refusedAfterTheCall, rateFrame, scale](uint32_t frame, TickRateDoor& rate)
+        {
+            readings.push_back(DoorReading{ rate.nextDeadline(), rate.currentInterval(), rate.tickOffset(),
+                rate.refusedRateChanges() });
+            if (frame != rateFrame)
+                return;
+            rate.setRateScale(scale);
+            refusedAfterTheCall = rate.refusedRateChanges();
+        });
+        return readings;
+    }
+
+    std::vector<DoorReading> referenceDoorReadings(const std::vector<double>& hostSeconds, uint32_t rateFrame, double scale)
+    {
+        SimulationScheduler scheduler(SchedulerConfig{ static_cast<double>(kDt), MaxCatchUpSteps{ 60u }, 0.75, 1.25 }, 0.0);
+        std::vector<DoorReading> readings;
+        for (size_t frame = 0u; frame < hostSeconds.size(); ++frame)
+        {
+            readings.push_back(DoorReading{ scheduler.nextDeadline(), scheduler.currentStepInterval(), 0, 0u });
+            if (frame == rateFrame)
+                scheduler.setRateScale(scale);
+            scheduler.pump(hostSeconds[frame]);
+        }
+        return readings;
     }
 } // namespace
 
@@ -889,7 +934,7 @@ TEST_CASE("SimulationTickDriver.BeforePump.RunsOncePerFrameBeforeThePumpWithTheH
 
 TEST_CASE("SimulationTickDriver.BeforePump.ARateScaleThroughTheDoorChangesTheStepCountsAsTheTranscriptionDoes", "[TickDriver]")
 {
-    const Setup setup{ true, true, 60 };
+    const Setup setup{ false, true, 60 };
     Run<DriverPipeline> baseline(setup);
     Run<DriverPipeline> driver(setup);
     Run<LegacyPipeline> legacy(setup);
@@ -915,6 +960,104 @@ TEST_CASE("SimulationTickDriver.BeforePump.ARateScaleThroughTheDoorChangesTheSte
     REQUIRE(firstChange.first != rated.end());
     CHECK(firstChange.first - rated.begin() >= 40);
     CHECK(driver.pipeline.physicsStepCount() > baseline.pipeline.physicsStepCount());
+    CHECK(driver.pipeline.driver().getDiagnostics().refusedRateChanges() == 0u);
+}
+
+TEST_CASE("SimulationTickDriver.BeforePump.TheDoorReadsTheSchedulerAndTheOffsetTheStepsPublished", "[TickDriver]")
+{
+    constexpr uint32_t kRateFrame = 40u;
+    const Setup setup{ false, true, 60 };
+    Run<DriverPipeline> driver(setup);
+    driver.side.manager.editClientClock().advancePrediction();
+    std::optional<uint64_t> refusedAfterTheCall;
+    const std::vector<DoorReading> readings = readingDoorSession(driver, 120u, kRateFrame, 1.01, refusedAfterTheCall);
+
+    const std::vector<double>& hostSeconds = driver.side.game.beforePumpHostSeconds;
+    REQUIRE(readings.size() == 120u);
+    REQUIRE(hostSeconds.size() == 120u);
+    const std::vector<DoorReading> reference = referenceDoorReadings(hostSeconds, kRateFrame, 1.01);
+    for (size_t frame = 0u; frame < readings.size(); ++frame)
+    {
+        INFO("frame " << frame);
+        CHECK(readings[frame].nextDeadline == reference[frame].nextDeadline);
+        CHECK(readings[frame].currentInterval == reference[frame].currentInterval);
+        CHECK(readings[frame].refusedRateChanges == 0u);
+    }
+    CHECK(readings[kRateFrame].currentInterval == static_cast<double>(kDt));
+    CHECK(readings[kRateFrame + 1u].currentInterval == static_cast<double>(kDt) / 1.01);
+
+    const std::vector<int32_t> steps = stepsPerFrame(driver.events);
+    REQUIRE(steps.size() == 120u);
+    const size_t firstFrameWithSteps = static_cast<size_t>(
+        std::find_if(steps.begin(), steps.end(), [](int32_t n) { return n > 0; }) - steps.begin());
+    REQUIRE(firstFrameWithSteps < 100u);
+    for (size_t frame = 0u; frame < readings.size(); ++frame)
+    {
+        INFO("frame " << frame);
+        CHECK(readings[frame].tickOffset == (frame <= firstFrameWithSteps ? 0 : 2));
+    }
+    const TickOutcome& last = driver.side.presenter.published.back();
+    CHECK(static_cast<int64_t>(last.tick) - static_cast<int64_t>(last.physicsStep) == 2);
+    CHECK(driver.pipeline.driver().tickOffset() == 2);
+
+    CHECK(refusedAfterTheCall == std::optional<uint64_t>{ 0u });
+    CHECK(driver.pipeline.rateScale() == 1.01);
+    CHECK(driver.pipeline.driver().getDiagnostics().refusedRateChanges() == 0u);
+}
+
+TEST_CASE("SimulationTickDriver.BeforePump.AnAuthoritysRateChangeIsRefusedCountedAndChangesNothing", "[TickDriver]")
+{
+    const Setup setup{ true, true, 60 };
+    Run<DriverPipeline> baseline(setup);
+    Run<DriverPipeline> driver(setup);
+    Run<LegacyPipeline> legacy(setup);
+    std::optional<uint64_t> refusedAfterTheCall;
+    rateScaleSession(baseline, 120u, std::nullopt, 1.01);
+    const std::vector<DoorReading> readings = readingDoorSession(driver, 120u, 40u, 1.01, refusedAfterTheCall);
+    rateScaleSession(legacy, 120u, 40u, 1.01);
+
+    CHECK(refusedAfterTheCall == std::optional<uint64_t>{ 1u });
+    CHECK(driver.pipeline.rateScale() == 1.0);
+    CHECK(driver.pipeline.driver().getDiagnostics().refusedRateChanges() == 1u);
+    CHECK(driver.pipeline.stepIntervalSeconds() == static_cast<double>(kDt));
+    REQUIRE(readings.size() == 120u);
+    for (size_t frame = 0u; frame < readings.size(); ++frame)
+    {
+        INFO("frame " << frame);
+        CHECK(readings[frame].currentInterval == static_cast<double>(kDt));
+        CHECK(readings[frame].refusedRateChanges == (frame <= 40u ? 0u : 1u));
+    }
+
+    CHECK(firstDifference(driver.events, baseline.events) == "");
+    CHECK(driver.pipeline.physicsStepCount() == baseline.pipeline.physicsStepCount());
+    CHECK(firstDifference(driver.events, legacy.events) == "");
+    CHECK(legacy.pipeline.rateScale() == 1.0);
+}
+
+TEST_CASE("SimulationTickDriver.Begin.TheFrameLinePrintsTheConfiguredRateBounds", "[TickDriver]")
+{
+    const auto frameLine = [](const Events& events)
+    {
+        const auto line = std::find_if(events.begin(), events.end(),
+            [](const std::string& event) { return event.rfind("log:W:[SimHost.Frame] ", 0) == 0; });
+        return line == events.end() ? std::string() : *line;
+    };
+
+    const Setup setup{ true, true, 60 };
+    Run<DriverPipeline> defaults(setup);
+    CHECK(frameLine(defaults.events) ==
+        "log:W:[SimHost.Frame] role=Authority stepping=inline dt=0.016667 maxCatchUpSteps=60 rateScale=[0.75,1.25] "
+        "timeBase=worldDelta");
+
+    Events events;
+    TraceEngine engine(events);
+    Side side(events, Setup{ false, false, 60 });
+    Driver narrow(side.game, side.host, side.presenter, engine,
+        Driver::Config{ static_cast<double>(kDt), false, StepThreading::FrameBounded, 60, 0.9, 1.1 });
+    CHECK(frameLine(events) ==
+        "log:W:[SimHost.Frame] role=Client stepping=worker dt=0.016667 maxCatchUpSteps=60 rateScale=[0.90,1.10] "
+        "timeBase=worldDelta");
+    narrow.stop();
 }
 
 namespace
@@ -1582,13 +1725,14 @@ TEST_CASE("SimulationTickDriver.FreeRunning.ThePresentClockIsReadableOffTheRunne
     {
         CHECK(readings[wake].hostNowSeconds == clockAtWake[wake] - kClockAtStartSeconds);
         CHECK(readings[wake].hostNowSeconds == run.game.beforePumpHostSeconds[wake]);
-        CHECK(readings[wake].stepIntervalSeconds == (wake <= 10u ? kDtSeconds : kDtSeconds / 1.25));
+        CHECK(readings[wake].stepIntervalSeconds == kDtSeconds);
     }
     CHECK(readings.back().hostNowSeconds > 0.0);
-    CHECK(run.driver->getDiagnostics().rateScale() == 1.25);
+    CHECK(run.driver->getDiagnostics().rateScale() == 1.0);
+    CHECK(run.driver->getDiagnostics().refusedRateChanges() == 1u);
     const OffRunnerReading afterLoop = readOffTheRunner(*run.driver);
     CHECK(afterLoop.hostNowSeconds == run.engine.now - kClockAtStartSeconds);
-    CHECK(afterLoop.stepIntervalSeconds == kDtSeconds / 1.25);
+    CHECK(afterLoop.stepIntervalSeconds == kDtSeconds);
 }
 
 TEST_CASE("SimulationTickDriver.FreeRunning.StopFromTheFrameThreadEndsTheLoopAndStopChecksIt", "[TickDriver]")

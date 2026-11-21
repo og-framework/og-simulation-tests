@@ -141,17 +141,23 @@ TEST_CASE("TickDriverWindow.WindowLine.Goldens", "[TickDriverWindow]")
 TEST_CASE("TickDriverWindow.FrameAndFirstStepLines.Goldens", "[TickDriverWindow]")
 {
     TickDriverWindow authority(true, true);
-    CHECK(std::string(authority.formatFrameLine(1.0 / 60.0, 60u)) ==
+    CHECK(std::string(authority.formatFrameLine(1.0 / 60.0, 60u, 0.75, 1.25)) ==
         "[SimHost.Frame] role=Authority stepping=inline dt=0.016667 maxCatchUpSteps=60 rateScale=[0.75,1.25] "
         "timeBase=worldDelta");
 
     TickDriverWindow client(false, false);
-    CHECK(std::string(client.formatFrameLine(0.03125, 240u)) ==
+    CHECK(std::string(client.formatFrameLine(0.03125, 240u, 0.75, 1.25)) ==
         "[SimHost.Frame] role=Client stepping=worker dt=0.031250 maxCatchUpSteps=240 rateScale=[0.75,1.25] "
         "timeBase=worldDelta");
-    CHECK(std::string(client.formatFrameLine(0.03125, 240u, 0.0, false, true)) ==
+    CHECK(std::string(client.formatFrameLine(0.03125, 240u, 0.75, 1.25, 0.0, false, true)) ==
         "[SimHost.Frame] role=Client stepping=worker dt=0.031250 maxCatchUpSteps=240 rateScale=[0.75,1.25] "
         "timeBase=worldDelta frameWait=thisFramesSingleStep");
+    CHECK(std::string(client.formatFrameLine(0.03125, 240u, 0.9, 1.1)) ==
+        "[SimHost.Frame] role=Client stepping=worker dt=0.031250 maxCatchUpSteps=240 rateScale=[0.90,1.10] "
+        "timeBase=worldDelta");
+    CHECK(std::string(authority.formatFrameLine(1.0 / 60.0, 60u, 0.99, 1.005, 0.0, true)) ==
+        "[SimHost.Frame] role=Authority stepping=inline dt=0.016667 maxCatchUpSteps=60 rateScale=[0.99,1.00] "
+        "timeBase=monotonic");
 
     CHECK(std::string(client.formatCatchUpCapWarningLine(0, 240u, 1u)) ==
         "[SimHost.Frame] og.Sim.MaxCatchUpSteps=0 is outside [1, 240]; using 1");
@@ -274,10 +280,10 @@ TEST_CASE("TickDriverWindow.Samples.OverflowIsCountedWithoutAllocationAfterConst
             CHECK(line.find(" sampleOverflow=8") == line.size() - std::string(" sampleOverflow=8").size());
             CHECK(line.find(" replayDepth=18446744073709551616.00/4294967295 ") != std::string::npos);
 
-            CHECK(std::string(window.formatFrameLine(-DBL_MAX, std::numeric_limits<uint32_t>::max())).size() <=
+            CHECK(std::string(window.formatFrameLine(-DBL_MAX, std::numeric_limits<uint32_t>::max(), -DBL_MAX, -DBL_MAX)).size() <=
                 tickDriverWindow::kFrameLineReserve);
-            CHECK(std::string(window.formatFrameLine(-DBL_MAX, std::numeric_limits<uint32_t>::max(), 0.0, true, true)).size() <=
-                tickDriverWindow::kFrameLineReserve);
+            CHECK(std::string(window.formatFrameLine(-DBL_MAX, std::numeric_limits<uint32_t>::max(), -DBL_MAX, -DBL_MAX, 0.0, true,
+                true)).size() <= tickDriverWindow::kFrameLineReserve);
             CHECK(std::string(window.formatCatchUpCapWarningLine(std::numeric_limits<int32_t>::min(),
                 std::numeric_limits<uint32_t>::max(), std::numeric_limits<uint32_t>::max())).size() <=
                 tickDriverWindow::kFrameLineReserve);
@@ -393,30 +399,33 @@ TEST_CASE("TickDriverWindow.FreeRunning.LinesMatchTheGoldens", "[TickDriverWindo
     SECTION("the frame line: stepping=runner, timeBase=monotonic and the slack in whole microseconds")
     {
         TickDriverWindow window(true, StepThreading::FreeRunning);
-        CHECK(std::string(window.formatFrameLine(1.0 / 60.0, 60u, 0.0005)) ==
+        CHECK(std::string(window.formatFrameLine(1.0 / 60.0, 60u, 0.75, 1.25, 0.0005)) ==
             "[SimHost.Frame] role=Authority stepping=runner dt=0.016667 maxCatchUpSteps=60 rateScale=[0.75,1.25] "
             "timeBase=monotonic idleSlackUs=500");
-        CHECK(std::string(window.formatFrameLine(1.0 / 60.0, 60u)) ==
+        CHECK(std::string(window.formatFrameLine(1.0 / 60.0, 60u, 0.75, 1.25)) ==
             "[SimHost.Frame] role=Authority stepping=runner dt=0.016667 maxCatchUpSteps=60 rateScale=[0.75,1.25] "
             "timeBase=monotonic idleSlackUs=0");
-        CHECK(std::string(window.formatFrameLine(0.03125, 240u, 0.0003)) ==
+        CHECK(std::string(window.formatFrameLine(0.03125, 240u, 0.75, 1.25, 0.0003)) ==
             "[SimHost.Frame] role=Authority stepping=runner dt=0.031250 maxCatchUpSteps=240 rateScale=[0.75,1.25] "
             "timeBase=monotonic idleSlackUs=300");
-        CHECK(std::string(window.formatFrameLine(0.03125, 240u, 0.0002996)) ==
+        CHECK(std::string(window.formatFrameLine(0.03125, 240u, 0.75, 1.25, 0.0002996)) ==
             "[SimHost.Frame] role=Authority stepping=runner dt=0.031250 maxCatchUpSteps=240 rateScale=[0.75,1.25] "
             "timeBase=monotonic idleSlackUs=300");
-        CHECK(std::string(window.formatFrameLine(0.03125, 240u, 0.0000006)) ==
+        CHECK(std::string(window.formatFrameLine(0.03125, 240u, 0.75, 1.25, 0.0000006)) ==
             "[SimHost.Frame] role=Authority stepping=runner dt=0.031250 maxCatchUpSteps=240 rateScale=[0.75,1.25] "
             "timeBase=monotonic idleSlackUs=1");
-        CHECK(std::string(window.formatFrameLine(0.03125, 240u, 0.0000004)) ==
+        CHECK(std::string(window.formatFrameLine(0.03125, 240u, 0.75, 1.25, 0.0000004)) ==
             "[SimHost.Frame] role=Authority stepping=runner dt=0.031250 maxCatchUpSteps=240 rateScale=[0.75,1.25] "
             "timeBase=monotonic idleSlackUs=0");
-        CHECK(std::string(window.formatFrameLine(0.03125, 240u, -0.001)) ==
+        CHECK(std::string(window.formatFrameLine(0.03125, 240u, 0.75, 1.25, -0.001)) ==
             "[SimHost.Frame] role=Authority stepping=runner dt=0.031250 maxCatchUpSteps=240 rateScale=[0.75,1.25] "
             "timeBase=monotonic idleSlackUs=0");
-        CHECK(std::string(window.formatFrameLine(0.03125, 240u, 1.0e4)) ==
+        CHECK(std::string(window.formatFrameLine(0.03125, 240u, 0.75, 1.25, 1.0e4)) ==
             "[SimHost.Frame] role=Authority stepping=runner dt=0.031250 maxCatchUpSteps=240 rateScale=[0.75,1.25] "
             "timeBase=monotonic idleSlackUs=4294967295");
+        CHECK(std::string(window.formatFrameLine(1.0 / 60.0, 60u, 0.9, 1.1, 0.0005)) ==
+            "[SimHost.Frame] role=Authority stepping=runner dt=0.016667 maxCatchUpSteps=60 rateScale=[0.90,1.10] "
+            "timeBase=monotonic idleSlackUs=500");
         CHECK(std::string(window.formatCatchUpCapWarningLine(0, 240u, 1u)) ==
             "[SimHost.Frame] og.Sim.MaxCatchUpSteps=0 is outside [1, 240]; using 1");
     }
@@ -462,7 +471,7 @@ TEST_CASE("TickDriverWindow.FreeRunning.TheSuffixIsAbsentInInlineAndFrameBounded
         CHECK(line.find("Wakes") == std::string::npos);
         CHECK(line == withoutSuffix(freeRunningLine, "inline"));
         CHECK(std::string(byBool.formatWindowLine(110.5, totals(8u, 0.3125, 9u, 3u, 6u))) == line);
-        CHECK(std::string(byThreading.formatFrameLine(1.0 / 60.0, 60u, 0.0005)) ==
+        CHECK(std::string(byThreading.formatFrameLine(1.0 / 60.0, 60u, 0.75, 1.25, 0.0005)) ==
             "[SimHost.Frame] role=Authority stepping=inline dt=0.016667 maxCatchUpSteps=60 rateScale=[0.75,1.25] "
             "timeBase=worldDelta");
     }
@@ -483,7 +492,7 @@ TEST_CASE("TickDriverWindow.FreeRunning.TheSuffixIsAbsentInInlineAndFrameBounded
         CHECK(line.find("Wakes") == std::string::npos);
         CHECK(line == withoutSuffix(freeRunningLine, "worker"));
         CHECK(std::string(byBool.formatWindowLine(110.5, totals(8u, 0.3125, 9u, 3u, 6u))) == line);
-        CHECK(std::string(byThreading.formatFrameLine(1.0 / 60.0, 60u, 0.0005)) ==
+        CHECK(std::string(byThreading.formatFrameLine(1.0 / 60.0, 60u, 0.75, 1.25, 0.0005)) ==
             "[SimHost.Frame] role=Authority stepping=worker dt=0.016667 maxCatchUpSteps=60 rateScale=[0.75,1.25] "
             "timeBase=worldDelta");
     }
@@ -527,7 +536,7 @@ TEST_CASE("TickDriverWindow.FreeRunning.NoAllocationAfterConstruction", "[TickDr
         const std::string line = window.formatWindowLine(10.0, TickDriverWindowTotals{});
         CHECK(line.find(" sampleOverflow=10 lateUs=") != std::string::npos);
         CHECK(line.find(" activityWakes=16385 earlyWakes=16385 idleFallbacks=16385 approachUs=") != std::string::npos);
-        CHECK(std::string(window.formatFrameLine(1.0 / 60.0, 60u, 0.0005)).find("idleSlackUs=500") != std::string::npos);
+        CHECK(std::string(window.formatFrameLine(1.0 / 60.0, 60u, 0.75, 1.25, 0.0005)).find("idleSlackUs=500") != std::string::npos);
         CHECK(std::string(firstStep.format(StepThreading::FreeRunning, true, 0u, 1u)).find("thread=runner") != std::string::npos);
         CHECK(WindowAllocationCounter::allocations == afterConstruction);
     }
@@ -566,7 +575,8 @@ TEST_CASE("TickDriverWindow.FreeRunning.NoAllocationAfterConstruction", "[TickDr
             CHECK(line.find(" activityWakes=4294967295 earlyWakes=4294967295 idleFallbacks=4294967295 approachUs=") !=
                 std::string::npos);
 
-            const std::string frameLine = window.formatFrameLine(-DBL_MAX, std::numeric_limits<uint32_t>::max(), DBL_MAX);
+            const std::string frameLine = window.formatFrameLine(-DBL_MAX, std::numeric_limits<uint32_t>::max(), -DBL_MAX,
+                -DBL_MAX, DBL_MAX);
             CHECK(frameLine.size() <= tickDriverWindow::kFrameLineReserve);
             CHECK(frameLine.find(" idleSlackUs=4294967295") != std::string::npos);
             CHECK(std::string(firstStep.format(StepThreading::FreeRunning, true, std::numeric_limits<uint64_t>::max(),

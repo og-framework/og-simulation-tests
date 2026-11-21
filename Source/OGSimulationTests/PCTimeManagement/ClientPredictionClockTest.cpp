@@ -7,6 +7,7 @@
 #include "OGSimulation/PCTimeManagement/ClientPredictionClock.h"
 #include "OGSimulation/PCTimeManagement/NetworkTimeEstimator.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -2035,6 +2036,487 @@ TEST_CASE("PCTM.ClientPredictionClock.Recentre.TheWindowFloorsItsSamplesSoACatch
     const std::vector<std::string> lines = rig.recentreLines();
     REQUIRE(lines.size() == 1u);
     CHECK(lines[0] == "[Warning][Clock.Recentre] fromLead=14 toLead=6 owed=8 target=1925 rttMs=73.472 samples=8 cause=join");
+}
+
+// ---------------------------------------------------------------------------
+// og-time-dilation task 5 — the published correction phase (TimeConfig-rationale.md §18)
+//
+// The clock's probe, declared a friend in ClientPredictionClock.h and defined only here. It reads the
+// first-RTT wait (the clock has no accessor for it) and overwrites the published word.
+// ---------------------------------------------------------------------------
+struct ClientPredictionClockPhaseProbe
+{
+    static bool awaitsFirstRtt(const ClientPredictionClock& clock) { return clock.m_resyncAwaitsFirstRtt; }
+
+    static uint32_t word(const ClientPredictionClock& clock)
+    {
+        return clock.m_publishedPhase.load(std::memory_order_relaxed);
+    }
+
+    static void overwrite(ClientPredictionClock& clock, uint32_t word)
+    {
+        clock.m_publishedPhase.store(word, std::memory_order_relaxed);
+    }
+
+    // The word with every flag inverted and the count moved by 1 + seed: wrong on every field.
+    static uint32_t againstTruth(const ClientPredictionClock& clock, uint32_t seed)
+    {
+        const uint32_t flags = ClientPredictionClock::kPhaseRecentreArmedBit | ClientPredictionClock::kPhaseRecentringBit
+                             | ClientPredictionClock::kPhaseStallDebtBit | ClientPredictionClock::kPhaseAwaitsFirstRttBit;
+        const uint32_t now   = word(clock);
+        const uint32_t count = ((now >> ClientPredictionClock::kPhaseHardResyncShift) + 1u + seed)
+                             & ClientPredictionClock::kPhaseHardResyncMask;
+        return ((now & flags) ^ flags) | (count << ClientPredictionClock::kPhaseHardResyncShift);
+    }
+
+    // [og-time-dilation task 10c] The published target read's word, read and overwritten raw.
+    static uint64_t readWord(const ClientPredictionClock& clock)
+    {
+        return clock.m_publishedTargetRead.load(std::memory_order_relaxed);
+    }
+
+    static void overwriteRead(ClientPredictionClock& clock, uint64_t word)
+    {
+        clock.m_publishedTargetRead.store(word, std::memory_order_relaxed);
+    }
+};
+
+namespace phaseTest
+{
+    // What the word must decode to: the clock's own accessors, the first-RTT wait, and a count kept apart from it.
+    ClockCorrectionPhase truth(const ClientPredictionClock& clock, uint32_t hardResyncs)
+    {
+        ClockCorrectionPhase phase;
+        phase.recentreArmed  = clock.isRecentreArmed();
+        phase.recentring     = clock.isRecentring();
+        phase.stallDebt      = clock.getRequiredInputDelayIncreaseStallTicks() > 0u;
+        phase.awaitsFirstRtt = ClientPredictionClockPhaseProbe::awaitsFirstRtt(clock);
+        phase.hardResyncs    = hardResyncs;
+        return phase;
+    }
+
+    // The scripted lifecycle both cases drive, one advance at a time through `advanceOnce` (it must call rig.advance()
+    // exactly once), with `beforeRequest` and `afterRequest` run around each stall request:
+    //   a join whose first frame has no RTT reading (a hard resync onto the floor target that waits for the first
+    //   reading) and runs a 4-advance catch-up batch, so it lands 3 above target; a 10 ms link, which leaves the offset
+    //   on the floor, so the wait ends with no second resync; the settle window and a decision with owed 3, paid in
+    //   three Stalls; a 2-tick stall debt and its payment; a second hard resync (the server jumps 40 ticks) and its
+    //   re-armed decision. 254 advances and 2 requests.
+    void driveLifecycle(recentreTest::JoinRig& rig, unsigned int debtTicks, const std::function<void()>& advanceOnce,
+                        const std::function<void()>& beforeRequest, const std::function<void()>& afterRequest)
+    {
+        rig.frame(0.0, rig.authority, 0u);
+        for (unsigned int step = 0u; step < 4u; ++step)
+            advanceOnce();
+
+        for (unsigned int frame = 0u; frame < 120u; ++frame)
+        {
+            rig.frame(0.010, ++rig.authority, 0u);
+            advanceOnce();
+        }
+
+        beforeRequest();
+        rig.clock.requestInputDelayIncreaseStall(static_cast<int32_t>(debtTicks));
+        afterRequest();
+        beforeRequest();
+        rig.clock.requestInputDelayIncreaseStall(0);   // the no-op path publishes too
+        afterRequest();
+        for (unsigned int frame = 0u; frame < 10u; ++frame)
+        {
+            rig.frame(0.010, ++rig.authority, 0u);
+            advanceOnce();
+        }
+
+        rig.authority += 40u;
+        for (unsigned int frame = 0u; frame < 120u; ++frame)
+        {
+            rig.frame(0.010, frame == 0u ? rig.authority : ++rig.authority, 0u);
+            advanceOnce();
+        }
+    }
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Phase.ThePublishedWordFollowsEveryAdvanceThroughAJoinADebtAndAResync",
+          "[PCTM][ClientPredictionClock][Dilation]")
+{
+    using A = ClientPredictionClock::AdvanceResult;
+    using Probe = ClientPredictionClockPhaseProbe;
+
+    recentreTest::JoinRig rig(TimeConfig{}.recentreSettleSamples);
+    REQUIRE(rig.clock.publishedCorrectionPhase() == phaseTest::truth(rig.clock, 0u));   // published at construction
+    REQUIRE(rig.clock.publishedCorrectionPhase().recentreArmed);
+
+    uint32_t     hardResyncs = 0u;
+    unsigned int advances    = 0u;
+    unsigned int mismatches  = 0u;
+    // Every flag must be seen both ways, so the case cannot pass on a word stuck at one value.
+    std::array<unsigned int, 4> seenTrue{};
+    std::array<unsigned int, 4> seenFalse{};
+    unsigned int comparisons = 0u;   // proves comparePhase ran on every advance and request
+    const auto comparePhase = [&](const char* where) {
+        const ClockCorrectionPhase expected  = phaseTest::truth(rig.clock, hardResyncs);
+        const ClockCorrectionPhase published = rig.clock.publishedCorrectionPhase();
+        if (!(published == expected))
+        {
+            ++mismatches;
+            UNSCOPED_INFO(where << " advance " << advances << ": published armed=" << published.recentreArmed
+                << " recentring=" << published.recentring << " debt=" << published.stallDebt << " awaits="
+                << published.awaitsFirstRtt << " resyncs=" << published.hardResyncs << ", clock armed="
+                << expected.recentreArmed << " recentring=" << expected.recentring << " debt=" << expected.stallDebt
+                << " awaits=" << expected.awaitsFirstRtt << " resyncs=" << expected.hardResyncs);
+        }
+        ++comparisons;
+        const bool flags[4] = {expected.recentreArmed, expected.recentring, expected.stallDebt, expected.awaitsFirstRtt};
+        for (unsigned int i = 0u; i < 4u; ++i)
+        {
+            if (flags[i])
+                ++seenTrue[i];
+            else
+                ++seenFalse[i];
+        }
+    };
+
+    bool scribbledSeam = false;
+    const auto advanceOnce = [&]() {
+        rig.advance();
+        ++advances;
+        if (rig.results.back() == A::HardResync)
+            ++hardResyncs;
+        comparePhase("after");
+        // The event seam is diagnostic only: poisoning its resync count must not move the published one.
+        if (hardResyncs == 1u && !scribbledSeam)
+        {
+            rig.clock.editDiagnostics().scribbleEventCountersForFenceTest(7u);
+            scribbledSeam = true;
+        }
+    };
+    // A scribbled word before each request: only the request's own store can put it right.
+    const auto beforeRequest = [&]() {
+        Probe::overwrite(rig.clock, Probe::againstTruth(rig.clock, 3u));
+    };
+
+    unsigned int requests = 0u;
+    const auto afterRequest = [&]() {
+        ++requests;
+        comparePhase("request");
+    };
+
+    phaseTest::driveLifecycle(rig, 2u, advanceOnce, beforeRequest, afterRequest);
+    CHECK(mismatches == 0u);   // first, so it carries the UNSCOPED_INFO line of every mismatch
+    CHECK(advances == 254u);
+    CHECK(comparisons == 256u);
+    CHECK(requests == 2u);
+
+    // The script ran as written: two hard resyncs (no second resync on the first reading), the join's decision owed
+    // 3 and paid them, the debt was paid in two Stalls, and the resync's re-armed decision was made.
+    CHECK(rig.count(A::HardResync) == 2u);
+    CHECK(hardResyncs == 2u);
+    CHECK(rig.clock.publishedCorrectionPhase().hardResyncs == 2u);
+    CHECK(rig.clock.getDiagnostics().hardResyncCount() != 2u);   // the poisoned seam, left behind
+    CHECK(rig.linesWith("cause=firstRtt").empty());
+    const std::vector<std::string> decisions = rig.recentreLines();
+    REQUIRE(decisions.size() == 2u);
+    CHECK(decisions[0].find(" owed=3 ") != std::string::npos);
+    CHECK(decisions[0].find(" cause=join") != std::string::npos);
+    CHECK(decisions[1].find(" cause=resync") != std::string::npos);
+    CHECK(rig.linesWith("input delay increase Stall").size() == 2u);
+    CHECK(rig.consistent);
+    for (unsigned int i = 0u; i < 4u; ++i)
+    {
+        INFO("flag " << i << " (armed, recentring, debt, awaits): true " << seenTrue[i] << ", false " << seenFalse[i]);
+        CHECK(seenTrue[i] > 0u);
+        CHECK(seenFalse[i] > 0u);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// ⛔ THE PHASE WORD'S FENCE - no clock decision reads the published word.
+//
+// The lifecycle above is driven clean, then again with the word overwritten before EVERY advance and every stall
+// request, three ways: every field against the clock's (Probe::againstTruth), all ones, and zero. Every clock output
+// after every advance, the resync callbacks' ticks and every log line must be byte-identical to the clean run.
+// A trace that captured nothing would compare equal forever, so a last run moves ONE REAL INPUT, a third tick of
+// stall debt, and REQUIRES the trace to move. The EventSeamDiagnostics fence's pattern.
+// ---------------------------------------------------------------------------
+namespace phaseTest
+{
+    struct PhaseTrace
+    {
+        std::vector<unsigned int> values;
+        std::vector<std::string>  lines;
+        unsigned int              poisonedWrites = 0u;   // overwrites that disagreed with the clock on every flag
+        bool operator==(const PhaseTrace& other) const { return values == other.values && lines == other.lines; }
+    };
+
+    enum class Scribble { None, AgainstTruth, AllOnes, Zero };
+
+    PhaseTrace driveTracedPhaseLifecycle(Scribble scribble, unsigned int debtTicks)
+    {
+        using Probe = ClientPredictionClockPhaseProbe;
+
+        PhaseTrace trace;
+        recentreTest::JoinRig rig(TimeConfig{}.recentreSettleSamples);
+        rig.clock.registerResyncCallback([&trace](unsigned int newTick) { trace.values.push_back(newTick); });
+
+        uint32_t seed = 0u;
+        const auto poison = [&]() {
+            if (scribble == Scribble::None)
+                return;
+            const uint32_t word = scribble == Scribble::AgainstTruth ? Probe::againstTruth(rig.clock, seed++)
+                                : scribble == Scribble::AllOnes      ? 0xFFFFFFFFu
+                                                                     : 0u;
+            Probe::overwrite(rig.clock, word);
+            if (scribble == Scribble::AgainstTruth)
+            {
+                const ClockCorrectionPhase read  = rig.clock.publishedCorrectionPhase();
+                const ClockCorrectionPhase truth = phaseTest::truth(rig.clock, 0u);
+                if (read.recentreArmed != truth.recentreArmed && read.recentring != truth.recentring
+                    && read.stallDebt != truth.stallDebt && read.awaitsFirstRtt != truth.awaitsFirstRtt)
+                    ++trace.poisonedWrites;
+            }
+        };
+        const auto advanceOnce = [&]() {
+            poison();
+            rig.advance();
+            const ClientPredictionClock& clock = rig.clock;
+            trace.values.push_back(static_cast<unsigned int>(rig.results.back()));
+            trace.values.push_back(clock.getPredictionTick());
+            trace.values.push_back(clock.getResimulationTick());
+            trace.values.push_back(static_cast<unsigned int>(clock.evaluateDrift()));
+            trace.values.push_back(clock.getRequiredInputDelayIncreaseStallTicks());
+            trace.values.push_back(clock.isRecentreArmed() ? 1u : 0u);
+            trace.values.push_back(clock.isRecentring() ? 1u : 0u);
+            trace.values.push_back(Probe::word(clock));   // the advance's own store replaced the overwrite
+        };
+
+        driveLifecycle(rig, debtTicks, advanceOnce, poison, [&]() { trace.values.push_back(Probe::word(rig.clock)); });
+        trace.lines = rig.lines;
+        return trace;
+    }
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Phase.ThePublishedWordCannotReachAnyClockDecision",
+          "[PCTM][ClientPredictionClock][Dilation]")
+{
+    using phaseTest::Scribble;
+
+    const phaseTest::PhaseTrace clean = phaseTest::driveTracedPhaseLifecycle(Scribble::None, 2u);
+    REQUIRE(clean.values.size() > 2000u);   // the trace is substantial, not a stub
+    REQUIRE(clean.lines.size() > 5u);
+
+    for (const Scribble scribble : {Scribble::AgainstTruth, Scribble::AllOnes, Scribble::Zero})
+    {
+        INFO("scribble " << static_cast<int>(scribble));
+        const phaseTest::PhaseTrace scribbled = phaseTest::driveTracedPhaseLifecycle(scribble, 2u);
+        CHECK(scribbled == clean);
+        if (scribble == Scribble::AgainstTruth)
+            CHECK(scribbled.poisonedWrites == 256u);   // every overwrite (254 advances, 2 requests) was wrong on every flag
+    }
+
+    const phaseTest::PhaseTrace sensitivity = phaseTest::driveTracedPhaseLifecycle(Scribble::None, 3u);
+    REQUIRE(sensitivity.values.size() == clean.values.size());
+    REQUIRE_FALSE(sensitivity == clean);
+}
+
+// ---------------------------------------------------------------------------
+// og-time-dilation task 10c — the published target read (TimeConfig-rationale.md §18)
+//
+// The phase cases' lifecycle plus a graduated Skip (the authority jumps 6 ticks) and a
+// graduated Stall (the authority holds for 12 advances), each after 40 steady frames.
+// 406 advances and 2 requests.
+// ---------------------------------------------------------------------------
+namespace readTest
+{
+    struct Marks
+    {
+        size_t skipFrom  = 0u;   // rig.results index where the Skip segment starts
+        size_t stallFrom = 0u;   // ... and the Stall segment
+    };
+
+    Marks driveReadLifecycle(recentreTest::JoinRig& rig, unsigned int debtTicks, const std::function<void()>& advanceOnce,
+                             const std::function<void()>& beforeRequest, const std::function<void()>& afterRequest)
+    {
+        phaseTest::driveLifecycle(rig, debtTicks, advanceOnce, beforeRequest, afterRequest);
+        Marks marks;
+        for (unsigned int frame = 0u; frame < 40u; ++frame)
+        {
+            rig.frame(0.010, ++rig.authority, 0u);
+            advanceOnce();
+        }
+        marks.skipFrom = rig.results.size();
+        rig.authority += 6u;
+        for (unsigned int frame = 0u; frame < 30u; ++frame)
+        {
+            rig.frame(0.010, frame == 0u ? rig.authority : ++rig.authority, 0u);
+            advanceOnce();
+        }
+        for (unsigned int frame = 0u; frame < 40u; ++frame)
+        {
+            rig.frame(0.010, ++rig.authority, 0u);
+            advanceOnce();
+        }
+        marks.stallFrom = rig.results.size();
+        for (unsigned int frame = 0u; frame < 12u; ++frame)
+        {
+            rig.frame(0.010, rig.authority, 0u);   // the authority holds: the client runs ahead
+            advanceOnce();
+        }
+        for (unsigned int frame = 0u; frame < 30u; ++frame)
+        {
+            rig.frame(0.010, ++rig.authority, 0u);
+            advanceOnce();
+        }
+        return marks;
+    }
+
+    // What an advance must publish: its own count and the target it reads, A + O, taken before it runs.
+    ClockTargetRead expectedRead(const recentreTest::JoinRig& rig, uint32_t advances)
+    {
+        ClockTargetRead read;
+        read.advances   = advances;
+        read.targetTick = rig.est.getLastAuthorityTick() + rig.est.getPredictionOffsetTicks();
+        return read;
+    }
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Read.ThePublishedReadIsEveryAdvancesOwnTarget",
+          "[PCTM][ClientPredictionClock][Dilation]")
+{
+    using A = ClientPredictionClock::AdvanceResult;
+
+    recentreTest::JoinRig rig(TimeConfig{}.recentreSettleSamples);
+    REQUIRE(rig.clock.publishedTargetRead() == ClockTargetRead{});   // nothing read before the first advance
+
+    uint32_t     advances   = 0u;
+    unsigned int mismatches = 0u;
+    unsigned int targetMoves = 0u;   // the target must move, or a stuck word could pass
+    uint32_t     lastTarget = 0u;
+    const auto advanceOnce = [&]() {
+        const ClockTargetRead expected = readTest::expectedRead(rig, advances + 1u);
+        rig.advance();
+        ++advances;
+        const ClockTargetRead published = rig.clock.publishedTargetRead();
+        if (!(published == expected))
+        {
+            ++mismatches;
+            UNSCOPED_INFO("advance " << advances << " (" << static_cast<int>(rig.results.back()) << "): published {"
+                << published.advances << ", " << published.targetTick << "}, read {" << expected.advances << ", "
+                << expected.targetTick << "}");
+        }
+        targetMoves += published.targetTick != lastTarget ? 1u : 0u;
+        lastTarget = published.targetTick;
+    };
+
+    ClockTargetRead beforeRequestRead;
+    unsigned int    requestMismatches = 0u;
+    unsigned int    requests          = 0u;
+    const auto beforeRequest = [&]() { beforeRequestRead = rig.clock.publishedTargetRead(); };
+    const auto afterRequest  = [&]() {
+        ++requests;
+        requestMismatches += rig.clock.publishedTargetRead() == beforeRequestRead ? 0u : 1u;
+    };
+
+    const readTest::Marks marks = readTest::driveReadLifecycle(rig, 2u, advanceOnce, beforeRequest, afterRequest);
+    CHECK(mismatches == 0u);   // first, so it carries the UNSCOPED_INFO line of every mismatch
+    CHECK(requestMismatches == 0u);
+    CHECK(requests == 2u);
+    CHECK(advances == 406u);
+    CHECK(rig.clock.publishedTargetRead().advances == 406u);
+    CHECK(targetMoves > 300u);
+
+    // Every path ran: the two hard resyncs, the decision's owed 3, the debt's Stalls, a graduated Skip, a graduated Stall.
+    CHECK(rig.count(A::HardResync) == 2u);
+    const std::vector<std::string> decisions = rig.recentreLines();
+    REQUIRE(decisions.size() == 2u);
+    CHECK(decisions[0].find(" owed=3 ") != std::string::npos);
+    CHECK(rig.linesWith("input delay increase Stall").size() == 2u);
+    CHECK(rig.count(A::Skip, marks.skipFrom) - rig.count(A::Skip, marks.stallFrom) >= 1u);
+    CHECK(rig.count(A::Stall, marks.stallFrom) >= 1u);
+    CHECK(rig.consistent);
+}
+
+// ---------------------------------------------------------------------------
+// ⛔ THE READ WORD'S FENCE - no clock decision reads the published target read.
+//
+// The lifecycle above, driven clean and with the read word overwritten before EVERY advance and every stall request:
+// against the truth (the count and the target each moved), all ones, and zero. Every clock output after every advance,
+// both published words after every advance, the resync callbacks' ticks and every log line must equal the clean run's.
+// After a request only the phase word is traced: a request does not store the read word, so an overwrite before it
+// stands until the next advance. A last run moves ONE REAL INPUT, a third tick of stall debt, and REQUIRES the trace to
+// move. The phase word's fence's pattern.
+// ---------------------------------------------------------------------------
+namespace readTest
+{
+    enum class Scribble { None, AgainstTruth, AllOnes, Zero };
+
+    phaseTest::PhaseTrace driveTracedReadLifecycle(Scribble scribble, unsigned int debtTicks)
+    {
+        using Probe = ClientPredictionClockPhaseProbe;
+
+        phaseTest::PhaseTrace trace;
+        recentreTest::JoinRig rig(TimeConfig{}.recentreSettleSamples);
+        rig.clock.registerResyncCallback([&trace](unsigned int newTick) { trace.values.push_back(newTick); });
+
+        uint32_t seed = 0u;
+        const auto poison = [&]() {
+            if (scribble == Scribble::None)
+                return;
+            const ClockTargetRead truth = rig.clock.publishedTargetRead();
+            const uint64_t againstTruth = (static_cast<uint64_t>(truth.advances + 1u + seed) << 32u)
+                                        | static_cast<uint64_t>(truth.targetTick + 7u + seed);
+            ++seed;
+            const uint64_t word = scribble == Scribble::AgainstTruth ? againstTruth
+                                : scribble == Scribble::AllOnes      ? ~uint64_t{0}
+                                                                     : uint64_t{0};
+            Probe::overwriteRead(rig.clock, word);
+            const ClockTargetRead read = rig.clock.publishedTargetRead();
+            if (read.advances != truth.advances && read.targetTick != truth.targetTick)
+                ++trace.poisonedWrites;
+        };
+        const auto advanceOnce = [&]() {
+            poison();
+            rig.advance();
+            const ClientPredictionClock& clock = rig.clock;
+            trace.values.push_back(static_cast<unsigned int>(rig.results.back()));
+            trace.values.push_back(clock.getPredictionTick());
+            trace.values.push_back(clock.getResimulationTick());
+            trace.values.push_back(static_cast<unsigned int>(clock.evaluateDrift()));
+            trace.values.push_back(clock.getRequiredInputDelayIncreaseStallTicks());
+            trace.values.push_back(clock.isRecentreArmed() ? 1u : 0u);
+            trace.values.push_back(clock.isRecentring() ? 1u : 0u);
+            trace.values.push_back(Probe::word(clock));
+            const uint64_t read = Probe::readWord(clock);   // the advance's own store replaced the overwrite
+            trace.values.push_back(static_cast<unsigned int>(read >> 32u));
+            trace.values.push_back(static_cast<unsigned int>(read & 0xFFFFFFFFull));
+        };
+
+        driveReadLifecycle(rig, debtTicks, advanceOnce, poison, [&]() { trace.values.push_back(Probe::word(rig.clock)); });
+        trace.lines = rig.lines;
+        return trace;
+    }
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.Read.ThePublishedReadCannotReachAnyClockDecision",
+          "[PCTM][ClientPredictionClock][Dilation]")
+{
+    using readTest::Scribble;
+
+    const phaseTest::PhaseTrace clean = readTest::driveTracedReadLifecycle(Scribble::None, 2u);
+    REQUIRE(clean.values.size() > 4000u);   // 406 advances of 10 values, 2 requests, the callbacks' ticks
+    REQUIRE(clean.lines.size() > 5u);
+
+    for (const Scribble scribble : {Scribble::AgainstTruth, Scribble::AllOnes, Scribble::Zero})
+    {
+        INFO("scribble " << static_cast<int>(scribble));
+        const phaseTest::PhaseTrace scribbled = readTest::driveTracedReadLifecycle(scribble, 2u);
+        CHECK(scribbled == clean);
+        if (scribble == Scribble::AgainstTruth)
+            CHECK(scribbled.poisonedWrites == 408u);   // every overwrite (406 advances, 2 requests) wrong on both fields
+    }
+
+    const phaseTest::PhaseTrace sensitivity = readTest::driveTracedReadLifecycle(Scribble::None, 3u);
+    REQUIRE(sensitivity.values.size() == clean.values.size());
+    REQUIRE_FALSE(sensitivity == clean);
 }
 
 #endif // WITH_LOW_LEVEL_TESTS

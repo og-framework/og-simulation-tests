@@ -1229,4 +1229,120 @@ TEST_CASE("PCTM.NetworkTimeEstimator.ClockSource.EachSourceHasItsOwnJitterMultip
     CHECK(clockJitter::clampJitterMultiplier(9.0) == 4.0);
 }
 
+// ---------------------------------------------------------------------------
+// og-time-dilation task 3: the server-tick estimator inside the estimator
+// (docs/ServerTickEstimator-rationale.md, docs/TimeConfig-rationale.md §15).
+// ---------------------------------------------------------------------------
+namespace serverTickFeedTest
+{
+    // Every output an existing case reads, compared one by one.
+    void requireSameOutputs(const NetworkTimeEstimator& a, const NetworkTimeEstimator& b)
+    {
+        REQUIRE(a.getSmoothedRTT() == b.getSmoothedRTT());
+        REQUIRE(a.getSmoothedJitter() == b.getSmoothedJitter());
+        REQUIRE(a.getPredictionOffsetTicks() == b.getPredictionOffsetTicks());
+        REQUIRE(a.getTargetPredictionTick() == b.getTargetPredictionTick());
+        REQUIRE(a.getLastAuthorityTick() == b.getLastAuthorityTick());
+        REQUIRE(a.hasFirstRTTSample() == b.hasFirstRTTSample());
+        REQUIRE(a.getRejectedRTTSampleCount() == b.getRejectedRTTSampleCount());
+        REQUIRE(a.getOutlierRejectedSampleCount() == b.getOutlierRejectedSampleCount());
+        REQUIRE(a.getOutlierEscapeCount() == b.getOutlierEscapeCount());
+        REQUIRE(a.getMeasuredRTTSampleCount() == b.getMeasuredRTTSampleCount());
+        REQUIRE(a.getActiveRttSource() == b.getActiveRttSource());
+        REQUIRE(a.activeJitterMultiplier() == b.activeJitterMultiplier());
+        const ClockSourceShadow sa = a.getClockSourceShadow();
+        const ClockSourceShadow sb = b.getClockSourceShadow();
+        REQUIRE(sa.samples == sb.samples);
+        REQUIRE(sa.invalidSamples == sb.invalidSamples);
+        REQUIRE(sa.simClockRttSeconds == sb.simClockRttSeconds);
+        REQUIRE(sa.offsetSeconds == sb.offsetSeconds);
+        REQUIRE(sa.owdVarUpSeconds == sb.owdVarUpSeconds);
+        REQUIRE(sa.owdVarDownSeconds == sb.owdVarDownSeconds);
+    }
+}
+
+// (viii) A valid SimClock sample reaches the server-tick estimator at either
+// source, an invalid one does not, and the feed moves no output the estimator
+// had before: a twin fed the same samples without a server tick (what a host
+// that copies none delivers) reads the same after every call.
+TEST_CASE("PCTM.NetworkTimeEstimator.ServerTick.AValidSampleReachesTheServerTickEstimatorAndMovesNothingElse",
+          "[PCTM][NetworkTimeEstimator][Dilation]")
+{
+    using clockSourceTest::Source;
+    for (const Source source : { Source::Engine, Source::SimClock })
+    {
+        INFO("clockRttSource " << (source == Source::SimClock ? "SimClock" : "Engine"));
+        TimeConfig cfg     = clockSourceTest::simClockConfig();
+        cfg.clockRttSource = source;
+        NetworkTimeEstimator fed(cfg, nullptr);
+        NetworkTimeEstimator twin(cfg, nullptr);
+        REQUIRE(fed.activeJitterMultiplier() == cfg.jitterMultiplier);
+
+        unsigned int validSamples = 0;
+        double       lastT3       = 0.0;
+        for (int i = 0; i < 60; ++i)
+        {
+            const double send = 10.0 + 0.05 * i;
+            SimClockRttSample sample = clockSourceTest::pingPong(send, 0.020 + 0.001 * (i % 7), 0.025 - 0.001 * (i % 5));
+            if (i % 10 == 3)
+                sample.rttSeconds = std::numeric_limits<double>::quiet_NaN();
+            if (i % 10 == 7)
+                sample.rttSeconds = 0.0;
+            twin.noteSimClockSample(sample);
+            REQUIRE(sample.serverTick == SimClockRttSample::kNoServerTick);
+
+            sample.serverTick           = 5000u + 3u * static_cast<unsigned int>(i);
+            sample.serverTickAgeSeconds = 0.004;
+            fed.noteSimClockSample(sample);
+            if (i % 10 != 3 && i % 10 != 7)
+            {
+                ++validSamples;
+                lastT3 = sample.t3Seconds;
+            }
+
+            if (i % 4 == 0)
+            {
+                fed.noteEngineRttSample(0.060);
+                twin.noteEngineRttSample(0.060);
+                fed.recordAuthorityTick(100u + i);
+                twin.recordAuthorityTick(100u + i);
+            }
+            serverTickFeedTest::requireSameOutputs(fed, twin);
+            REQUIRE(fed.serverTickEstimator().acceptedSamples() + fed.serverTickEstimator().rejectedSamples() == validSamples);
+            REQUIRE(twin.serverTickEstimator().acceptedSamples() == 0u);
+            REQUIRE(twin.serverTickEstimator().rejectedSamples() == 0u);
+        }
+        CHECK(fed.serverTickEstimator().rejectedSamples() == 0u);
+        CHECK(fed.serverTickEstimator().lastSampleSeconds() == lastT3);
+        CHECK(fed.serverTickEstimator().isValid(lastT3));
+        CHECK(fed.activeJitterMultiplier()
+              == (source == Source::SimClock ? cfg.simClockJitterMultiplier : cfg.jitterMultiplier));
+    }
+}
+
+// The estimator's RTT gate reads the smoothed RTT AFTER updateRTT took the
+// sample: at 40 ms a 75 ms reading is outside 1.5 x 40 + 10 = 70 ms but inside
+// the 1.5 x 45.25 + 10 = 77.9 ms it produces. And the tick rate is the TimeConfig's.
+TEST_CASE("PCTM.NetworkTimeEstimator.ServerTick.TheGateReadsThisSamplesSmoothedRttAndTheConfiguredTickRate",
+          "[PCTM][NetworkTimeEstimator][Dilation]")
+{
+    TimeConfig cfg = clockSourceTest::simClockConfig();
+    cfg.tickFrequency = 30.0;
+    NetworkTimeEstimator est(cfg, nullptr);
+    CHECK(est.serverTickEstimator().config().tickFrequency == 30.0);
+
+    for (int i = 0; i < 5; ++i)
+    {
+        SimClockRttSample sample = clockSourceTest::ofRtt(0.040);
+        sample.serverTick = 900u;
+        est.noteSimClockSample(sample);
+    }
+    REQUIRE(est.getSmoothedRTT() == Catch::Approx(0.040));
+    SimClockRttSample slow = clockSourceTest::ofRtt(0.075);
+    slow.serverTick = 900u;
+    est.noteSimClockSample(slow);
+    CHECK(est.serverTickEstimator().rejectedSamples() == 0u);
+    CHECK(est.serverTickEstimator().acceptedSamples() == 6u);
+}
+
 #endif // WITH_LOW_LEVEL_TESTS

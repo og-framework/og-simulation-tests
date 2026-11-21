@@ -6,6 +6,7 @@
 #include <chrono>
 #include <cstdio>
 #include <future>
+#include <limits>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -496,11 +497,13 @@ TEST_CASE("TickDriverThreadContext.FreeRunning.AClientIsRefused", "[.][TickDrive
 TEST_CASE("TickRateDoor.ForwardsToTheScheduler", "[TickDriver]")
 {
     SimulationScheduler scheduler(SchedulerConfig{ 1.0 / 60.0, 4u }, 0.0);
-    TickRateDoor door(scheduler);
+    uint64_t refused = 0u;
+    TickRateDoor door(scheduler, 0, false, refused);
 
     door.setRateScale(1.05);
     CHECK(scheduler.rateScale() == 1.05);
     CHECK(door.rateScale() == 1.05);
+    CHECK(door.refusedRateChanges() == 0u);
 
     scheduler.pump(1.0);
     CHECK(door.physicsStepCount() == scheduler.physicsStepCount());
@@ -508,6 +511,54 @@ TEST_CASE("TickRateDoor.ForwardsToTheScheduler", "[TickDriver]")
     CHECK(door.lostTime().steps == scheduler.lostTime().steps);
     CHECK(door.lostTime().steps > 0u);
     CHECK(door.lostTime().seconds == scheduler.lostTime().seconds);
+    CHECK(door.nextDeadline() == scheduler.nextDeadline());
+    CHECK(door.currentInterval() == scheduler.currentStepInterval());
+    CHECK(door.currentInterval() == (1.0 / 60.0) / 1.05);
+}
+
+TEST_CASE("TickRateDoor.ReadsTheDeadlineTheIntervalAndTheOffsetItWasBuiltWith", "[TickDriver]")
+{
+    SimulationScheduler scheduler(SchedulerConfig{ 1.0 / 60.0, 4u, 0.75, 1.25 }, 0.0);
+    uint64_t refused = 0u;
+    const TickRateDoor before(scheduler, 2, false, refused);
+    CHECK(before.nextDeadline() == scheduler.nextDeadline());
+    CHECK(before.currentInterval() == 1.0 / 60.0);
+    CHECK(before.tickOffset() == 2);
+
+    scheduler.setRateScale(1.2);
+    scheduler.pump(0.5);
+    CHECK(before.nextDeadline() == scheduler.nextDeadline());
+    CHECK(before.currentInterval() == scheduler.currentStepInterval());
+    CHECK(before.currentInterval() == (1.0 / 60.0) / 1.2);
+    CHECK(before.tickOffset() == 2);
+
+    const TickRateDoor negative(scheduler, -7, true, refused);
+    CHECK(negative.tickOffset() == -7);
+}
+
+TEST_CASE("TickRateDoor.ARefusingDoorChangesNothingAndCountsEveryCall", "[TickDriver]")
+{
+    SimulationScheduler scheduler(SchedulerConfig{ 1.0 / 60.0, 4u, 0.75, 1.25 }, 0.0);
+    uint64_t refused = 0u;
+    TickRateDoor door(scheduler, 0, true, refused);
+    const double deadline = scheduler.nextDeadline();
+
+    door.setRateScale(1.01);
+    CHECK(scheduler.rateScale() == 1.0);
+    CHECK(scheduler.currentStepInterval() == 1.0 / 60.0);
+    CHECK(scheduler.nextDeadline() == deadline);
+    CHECK(door.refusedRateChanges() == 1u);
+    CHECK(refused == 1u);
+
+    door.setRateScale(1.0);
+    door.setRateScale(std::numeric_limits<double>::quiet_NaN());
+    CHECK(door.refusedRateChanges() == 3u);
+
+    TickRateDoor nextFrames(scheduler, 0, true, refused);
+    nextFrames.setRateScale(0.8);
+    CHECK(nextFrames.refusedRateChanges() == 4u);
+    CHECK(refused == 4u);
+    CHECK(scheduler.rateScale() == 1.0);
 }
 
 TEST_CASE("TickDriverFakes.Engine.ManualExecutorRunsInOrderAndWaitsRunTheQueue", "[TickDriver]")
@@ -576,7 +627,8 @@ TEST_CASE("TickDriverFakes.RecordingGameAndHosts.RecordIntoOneOrderedList", "[Ti
     FakePresenter presenter(events);
     FakeWorldHost host(events, kAuthorityRoleBit, true);
     SimulationScheduler scheduler(SchedulerConfig{ 1.0 / 60.0, 4u }, 0.0);
-    TickRateDoor door(scheduler);
+    uint64_t refused = 0u;
+    TickRateDoor door(scheduler, 0, false, refused);
 
     TickOutcome outcome;
     outcome.tick = 12u;

@@ -255,7 +255,8 @@ TEST_CASE("TickDriverFakes.RecordingIdleGame.RunsTheBeforePumpHookAndSetsTheStop
     VirtualIdleRig rig;
     RecordingIdleGame game(rig.events, rig.manager, rig.storage, rig.engine);
     SimulationScheduler scheduler(SchedulerConfig{ 1.0 / 60.0, 4u }, 0.0);
-    TickRateDoor door(scheduler);
+    uint64_t refused = 0u;
+    TickRateDoor door(scheduler, 0, false, refused);
 
     int hookRuns = 0;
     game.beforePumpHook = [&rig, &hookRuns] {
