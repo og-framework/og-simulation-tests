@@ -7,7 +7,7 @@ without an engine or a network: a 60 Hz server on its own clock, and per client 
 per-frame stage `clockDilation::beforeClientPump` (og-simulation `docs/ClockDilationController-rationale.md` §13). Added by
 og-time-dilation task 7 (2026-11-21); task 7b (2026-11-21) added the frame-jitter knob (§1); task 10b (2026-11-21) added
 the step-start drain order (§2) and the per-step execution-lead record (§4); task 10c (2026-11-21) made the step-start
-order the default and added the per-frame read centre (§4).
+order the default and added the per-frame read centre (§4); task 14 (2026-11-22) added the uniform lag (§3).
 
 This file has no guards document: it states no prohibition. Everything is deterministic: one SplitMix64 stream per client,
 seeded from `ClientSpec::seed`.
@@ -32,6 +32,17 @@ seeded from `ClientSpec::seed`.
   existed: task 7b fingerprinted 194 scenarios (every frame's times, lead, scales and step count, every correction and every
   pair sample) before and after adding it, and all 194 were identical. The knob models a frame-paced host only roughly: the
   engine's real `t.MaxFPS` pacing was not measured.
+- **Long frames** (og-time-dilation task 7c). With `ClientSpec::longFrames.fromSeconds` ≥ 0, the first frame at or after
+  that true time, and every later one at or after the next due time, lasts `minSeconds + (maxSeconds − minSeconds) · U`
+  instead of the frame period; a run of `burstFrames` (default 1) such frames follows back to back, and after the run the
+  next one is due `everySeconds · (0.5 + U)` later, so runs land at a mean interval of `everySeconds` and never on a fixed
+  frame phase. With `everySeconds` = 0 every frame from `fromSeconds` on is long: a sustained frame-rate drop when
+  `minSeconds = maxSeconds`. The draws U come from a second stream of the client's own, `SplitMix64(seed ^
+  kLongFrameSeedSalt)`, so the link and frame-jitter draws are the same with and without long frames; a hitch frame takes
+  precedence. `longFrameCount()` counts the long frames. At the default `fromSeconds` = −1 nothing is drawn and every
+  frame period is the one before the knob existed, by construction; every older `[ClockDilationLoop]` case passes
+  unchanged. It models a host that stalls now and then for a few tens of milliseconds (G-DIL-1's F2: 22.9–38.2 ms frames,
+  with up to 3 multi-step frames within 8 frames), not the engine's own pacing after such a frame, which was not measured.
 
 `World::runUntil` runs every client's frames in true-time order, and records both clients' true deadline leads every 10 ms of
 true time (`PairSample`), so two clients are compared at one instant.
@@ -68,6 +79,10 @@ every guard case in both orders (§3.3 there).
 
 - **Links** (`Link`): one-way delay `baseSeconds` + an exponential tail of mean `jitterMeanSeconds` (b0-like defaults 28 ms
   + 7.5 ms, so R ≈ 71 ms), optional loss and bursts (`burstExtraSeconds` on a fraction of messages).
+- **A uniform lag** (og-time-dilation task 14): `uniformWidthSeconds` > 0 adds `uniformWidthSeconds · U(0, 1)` to each
+  message, so `baseSeconds` 15 ms and a width of 35 ms is og-net's shaper b0 (`lagMinMs` 15, `lagMaxMs` 50 each way, og-net
+  `EmulatorProfile.h`), whose tail is bounded, unlike the exponential one. The draw is taken only when the width is set, so
+  every link without it draws the same sequence as before and every older case's numbers are unchanged.
 - **In-order lanes.** Each lane (authority ticks down, pings up, pongs down) delivers in order: a message's arrival is the
   later of its own draw and the previous message's arrival.
 - **Authority ticks**: one message per server tick published after the client's join.

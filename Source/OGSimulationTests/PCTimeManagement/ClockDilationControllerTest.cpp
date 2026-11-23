@@ -10,6 +10,7 @@
 
 #include "catch_amalgamated.hpp"
 #include "OGSimulation/PCTimeManagement/ClockDilationController.h"
+#include "OGSimulation/PCTimeManagement/NetworkTimeEstimator.h"
 
 namespace clockDilationControllerTest
 {
@@ -235,7 +236,7 @@ namespace clockDilationControllerTest
             all.push_back(in);
             in.sensorValid           = true;
             in.phase.recentring      = true;
-            in.phase.stallDebt       = true;
+            in.phase.transitionDebt  = true;
             in.phase.hardResyncs     = 3u;
             in.currentScale          = 0.99;
             all.push_back(in);
@@ -321,7 +322,7 @@ TEST_CASE("PCTM.ClockDilationController.EachFreezeCauseSlewsBackToOneAndHolds", 
         {DilationFreeze::SensorInvalid, [](ClockDilationInputs& in) { in.sensorValid = false; }},
         {DilationFreeze::Recentre, [](ClockDilationInputs& in) { in.phase.recentreArmed = true; }},
         {DilationFreeze::Recentre, [](ClockDilationInputs& in) { in.phase.recentring = true; }},
-        {DilationFreeze::StallDebt, [](ClockDilationInputs& in) { in.phase.stallDebt = true; }},
+        {DilationFreeze::TransitionDebt, [](ClockDilationInputs& in) { in.phase.transitionDebt = true; }},
         {DilationFreeze::AwaitFirstRtt, [](ClockDilationInputs& in) { in.phase.awaitsFirstRtt = true; }},
     };
     uint32_t causesRun = 0u;
@@ -392,18 +393,51 @@ TEST_CASE("PCTM.ClockDilationController.TheFirstMatchingFreezeCauseIsReported", 
     ClockDilationInputs in   = inputsWithError(0.0, 3.0);
     in.sensorValid           = false;
     in.phase.recentreArmed   = true;
-    in.phase.stallDebt       = true;
+    in.phase.transitionDebt  = true;
     in.phase.awaitsFirstRtt  = true;
     in.phase.hardResyncs     = 1u;
     CHECK(rig.callWith(in).out.freeze == DilationFreeze::SensorInvalid);
     in.sensorValid = true;
     CHECK(rig.callWith(in).out.freeze == DilationFreeze::Recentre);
     in.phase.recentreArmed = false;
-    CHECK(rig.callWith(in).out.freeze == DilationFreeze::StallDebt);
-    in.phase.stallDebt = false;
+    CHECK(rig.callWith(in).out.freeze == DilationFreeze::TransitionDebt);
+    in.phase.transitionDebt = false;
     CHECK(rig.callWith(in).out.freeze == DilationFreeze::AwaitFirstRtt);
     in.phase.awaitsFirstRtt = false;
     CHECK(rig.callWith(in).out.freeze == DilationFreeze::AfterResync);
+}
+
+TEST_CASE("PCTM.ClockDilationController.ARealClocksSkipDebtFreezesItAsAStallDebtDoes", "[PCTM][Dilation][ClockDilationController]")
+{
+    for (const int32_t debt : {-2, +2})
+    {
+        CAPTURE(debt);
+        TimeConfig clockConfig;
+        clockConfig.recentreSettleSamples    = 0u;
+        clockConfig.minTicksBeforeDriftCheck = 0u;
+        clockConfig.softDriftThresholdTicks  = 1000u;
+        clockConfig.hardResyncThresholdTicks = 5000u;
+        NetworkTimeEstimator  estimator(clockConfig, nullptr);
+        ClientPredictionClock clock(clockConfig, estimator, nullptr);
+        Rig rig(commonConfig(ClockDilationMode::On));
+
+        ClockDilationInputs in = inputsWithError(0.0, 3.0);
+        in.phase               = clock.publishedCorrectionPhase();
+        REQUIRE(rig.callWith(in).out.freeze == DilationFreeze::None);
+
+        clock.requestInputDelayTransition(debt);
+        in.phase = clock.publishedCorrectionPhase();
+        CHECK(rig.callWith(in).out.freeze == DilationFreeze::TransitionDebt);
+
+        for (int32_t paid = 0; paid < (debt < 0 ? -debt : debt); ++paid)
+        {
+            estimator.recordAuthorityTick(0u);
+            clock.advancePrediction();
+        }
+        REQUIRE(clock.getPendingInputDelayTransitionTicks() == 0);
+        in.phase = clock.publishedCorrectionPhase();
+        CHECK(rig.callWith(in).out.freeze == DilationFreeze::None);
+    }
 }
 
 TEST_CASE("PCTM.ClockDilationController.OwnRttReproducesTheMeasuredMeanLead", "[PCTM][Dilation][ClockDilationController]")
@@ -456,6 +490,42 @@ TEST_CASE("PCTM.ClockDilationController.TheTargetLowPassesAtItsTau", "[PCTM][Dil
     const double raw            = std::max(4.0, 0.1 * 60.0 + 0.5) - 0.05 * 60.0 - 0.5;
     const double expected       = seedTarget + (1.0 - std::exp(-10.0 / 10.0)) * (raw - seedTarget);
     CHECK(filtered.update(stepped).targetTicks == Catch::Approx(expected).margin(1e-9));
+}
+
+TEST_CASE("PCTM.ClockDilationController.TheCommonTargetCarriesNoJitterTerm", "[PCTM][Dilation][ClockDilationController]")
+{
+    ClockDilationConfig ownRtt = commonConfig(ClockDilationMode::Shadow);
+    ownRtt.setpoint            = ClockDilationSetpoint::OwnRtt;
+    uint32_t setpointsRun = 0u;
+    for (const ClockDilationConfig& config : { commonConfig(ClockDilationMode::Shadow), ownRtt })
+    {
+        ClockDilationInputs quiet   = inputsWithError(10.0, 0.0);
+        quiet.smoothedRttSeconds    = 0.080;
+        quiet.smoothedJitterSeconds = 0.0;
+        quiet.jitterMultiplier      = 0.0;
+        ClockDilationInputs jittery   = quiet;
+        jittery.smoothedJitterSeconds = 0.010;
+        jittery.jitterMultiplier      = 2.0;
+
+        ClockDilationController quietController(config);
+        ClockDilationController jitteryController(config);
+        const double quietTarget   = quietController.update(quiet).targetTicks;
+        const double jitteryTarget = jitteryController.update(jittery).targetTicks;
+        CAPTURE(clockDilation::setpointWord(config.setpoint), quietTarget, jitteryTarget);
+        REQUIRE_FALSE(quietController.update(quiet).guardBound);
+        REQUIRE_FALSE(jitteryController.update(jittery).guardBound);
+        if (config.setpoint == ClockDilationSetpoint::Common)
+        {
+            CHECK(quietTarget == Catch::Approx(kCommonLeadTicks).margin(1e-12));
+            CHECK(jitteryTarget == quietTarget);
+        }
+        else
+        {
+            CHECK(jitteryTarget - quietTarget == Catch::Approx(2.0 * 0.010 * 60.0).margin(1e-9));
+        }
+        ++setpointsRun;
+    }
+    CHECK(setpointsRun == 2u);
 }
 
 TEST_CASE("PCTM.ClockDilationController.TheBandGuardClampsACommonTarget", "[PCTM][Dilation][ClockDilationController]")
@@ -543,6 +613,47 @@ TEST_CASE("PCTM.ClockDilationController.AHitchFrameIsNotSampled", "[PCTM][Dilati
     CHECK(later.out.targetTicks == Catch::Approx(before.out.targetTicks).margin(1e-9));
 }
 
+TEST_CASE("PCTM.ClockDilationController.AShortRunOfLongFramesIsNotSampled", "[PCTM][Dilation][ClockDilationController]")
+{
+    const double hundredFpsEdge = kGuardCentreTicks - 0.2;
+    const double longFrameEdge  = kGuardCentreTicks + (kLongFrameSeconds * 60.0 + 0.5 - 1.0) - 0.5;
+    const uint32_t correctionReads = TimeConfig{}.gradualCorrectionRate;
+    uint32_t runsChecked = 0u;
+    for (uint32_t run = 1u; run < correctionReads; ++run)
+    {
+        Rig rig(lowEdgeConfig());
+        REQUIRE(rig.callEvery(kHundredFpsSeconds, 300).out.targetTicks == Catch::Approx(hundredFpsEdge).margin(1e-9));
+        for (uint32_t frame = 0u; frame < run; ++frame)
+        {
+            const Step longFrame = rig.callAfter(kLongFrameSeconds);
+            CAPTURE(run, frame, longFrame.out.targetTicks);
+            CHECK(longFrame.out.targetTicks == Catch::Approx(hundredFpsEdge).margin(1e-9));
+        }
+        const Step after = rig.callEvery(kHundredFpsSeconds, 100);
+        CHECK(after.out.targetTicks == Catch::Approx(hundredFpsEdge).margin(1e-9));
+        ++runsChecked;
+    }
+    CHECK(runsChecked == correctionReads - 1u);
+
+    Rig sustained(lowEdgeConfig());
+    sustained.callEvery(kHundredFpsSeconds, 300);
+    Step longFrame;
+    for (uint32_t frame = 1u; frame < correctionReads; ++frame)
+        longFrame = sustained.callAfter(kLongFrameSeconds);
+    CHECK(longFrame.out.targetTicks == Catch::Approx(hundredFpsEdge).margin(1e-9));
+    const Step entered = sustained.callAfter(kLongFrameSeconds);
+    CAPTURE(entered.out.targetTicks, longFrameEdge);
+    CHECK(entered.out.targetTicks == Catch::Approx(longFrameEdge).margin(1e-9));
+
+    Rig interleaved(lowEdgeConfig());
+    interleaved.callEvery(kHundredFpsSeconds, 300);
+    Step alternate;
+    for (uint32_t frame = 0u; frame < 2u * correctionReads; ++frame)
+        alternate = interleaved.callAfter(frame % 2u == 0u ? kHundredFpsSeconds : kLongFrameSeconds);
+    CAPTURE(alternate.out.targetTicks);
+    CHECK(alternate.out.targetTicks == Catch::Approx(longFrameEdge).margin(1e-9));
+}
+
 TEST_CASE("PCTM.ClockDilationController.ShadowFollowsOnsTrajectoryWithoutApplying", "[PCTM][Dilation][ClockDilationController]")
 {
     Rig on(commonConfig(ClockDilationMode::On));
@@ -556,7 +667,7 @@ TEST_CASE("PCTM.ClockDilationController.ShadowFollowsOnsTrajectoryWithoutApplyin
         const double error     = 2.5 * std::sin(i * 0.05) + (i % 7) * 0.01;
         ClockDilationInputs in = inputsWithError(now, error);
         in.sensorValid         = !(i >= 120 && i < 130);
-        in.phase.stallDebt     = i >= 200 && i < 205;
+        in.phase.transitionDebt = i >= 200 && i < 205;
         in.phase.hardResyncs   = i >= 300 ? 1u : 0u;
         script.push_back(in);
     }
@@ -694,10 +805,10 @@ TEST_CASE("PCTM.ClockDilationController.TheScaleHoldsUnderTwoQuantaExceptWhileFr
     const Step nearOne = frozenRig.callWithError(0.02);
     REQUIRE(nearOne.out.scale == Catch::Approx(0.9999).margin(1e-12));
     ClockDilationInputs frozen = inputsWithError(0.0, 0.02 + kCallStepLagTicks);
-    frozen.phase.stallDebt     = true;
+    frozen.phase.transitionDebt = true;
     const Step released        = frozenRig.callWith(frozen);
     CAPTURE(nearOne.out.scale, released.out.scale);
-    CHECK(released.out.freeze == DilationFreeze::StallDebt);
+    CHECK(released.out.freeze == DilationFreeze::TransitionDebt);
     CHECK(released.out.scale == 1.0);
     CHECK(released.out.apply);
     CHECK(frozenRig.callWith(frozen).out.scale == 1.0);

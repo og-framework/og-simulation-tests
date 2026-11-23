@@ -59,6 +59,15 @@ namespace clockDilationLoopTest
     constexpr double kThirtyFpsChangesPooledMax  = 1.3;
     constexpr double kLoopbackChangesPooledMax   = 0.3;
     constexpr uint32_t kThirtyFpsMinGuardBoundFrames = 180u;
+    constexpr double   kLongFramesFromSeconds    = 5.0;
+    constexpr double   kLongFrameEverySeconds    = 3.0;
+    constexpr double   kLongFrameMinSeconds      = 0.025;
+    constexpr double   kLongFrameMaxSeconds      = 0.040;
+    constexpr uint32_t kMinLongFramesPerClient   = 30u;
+    constexpr double   kLongFrameErrP95Ticks     = 0.10;
+    constexpr double   kLongFrameChangesPerSecondMax = 2.0;
+    constexpr double   kFrameDropAtSeconds       = 60.0;
+    constexpr uint32_t kFrameDropMinGuardBoundFrames = 180u;
 
     const char* orderWord(bool drainAtStepStart) { return drainAtStepStart ? "step-start" : "frame-start"; }
 
@@ -295,11 +304,172 @@ namespace clockDilationLoopTest
         return static_cast<double>(changes) / (run.steadyUntil - run.steadyFrom);
     }
 
+    double steadyErrorP95(const LoopClient& client, const PairRun& run)
+    {
+        std::vector<double> absErrors;
+        for (const FrameRecord& frame : client.frames())
+        {
+            if (frame.seconds >= run.steadyFrom && frame.seconds <= run.steadyUntil && frame.dilated
+                && frame.out.freeze == DilationFreeze::None)
+                absErrors.push_back(std::abs(frame.out.errorTicks));
+        }
+        return percentileOf(absErrors, 95.0);
+    }
+
+    LongFrames isolatedLongFrames(uint32_t runFrames)
+    {
+        LongFrames frames;
+        frames.burstFrames  = runFrames;
+        frames.fromSeconds  = kLongFramesFromSeconds;
+        frames.everySeconds = kLongFrameEverySeconds;
+        frames.minSeconds   = kLongFrameMinSeconds;
+        frames.maxSeconds   = kLongFrameMaxSeconds;
+        return frames;
+    }
+
+    LongFrames frameDropTo(double framesPerSecond)
+    {
+        LongFrames frames;
+        frames.fromSeconds = kFrameDropAtSeconds;
+        frames.minSeconds  = 1.0 / framesPerSecond;
+        frames.maxSeconds  = 1.0 / framesPerSecond;
+        return frames;
+    }
+
+    uint32_t checkLongFrameRuns(bool drainAtStepStart, uint32_t runFrames)
+    {
+        uint32_t clientsRun = 0u;
+        for (const std::pair<uint64_t, uint64_t>& seeds : kGuardPairs)
+        {
+            std::vector<ClientSpec> clients = pairAt(seeds, ClockDilationMode::On, 100.0, 0.0, drainAtStepStart);
+            for (ClientSpec& client : clients)
+                client.longFrames = isolatedLongFrames(runFrames);
+            World world(WorldSpec{}, clients);
+            const PairRun run = runPair(world, kPairWindowSeconds);
+            for (size_t index = 0u; index < 2u; ++index)
+            {
+                const LoopClient&  client  = world.client(index);
+                const ClientSteady steady  = steadyOf(client, run);
+                const double       errP95  = steadyErrorP95(client, run);
+                const double       changes = doorChangesPerSecond(client, run);
+                CAPTURE(orderWord(drainAtStepStart), runFrames, seeds.first, seeds.second, index, client.longFrameCount(),
+                    steady.guardBoundFrames, errP95, changes, steady.skips, steady.stalls, steady.hardResyncs);
+                REQUIRE(client.longFrameCount() >= kMinLongFramesPerClient);
+                CHECK(steady.guardBoundFrames == 0u);
+                CHECK(errP95 <= kLongFrameErrP95Ticks);
+                CHECK(changes <= kLongFrameChangesPerSecondMax);
+                CHECK(steady.corrections() == 0u);
+                ++clientsRun;
+            }
+        }
+        return clientsRun;
+    }
+
     struct CentreBias
     {
         double   mean   = 0.0;
         uint32_t frames = 0u;
     };
+
+    constexpr double   kShapeUpLoss            = 0.02;
+    constexpr double   kShapeDownLoss          = 0.01;
+    constexpr double   kShaperB0MinSeconds     = 0.015;
+    constexpr double   kShaperB0WidthSeconds   = 0.035;
+    constexpr uint64_t kCommonShapeSeeds[]     = { 14001u, 14101u, 14201u, 14301u };
+    constexpr double   kCommonShapeFps[]       = { 100.0, 60.0 };
+    constexpr double   kHighEdgeTargetTicks    = 6.0;
+    constexpr uint64_t kHighEdgeSeeds[]        = { 14001u, 14018u, 14035u, 14052u, 14069u, 14086u, 14103u, 14120u };
+
+    Link fixedLagLink(double seconds, double lossProbability)
+    {
+        Link link;
+        link.baseSeconds       = seconds;
+        link.jitterMeanSeconds = 0.0;
+        link.lossProbability   = lossProbability;
+        return link;
+    }
+
+    Link shaperB0Link(double lossProbability)
+    {
+        Link link;
+        link.baseSeconds         = kShaperB0MinSeconds;
+        link.jitterMeanSeconds   = 0.0;
+        link.uniformWidthSeconds = kShaperB0WidthSeconds;
+        link.lossProbability     = lossProbability;
+        return link;
+    }
+
+    struct ShapeClient
+    {
+        const char* name;
+        Link        up;
+        Link        down;
+    };
+
+    std::vector<ShapeClient> heterogeneousShape()
+    {
+        return {
+            { "near10", fixedLagLink(0.010, kShapeUpLoss), fixedLagLink(0.010, kShapeDownLoss) },
+            { "mid30", fixedLagLink(0.030, kShapeUpLoss), fixedLagLink(0.030, kShapeDownLoss) },
+            { "far50", fixedLagLink(0.050, kShapeUpLoss), fixedLagLink(0.050, kShapeDownLoss) },
+            { "far60", fixedLagLink(0.060, kShapeUpLoss), fixedLagLink(0.060, kShapeDownLoss) },
+            { "shaperB0", shaperB0Link(kShapeUpLoss), shaperB0Link(kShapeDownLoss) },
+            { "loopback", loopbackLink(), loopbackLink() },
+        };
+    }
+
+    std::vector<ClientSpec> commonSession(const std::vector<ShapeClient>& shape, uint64_t seedBase, double framesPerSecond,
+                                          bool drainAtStepStart, const ClockDilationConfig& dilation)
+    {
+        std::vector<ClientSpec> clients;
+        for (size_t index = 0u; index < shape.size(); ++index)
+        {
+            const double phase = static_cast<double>(index) / static_cast<double>(shape.size());
+            ClientSpec spec = b0Client(seedBase + index, 2.0 + phase / framesPerSecond, ClockDilationMode::On);
+            spec.framesPerSecond  = framesPerSecond;
+            spec.drainAtStepStart = drainAtStepStart;
+            spec.up               = shape[index].up;
+            spec.down             = shape[index].down;
+            spec.dilation         = dilation;
+            clients.push_back(spec);
+        }
+        return clients;
+    }
+
+    struct SessionRun
+    {
+        double from  = 0.0;
+        double until = 0.0;
+    };
+
+    SessionRun runSession(World& world, size_t clients)
+    {
+        world.runUntil(20.0);
+        SessionRun run;
+        run.from  = settledSeconds(world, clients) + kSteadyAfterSettleSeconds;
+        run.until = run.from + kPairWindowSeconds;
+        world.runUntil(run.until);
+        return run;
+    }
+
+    double meanExecutionLead(const LoopClient& client, const SessionRun& run)
+    {
+        std::vector<double> leads;
+        for (const StepRecord& step : client.steps())
+        {
+            if (step.seconds >= run.from && step.seconds <= run.until)
+                leads.push_back(step.executionLeadTicks);
+        }
+        return meanOf(leads);
+    }
+
+    ClockDilationConfig commonOn()
+    {
+        ClockDilationConfig config;
+        config.mode     = ClockDilationMode::On;
+        config.setpoint = ClockDilationSetpoint::Common;
+        return config;
+    }
 
     CentreBias centreBiasOf(const LoopClient& client, const PairRun& run)
     {
@@ -616,6 +786,87 @@ TEST_CASE("PCTM.ClockDilationLoop.TheGuardHoldsAnyTarget", "[PCTM][Dilation][Clo
     CHECK(armsRun == 48u);
 }
 
+TEST_CASE("PCTM.ClockDilationLoop.TheCompiledCommonLeadHoldsEveryClientOfTheHeterogeneousShape",
+    "[PCTM][Dilation][ClockDilationLoop]")
+{
+    const std::vector<ShapeClient> shape = heterogeneousShape();
+    uint32_t sessionsRun = 0u;
+    for (bool drainAtStepStart : kDrainOrders)
+    {
+        for (double framesPerSecond : kCommonShapeFps)
+        {
+            for (uint64_t seedBase : kCommonShapeSeeds)
+            {
+                World world(WorldSpec{}, commonSession(shape, seedBase, framesPerSecond, drainAtStepStart, commonOn()));
+                const SessionRun run = runSession(world, shape.size());
+                PairRun window;
+                window.steadyFrom  = run.from;
+                window.steadyUntil = run.until;
+                double leadMin = std::numeric_limits<double>::infinity();
+                double leadMax = -std::numeric_limits<double>::infinity();
+                for (size_t index = 0u; index < shape.size(); ++index)
+                {
+                    const ClientSteady steady = steadyOf(world.client(index), window);
+                    const double       lead   = meanExecutionLead(world.client(index), run);
+                    CAPTURE(orderWord(drainAtStepStart), framesPerSecond, seedBase, shape[index].name, lead,
+                        steady.guardBoundFrames, steady.skips, steady.stalls, steady.hardResyncs);
+                    CHECK(steady.guardBoundFrames == 0u);
+                    CHECK(steady.corrections() == 0u);
+                    leadMin = std::min(leadMin, lead);
+                    leadMax = std::max(leadMax, lead);
+                }
+                CAPTURE(orderWord(drainAtStepStart), framesPerSecond, seedBase, leadMin, leadMax);
+                if (framesPerSecond == 100.0)
+                    CHECK(leadMax - leadMin <= kHundredFpsGridTicks);
+                ++sessionsRun;
+            }
+        }
+    }
+    CHECK(sessionsRun == std::size(kDrainOrders) * std::size(kCommonShapeFps) * std::size(kCommonShapeSeeds));
+}
+
+TEST_CASE("PCTM.ClockDilationLoop.TheHighEdgeCorrectsWhereTheReadTailReachesTheBand_Finding", "[PCTM][Dilation][ClockDilationLoop]")
+{
+    struct Arm
+    {
+        ShapeClient client;
+        bool        corrects;
+    };
+    const Arm arms[] = {
+        { { "mid30", fixedLagLink(0.030, kShapeUpLoss), fixedLagLink(0.030, kShapeDownLoss) }, false },
+        { { "shaperB0", shaperB0Link(kShapeUpLoss), shaperB0Link(kShapeDownLoss) }, true },
+        { { "shaperB0NoLoss", shaperB0Link(0.0), shaperB0Link(0.0) }, false },
+        { { "exponentialB0NoLoss", Link{}, Link{} }, true },
+    };
+    ClockDilationConfig atTheEdge = commonOn();
+    atTheEdge.commonLeadTicks     = kHighEdgeTargetTicks;
+    uint32_t armsRun = 0u;
+    for (const Arm& arm : arms)
+    {
+        uint32_t corrections      = 0u;
+        uint32_t guardBoundFrames = 0u;
+        for (uint64_t seed : kHighEdgeSeeds)
+        {
+            World world(WorldSpec{}, commonSession({ arm.client }, seed, 100.0, true, atTheEdge));
+            const SessionRun run = runSession(world, 1u);
+            PairRun window;
+            window.steadyFrom  = run.from;
+            window.steadyUntil = run.until;
+            const ClientSteady steady = steadyOf(world.client(0u), window);
+            corrections += steady.corrections();
+            guardBoundFrames += steady.guardBoundFrames;
+        }
+        CAPTURE(arm.client.name, corrections, guardBoundFrames);
+        CHECK(guardBoundFrames > 0u);
+        if (arm.corrects)
+            CHECK(corrections >= 1u);
+        else
+            CHECK(corrections == 0u);
+        ++armsRun;
+    }
+    CHECK(armsRun == std::size(arms));
+}
+
 TEST_CASE("PCTM.ClockDilationLoop.OtherFrameRatesHoldTheBand", "[PCTM][Dilation][ClockDilationLoop]")
 {
     uint32_t runs = 0u;
@@ -655,6 +906,56 @@ TEST_CASE("PCTM.ClockDilationLoop.FrameJitterLeavesOnNoWorseThanOff", "[PCTM][Di
         CHECK(corrections[0] >= 1u);
         CHECK(corrections[1] <= corrections[0]);
     }
+}
+
+TEST_CASE("PCTM.ClockDilationLoop.IsolatedLongFramesLeaveTheGuardUnbound", "[PCTM][Dilation][ClockDilationLoop]")
+{
+    const uint32_t shortestCorrectionRun = TimeConfig{}.gradualCorrectionRate;
+    uint32_t clientsRun = 0u;
+    for (bool drainAtStepStart : kDrainOrders)
+    {
+        for (uint32_t runFrames : { 1u, shortestCorrectionRun - 1u })
+            clientsRun += checkLongFrameRuns(drainAtStepStart, runFrames);
+    }
+    CHECK(clientsRun == 2u * 2u * 2u * std::size(kGuardPairs));
+}
+
+TEST_CASE("PCTM.ClockDilationLoop.ASustainedFrameDropStillLiftsTheEdge", "[PCTM][Dilation][ClockDilationLoop]")
+{
+    uint32_t ordersRun = 0u;
+    for (bool drainAtStepStart : kDrainOrders)
+    {
+        uint32_t offCorrections = 0u;
+        for (ClockDilationMode mode : { ClockDilationMode::Off, ClockDilationMode::On })
+        {
+            for (const std::pair<uint64_t, uint64_t>& seeds : kGuardPairs)
+            {
+                std::vector<ClientSpec> clients = pairAt(seeds, mode, 100.0, 0.0, drainAtStepStart);
+                for (ClientSpec& client : clients)
+                    client.longFrames = frameDropTo(kThirtyFps);
+                World world(WorldSpec{}, clients);
+                const PairRun run = runPair(world, kPairWindowSeconds);
+                REQUIRE(run.steadyFrom < kFrameDropAtSeconds);
+                for (size_t index = 0u; index < 2u; ++index)
+                {
+                    const ClientSteady steady = steadyOf(world.client(index), run);
+                    CAPTURE(orderWord(drainAtStepStart), clockDilation::modeWord(mode), seeds.first, seeds.second, index,
+                        steady.skips, steady.stalls, steady.hardResyncs, steady.guardBoundFrames);
+                    if (mode == ClockDilationMode::Off)
+                    {
+                        offCorrections += steady.corrections();
+                        continue;
+                    }
+                    CHECK(steady.corrections() == 0u);
+                    CHECK(steady.guardBoundFrames >= kFrameDropMinGuardBoundFrames);
+                }
+            }
+        }
+        CAPTURE(orderWord(drainAtStepStart), offCorrections);
+        CHECK(offCorrections >= 1u);
+        ++ordersRun;
+    }
+    CHECK(ordersRun == 2u);
 }
 
 TEST_CASE("PCTM.ClockDilationLoop.TheGuardCentreIsTheClocksRead", "[PCTM][Dilation][ClockDilationLoop]")

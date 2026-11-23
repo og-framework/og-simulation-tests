@@ -424,17 +424,21 @@ TEST_CASE("ReceptionCoordinator publishes the tier through the sink on a change"
     const FStandaloneTestHandle wire = live(1);
     RecordingTierSink sink;
 
-    // One dwell of tier-1-band samples: the first dwell-1 produce no transition
-    // (and so no publish); the dwell-crossing sample transitions 0 -> 1 and fires
-    // the sink exactly once, with this owner's id and the new tier.
+    // One dwell of tier-1-band samples: the FIRST sample publishes the wire's
+    // first tier, 0 (og-input-latency P6-2: an owner never told runs the
+    // worst-tier fallback, not tier 0); the rest of the dwell produce no
+    // transition (and so no publish); the dwell-crossing sample transitions
+    // 0 -> 1 and fires the sink once more, with this owner's id and the new tier.
     for (int32_t t = 0; t < cfg.tierMinDwellTicks; ++t)
     {
         coord.noteRttSample(wire, /*ownerId=*/10, /*serverTick=*/t, /*rttMs=*/60.0, sink);
     }
 
-    REQUIRE(sink.calls.size() == 1);
+    REQUIRE(sink.calls.size() == 2);
     REQUIRE(sink.calls[0].id == 10);
-    REQUIRE(sink.calls[0].tier == 1);
+    REQUIRE(sink.calls[0].tier == 0);
+    REQUIRE(sink.calls[1].id == 10);
+    REQUIRE(sink.calls[1].tier == 1);
 }
 
 TEST_CASE("ReceptionCoordinator does not re-publish an unchanged tier", "[Network][ReceptionCoordinator]")
@@ -444,17 +448,17 @@ TEST_CASE("ReceptionCoordinator does not re-publish an unchanged tier", "[Networ
     const FStandaloneTestHandle wire = live(1);
     RecordingTierSink sink;
 
-    // Drive to tier 1 (one publish)...
+    // Drive to tier 1 (two publishes: the first sample's tier 0, then 1)...
     for (int32_t t = 0; t < cfg.tierMinDwellTicks; ++t)
         coord.noteRttSample(wire, /*ownerId=*/10, /*serverTick=*/t, /*rttMs=*/60.0, sink);
-    REQUIRE(sink.calls.size() == 1);
+    REQUIRE(sink.calls.size() == 2);
 
     // ...then keep sampling the SAME band. The tier stays 1, so the wire is never
     // dirtied again — the publish-only-on-change dedup (now core-owned) holds.
     for (int32_t t = 0; t < cfg.tierMinDwellTicks; ++t)
         coord.noteRttSample(wire, /*ownerId=*/10, /*serverTick=*/cfg.tierMinDwellTicks + t, /*rttMs=*/60.0, sink);
 
-    REQUIRE(sink.calls.size() == 1);   // still just the single 0 -> 1 transition
+    REQUIRE(sink.calls.size() == 2);   // still just the first tier and the single 0 -> 1 transition
 }
 
 TEST_CASE("ReceptionCoordinator publishes nothing on a negative reading", "[Network][ReceptionCoordinator]")
@@ -479,22 +483,23 @@ TEST_CASE("ReceptionCoordinator publishes once per bundle, not per slot", "[Netw
     const FStandaloneTestHandle wire = live(1);
     RecordingTierSink sink;
 
-    // Park the wire one sample short of the dwell-crossing: still tier 0, no publish.
+    // Park the wire one sample short of the dwell-crossing: still tier 0, published
+    // once, by the first sample (og-input-latency P6-2).
     for (int32_t t = 0; t < cfg.tierMinDwellTicks - 1; ++t)
         coord.noteRttSample(wire, /*ownerId=*/10, /*serverTick=*/t, /*rttMs=*/60.0, sink);
-    REQUIRE(sink.calls.empty());
+    REQUIRE(sink.calls.size() == 1);
 
     // A bundle's worth of PER-SLOT input receipts must not sample or publish — the
     // tier feed is per BUNDLE (noteRttSample), the input path is per SLOT.
     for (int32_t s = 0; s < 8; ++s)
         coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/200 + s, s);
-    REQUIRE(sink.calls.empty());
+    REQUIRE(sink.calls.size() == 1);
 
     // The ONE bundle-level sample that crosses the dwell fires the sink exactly
     // once — not once per slot of the bundle that carried the RTT.
     coord.noteRttSample(wire, /*ownerId=*/10, /*serverTick=*/cfg.tierMinDwellTicks, /*rttMs=*/60.0, sink);
-    REQUIRE(sink.calls.size() == 1);
-    REQUIRE(sink.calls[0].tier == 1);
+    REQUIRE(sink.calls.size() == 2);
+    REQUIRE(sink.calls[1].tier == 1);
 }
 
 TEST_CASE("ReceptionCoordinator publishes to both couch-coop owners sharing one wire", "[Network][ReceptionCoordinator]")
@@ -518,8 +523,8 @@ TEST_CASE("ReceptionCoordinator publishes to both couch-coop owners sharing one 
         coord.noteRttSample(wire, /*ownerId=*/11, /*serverTick=*/t, /*rttMs=*/60.0, sink);
     }
 
-    REQUIRE(sink.countFor(10) == 1);
-    REQUIRE(sink.countFor(11) == 1);
+    REQUIRE(sink.countFor(10) == 2);   // each owner's first tier (0), then 1 (og-input-latency P6-2)
+    REQUIRE(sink.countFor(11) == 2);
     REQUIRE(sink.lastTierFor(10) == 1);
     REQUIRE(sink.lastTierFor(11) == 1);
 }

@@ -1,4 +1,5 @@
 <!-- SPDX-License-Identifier: MPL-2.0 -->
+<!-- lint-external-ref: StallDebt -- the freeze cause's name until og-input-latency P6-2 renamed it TransitionDebt; kept in the history -->
 # `ClockDilationControllerTest.cpp` — rationale
 
 Source: `ClockDilationControllerTest.cpp`, tags `[PCTM][Dilation][ClockDilationController]`. It tests og-simulation's
@@ -8,7 +9,9 @@ are named (a)–(g) below. Task 7b (2026-11-21) made the guard's low edge frame-
 (§2, report §4 item 6). Task 10b (2026-11-21) added the target's step lag and its case (§2, research topic
 `lead-definition`'s report §6 AC1). Task 10c (2026-11-21) made the guard centre the clock's published read and added the
 change hysteresis: the rig now supplies a clock read, and two cases were added (§1, §2; research topic `on-readiness`'s
-report §7 AC2 and AC4).
+report §7 AC2 and AC4). Task 7c (2026-11-21) filtered the frame peak so a short run of long frames does not enter it, and
+added its case (§2, §3). Task 14 (2026-11-22) enabled the `Common` setpoint and added the case that keeps its target free
+of the jitter term (design Q5; §2, §3).
 
 This file has no guards document: it states no prohibition.
 
@@ -61,12 +64,15 @@ This file has no guards document: it states no prohibition.
 | `EachFreezeCauseSlewsBackToOneAndHolds` | (d) | from 0.990, each of the four sensor and phase causes (the re-centre twice, armed and recentring: five runs) reports itself and slews 0.992 … 1.0 and holds; released, the scale steps 0.998 |
 | `AfterResyncFreezesForExactlyTheWindow` | (d) | a hard-resync count change freezes for 64 calls (1.0 s), releases at exactly 1.0 s; an unchanged count does not freeze, the next change does |
 | `TheFirstMatchingFreezeCauseIsReported` | the Description's order | all causes on, then removed one by one in order |
+| `ARealClocksSkipDebtFreezesItAsAStallDebtDoes` | og-input-latency P6-2 | a real `ClientPredictionClock`'s published phase, not a hand-set flag: a debt of −2 (Skips owed) and of +2 (Stalls owed) each freeze it as `TransitionDebt`, and once the clock has paid the debt the freeze is gone. The cause was `StallDebt` / `phase.stallDebt` until P6-2 made the clock's debt signed. Seen failing with the clock's debt bit set for a positive debt only (its pre-P6-2 meaning): the −2 arm's `freeze == TransitionDebt` read `0 == 4` (`None`), and with the clock ignoring a negative request the same |
 | `OwnRttReproducesTheMeasuredMeanLead` | (e) | R 72.5 ms, J 9.5 ms, m 0.5, F 4 → 2.461 ± 0.001 and exactly 2.460 ± 1e-9; R 0.1 ms, J 0 → 3.497 ± 0.001, also 10 s later |
 | `TheTargetLowPassesAtItsTau` | the Description's low-pass | before the first valid sensor the raw target is reported; a step after 10 s moves by `1 − e^(−1)` of the gap |
+| `TheCommonTargetCarriesNoJitterTerm` | task 14 (design Q5) | the same inputs with no jitter term (J 0, m 0) and with one (J 10 ms, m 2), R 80 ms, both inside the guard: under `Common` the two targets are both `commonLeadTicks` (2.5 in this file's rig) and equal; under `OwnRtt` the second is m · J · f = 1.2 ticks higher, so the inputs do reach the target |
 | `TheBandGuardClampsACommonTarget` | (f) | a `Common` target of 6 with c = 2 → 4.5, `guardBound`; −1 → 1.5 (the first call's low edge, c − 0.5; task 6 asserted 0.5 = c − 1.5 before task 7b), bound; 2.5 → not bound |
 | `TheLowEdgeFollowsTheFramePeriod` | 7b, report §4 item 6 | the first call's edge is c − 0.5; from the second call, 1/30 s calls (2 ticks, φ̄ = 2.5) give c + 1.0, 1/100 s (0.6 tick, φ̄ = 1.3) c − 0.2, 1/144 s (0.417 tick, φ̄ = 1.208) c − 0.292, each ± 1e-9 and unchanged 600 calls later; a Shadow controller's edge equals On's (c + 1.0 at 1/30 s) |
 | `TheFramePeakDecaysAtTheGuardTau` | 7b, report §4 item 6 | from 1/30 s to 1/100 s: one call later the edge is just below c + 1.0 (the peak decays, it does not drop); after 2.0 s (200 calls) the peak is 0.6 + 1.4/e = 1.115, so the edge is c + 0.115 ± 0.005 (and the exact form ± 1e-6); after 30 s more, c − 0.2 |
 | `AHitchFrameIsNotSampled` | 7b, report §4 item 6 | at 1/100 s (edge c − 0.2) one call 0.6 s late (36 ticks > `kMaxFrameTicks`) leaves the edge unchanged on that call, the next and 100 after |
+| `AShortRunOfLongFramesIsNotSampled` | 7c | at 1/100 s (edge c − 0.2): runs of 1, 2 and 3 calls 40 ms apart (2.4 ticks, under `kMaxFrameTicks`), each in a fresh rig, leave the edge at c − 0.2 ± 1e-9 on every long call and 100 calls after (the count is the clock's `gradualCorrectionRate` − 1, read from `TimeConfig{}`, not the filter's constant, so a smaller filter count fails); the 4th consecutive 40 ms call lifts it to c + (2.4 + 0.5 − 1) − 0.5 = c + 1.4 ± 1e-9, and so does a call ending 8 that alternate 10 ms and 40 ms (4 long of the last 8) |
 | `TheTargetGainsHalfTheMeanFramePeriod` | 10b, report §6 AC1 | Shadow, `OwnRtt`, mid-band inputs, 30 s of calls at constant frames of 0.6, 1.0, 2.0 and 60/144 ticks: unbound; `stepLagTicks` = F/2 ± 0.002, the target minus the raw setpoint (computed from the inputs) = F/2 ± 0.002, and target − `stepLagTicks` = the setpoint ± 1e-9. After 30 s at 0.6 tick one 40 ms frame (2.4 ticks) moves the lag by more than 0 and less than 0.01 (a mean with τ 10 s: 0.0036; the peak would move 0.9); one 60 ms frame (3.6 ticks, over `kMaxFrameTicks`) leaves lag and target unchanged. Off: every field of the output is its default (0, false, scale 1) with `ModeOff`, `stepLagTicks` 0 |
 | `TheGuardCentreIsTheClocksReadInEitherDrainOrder` | 10c, report §7 AC2 | 1,800 calls at 1/30 s with `centreInputs`, in each drain order, with a `Common` target below every edge and one above: the centre is 2.0 (the read minus the previous call's Ŝ) ± 1e-9 in both orders and equal between them; the target is the low edge c + 1.0 = 3.0 or the high edge c + 2.5 = 4.5 in both, bound. One more call with the read's count unchanged and Ŝ + 7.25, A − 5 leaves the centre **bit-identical** (and the target within 1e-9: the frame peak's arithmetic moves it in the last bits) |
 | `TheScaleHoldsUnderTwoQuantaExceptWhileFrozen` | 10c, report §7 AC4 | the default `changeHysteresisQuanta` is 2. Not frozen, from 0.9995 (one 5-quantum move): a slewed value 1 quantum away (error 0.08) and 1.5 quanta away (0.13) hold the scale with `apply` false, for 100 more calls too; 3 quanta (0.04) moves it to 0.9998 with `apply`. Frozen (a stall debt) at 0.9999: the next call returns exactly 1.0 with `apply`, and stays. Task 6's (b), (c), (d) and (g) are unchanged: every step they take is at least 10 quanta |
@@ -104,4 +110,15 @@ Run red first on a temporary edit of `ClockDilationController.h`, restored byte-
 - **Task 10c, the hysteresis without the freeze exemption** (`frozen ||` removed): `TheScaleHoldsUnderTwoQuantaExceptWhileFrozen`
   red, 3 assertions: `released.out.scale == 1.0` with `0.9999 == 1.0`, `released.out.apply` false, and the next frozen call
   still `0.9999 == 1.0`.
+- **Task 7c, the sustained filter removed** (`sustainedFrameTicks` returning `frameTicks`, task 7b's peak):
+  `AShortRunOfLongFramesIsNotSampled` red, 10 assertions: `3.4 == Approx( 1.8 )` on the first long call of every run,
+  `2.6917551875 == Approx( 1.8 )` 100 calls later (the peak decaying), and the 4-frame arm's third call `3.4 == Approx( 1.8 )`.
+  The closed loop's case is red too (og-simulation-tests `ClockDilationLoopTest-rationale.md` §4).
+- **Task 7c, `kFramePeakFrames` = 2 or 3**: the same case red: the runs shorter than 4 that reach the count enter
+  (`3.4 == Approx( 1.8 )`).
+- **Task 7c, the frame clipped at the 10 s mean** (`std::min(frameTicks, m_frameMeanTicks)`): the same case red: the
+  4-frame and alternating arms never lift the edge, and the short-run arms see it drift with the mean.
+- **Task 14, OwnRtt's jitter term added to `Common`'s target** (`rawTargetTicks` returns `commonLeadTicks +
+  targetOffsetTicks + jitterMultiplier · smoothedJitterSeconds · tickFrequency`): `TheCommonTargetCarriesNoJitterTerm` red,
+  `CHECK( jitteryTarget == quietTarget )`: `3.7 == 2.5`.
 - The compile-time checks are in the header and are recorded in its rationale (§12).

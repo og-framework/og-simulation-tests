@@ -524,6 +524,53 @@ TEST_CASE("SimulationDisplaySnapshot.TheReaderSeesAPublishOnlyOnceItIsCommitted"
     CHECK(publisher->drops() == 0u);
 }
 
+TEST_CASE("SimulationDisplaySnapshot.ARefreshedViewFollowsEveryPublish", "[Mailbox]")
+{
+    auto publisher = std::make_unique<DisplayPublisher>();
+    const auto fillWithEntries = [](std::size_t count)
+    {
+        return [count](DisplaySnapshot& snapshot)
+        {
+            snapshot.entryCount = count;
+            for (std::size_t index = 0u; index < count; ++index)
+                snapshot.entries[index].simId = static_cast<unsigned int>(index + 1u);
+        };
+    };
+
+    const DisplaySnapshot* view = publisher->refreshView_GameThread(nullptr);
+    CHECK(view == nullptr);
+
+    REQUIRE(publisher->publish_Step(fillWithEntries(0u)));
+    view = publisher->refreshView_GameThread(view);
+    REQUIRE(view != nullptr);
+    CHECK(view->publishSequence == 1u);
+    CHECK(view->find(1u) == nullptr);
+
+    REQUIRE(publisher->publish_Step(fillWithEntries(2u)));
+    view = publisher->refreshView_GameThread(view);
+    REQUIRE(view != nullptr);
+    CHECK(view->publishSequence == 2u);
+    CHECK(view->find(1u) != nullptr);
+    CHECK(view->find(2u) != nullptr);
+
+    view = publisher->refreshView_GameThread(view);
+    REQUIRE(view != nullptr);
+    CHECK(view->publishSequence == 2u);
+
+    std::uint64_t followed = 0u;
+    for (std::uint64_t sequence = 3u; sequence <= 3u + 4u * DisplayPublisher::Channel::kCapacity; ++sequence)
+    {
+        REQUIRE(publisher->publish_Step(fillWithEntries(2u)));
+        view = publisher->refreshView_GameThread(view);
+        REQUIRE(view != nullptr);
+        CHECK(view->publishSequence == sequence);
+        ++followed;
+    }
+    CHECK(followed == 1u + 4u * DisplayPublisher::Channel::kCapacity);
+    CHECK(publisher->drops() == 0u);
+    publisher->release_GameThread(view);
+}
+
 namespace
 {
     void stampSnapshot(DisplaySnapshot& snapshot, std::uint64_t stamp)

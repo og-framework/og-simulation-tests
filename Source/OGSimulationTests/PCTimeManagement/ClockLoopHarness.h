@@ -69,6 +69,7 @@ struct Link
     double lossProbability   = 0.0;
     double burstProbability  = 0.0;
     double burstExtraSeconds = 0.200;
+    double uniformWidthSeconds = 0.0;
 };
 
 struct Hitch
@@ -76,6 +77,17 @@ struct Hitch
     double atSeconds = -1.0;
     double seconds   = 0.0;
 };
+
+struct LongFrames
+{
+    double   fromSeconds  = -1.0;
+    double   everySeconds = 0.0;
+    double   minSeconds   = 0.0;
+    double   maxSeconds   = 0.0;
+    uint32_t burstFrames  = 1u;
+};
+
+inline constexpr uint64_t kLongFrameSeedSalt = 0x4C6F6E6746726D73ull;
 
 struct ClientSpec
 {
@@ -90,6 +102,7 @@ struct ClientSpec
     Link                down;
     ClockDilationConfig dilation;
     Hitch               hitch;
+    LongFrames          longFrames;
     bool                render             = false;
     std::vector<std::pair<double, double>> forcedScales;
 };
@@ -189,6 +202,7 @@ public:
         : m_spec(spec)
         , m_server(server)
         , m_rng(spec.seed)
+        , m_longFrameRng(spec.seed ^ kLongFrameSeedSalt)
         , m_estimator(m_time, nullptr)
         , m_clock(m_time, m_estimator, nullptr)
         , m_controller(spec.dilation)
@@ -198,6 +212,7 @@ public:
         m_manager.clock     = &m_clock;
         m_manager.time      = &m_time;
         m_nextFrameClock    = clockAt(spec.joinSeconds);
+        m_nextLongFrame     = spec.longFrames.fromSeconds;
         m_nextAuthorityTick = m_server.publishedTickAt(spec.joinSeconds) + 1u;
         m_pingOrigin        = clockAt(spec.joinSeconds - kPingsBeforeJoinSeconds);
         for (double ping = m_pingOrigin; ping < m_nextFrameClock; ping += kPingIntervalSeconds)
@@ -290,8 +305,12 @@ public:
 
         const bool hitchFrame = !m_hitchDone && m_spec.hitch.atSeconds >= 0.0 && now >= m_spec.hitch.atSeconds;
         m_hitchDone           = m_hitchDone || hitchFrame;
-        m_nextFrameClock      = clockNow + (hitchFrame ? m_spec.hitch.seconds : framePeriodSeconds());
+        const bool longFrame  = !hitchFrame && m_nextLongFrame >= 0.0 && now >= m_nextLongFrame;
+        m_nextFrameClock      = clockNow + (hitchFrame ? m_spec.hitch.seconds
+                                            : longFrame ? longFrameSeconds(now) : framePeriodSeconds());
     }
+
+    uint32_t longFrameCount() const { return m_longFrames; }
 
     bool started() const { return m_scheduler.has_value(); }
 
@@ -351,6 +370,19 @@ private:
         return periodSeconds * (1.0 + m_spec.frameJitter * (2.0 * m_rng.unit() - 1.0));
     }
 
+    double longFrameSeconds(double now)
+    {
+        const LongFrames& spec = m_spec.longFrames;
+        const double seconds   = spec.minSeconds + (spec.maxSeconds - spec.minSeconds) * m_longFrameRng.unit();
+        if (m_longBurstLeft == 0u)
+            m_longBurstLeft = std::max(spec.burstFrames, 1u);
+        --m_longBurstLeft;
+        if (m_longBurstLeft == 0u)
+            m_nextLongFrame = now + spec.everySeconds * (0.5 + m_longFrameRng.unit());
+        ++m_longFrames;
+        return seconds;
+    }
+
     static double deadlineTickAt(const TickRateDoor& door, double hostNow)
     {
         return static_cast<double>(door.tickOffset() + static_cast<int64_t>(door.physicsStepCount()))
@@ -362,9 +394,10 @@ private:
         const double lossDraw  = m_rng.unit();
         const double burstDraw = m_rng.unit();
         const double jitter    = -link.jitterMeanSeconds * std::log(1.0 - m_rng.unit());
+        const double uniform   = link.uniformWidthSeconds > 0.0 ? link.uniformWidthSeconds * m_rng.unit() : 0.0;
         if (lossDraw < link.lossProbability)
             return std::nullopt;
-        return link.baseSeconds + jitter + (burstDraw < link.burstProbability ? link.burstExtraSeconds : 0.0);
+        return link.baseSeconds + uniform + jitter + (burstDraw < link.burstProbability ? link.burstExtraSeconds : 0.0);
     }
 
     void generateAuthority(double now)
@@ -487,7 +520,7 @@ private:
     {
         if (!m_firstHardResync.has_value() || m_joinSettled.has_value())
             return;
-        if (!phase.recentreArmed && !phase.recentring && !phase.stallDebt && !phase.awaitsFirstRtt)
+        if (!phase.recentreArmed && !phase.recentring && !phase.transitionDebt && !phase.awaitsFirstRtt)
             m_joinSettled = now;
     }
 
@@ -496,6 +529,7 @@ private:
     ClientSpec                        m_spec;
     const Server&                     m_server;
     SplitMix64                        m_rng;
+    SplitMix64                        m_longFrameRng;
     TimeConfig                        m_time;
     NetworkTimeEstimator              m_estimator;
     ClientPredictionClock             m_clock;
@@ -518,6 +552,9 @@ private:
     std::deque<Message>               m_pongs;
     size_t                            m_nextForced         = 0u;
     bool                              m_hitchDone          = false;
+    double                            m_nextLongFrame      = -1.0;
+    uint32_t                          m_longFrames         = 0u;
+    uint32_t                          m_longBurstLeft      = 0u;
     std::vector<FrameRecord>          m_frames;
     std::vector<StepRecord>           m_steps;
     std::vector<CorrectionEvent>      m_corrections;

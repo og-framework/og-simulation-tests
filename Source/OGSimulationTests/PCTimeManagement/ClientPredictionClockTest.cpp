@@ -447,9 +447,12 @@ TEST_CASE("PCTM.ClientPredictionClock.UpwardTierTransitionTriggersProactiveStall
 }
 
 // ---------------------------------------------------------------------------
-// AC-T11-2 — a DOWNWARD tier transition (2 -> 0) causes NO stall. The client
-// may now predict further ahead; that is a natural extension reached by the
-// ordinary drift path, not something to undo here.
+// AC-T11-2 — a DOWNWARD tier transition (2 -> 0) causes NO stall through the
+// T11 entry point, which keeps its positive-only contract. (The client must
+// still pay a lowered delay, as Skips, through requestInputDelayTransition:
+// og-input-latency P6-2, the [DelayTransition] cases below. The "ordinary drift
+// path reaches it on its own" this comment used to say is false: the drift
+// target never reads the delay.)
 // ---------------------------------------------------------------------------
 TEST_CASE("PCTM.ClientPredictionClock.DownwardTierTransitionDoesNotStall",
           "[PCTM][ClientPredictionClock][TierStall]")
@@ -532,6 +535,133 @@ TEST_CASE("PCTM.ClientPredictionClock.MultipleUpwardTransitionsAccumulate",
     // guards against a "last delta wins" implementation passing by accident.
     REQUIRE(control.getPredictionTick() - stalled.getPredictionTick()
             > static_cast<unsigned int>(deltaB));
+}
+
+// ===========================================================================
+// og-input-latency P6-2 — the SIGNED input-delay transition debt.
+//
+// requestInputDelayTransition(delta): > 0 Stalls owed, < 0 Skips owed, one
+// netted counter. Each case drives the clock in makeStallTestConfig's pure dead
+// band (so only the debt can correct) and checks, on EVERY call, that
+// evaluateDrift() named the action advancePrediction() then took.
+// ===========================================================================
+
+namespace
+{
+    ClientPredictionClock::DriftAction expectedDriftAction(ClientPredictionClock::AdvanceResult result)
+    {
+        switch (result)
+        {
+        case ClientPredictionClock::AdvanceResult::Skip:       return ClientPredictionClock::DriftAction::Skip;
+        case ClientPredictionClock::AdvanceResult::Stall:      return ClientPredictionClock::DriftAction::Stall;
+        case ClientPredictionClock::AdvanceResult::HardResync: return ClientPredictionClock::DriftAction::HardResync;
+        case ClientPredictionClock::AdvanceResult::Normal:     break;
+        }
+        return ClientPredictionClock::DriftAction::None;
+    }
+
+    // One call against authority 0 (the dead band), with evaluateDrift taken first.
+    ClientPredictionClock::AdvanceResult advanceChecked(ClientPredictionClock& clock, NetworkTimeEstimator& est)
+    {
+        est.recordAuthorityTick(0);
+        const ClientPredictionClock::DriftAction predicted = clock.evaluateDrift();
+        const ClientPredictionClock::AdvanceResult result  = clock.advancePrediction();
+        CHECK(predicted == expectedDriftAction(result));
+        return result;
+    }
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.DelayTransition.ANegativeDebtIsPaidAsExactlyThatManySkips",
+          "[PCTM][ClientPredictionClock][DelayTransition]")
+{
+    TimeConfig cfg = makeStallTestConfig();
+    NetworkTimeEstimator est(cfg, nullptr);
+    ClientPredictionClock clock(cfg, est, nullptr);
+    driveTicks(clock, est, 10u);
+    const unsigned int before = clock.getPredictionTick();
+
+    clock.requestInputDelayTransition(-2);
+    CHECK(clock.getPendingInputDelayTransitionTicks() == -2);
+    CHECK(clock.getRequiredInputDelayIncreaseStallTicks() == 0u);   // max(0, debt): no Stall owed
+    CHECK(clock.publishedCorrectionPhase().transitionDebt);
+
+    CHECK(advanceChecked(clock, est) == ClientPredictionClock::AdvanceResult::Skip);
+    CHECK(clock.getRequiredInputDelayIncreaseStallTicks() == 0u);
+    CHECK(advanceChecked(clock, est) == ClientPredictionClock::AdvanceResult::Skip);
+    CHECK(clock.getPredictionTick() == before + 4u);                // two calls, two ticks each
+    CHECK(clock.getPendingInputDelayTransitionTicks() == 0);
+    CHECK_FALSE(clock.publishedCorrectionPhase().transitionDebt);
+    CHECK_FALSE(clock.isResimulating());
+    CHECK(clock.getDiagnostics().skipCount() == 2u);
+    CHECK(clock.getDiagnostics().lastSkipTick() == before + 4u);
+
+    for (int i = 0; i < 20; ++i)
+        CHECK(advanceChecked(clock, est) == ClientPredictionClock::AdvanceResult::Normal);
+    CHECK(clock.getPredictionTick() == before + 24u);
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.DelayTransition.OppositeRequestsNet",
+          "[PCTM][ClientPredictionClock][DelayTransition]")
+{
+    TimeConfig cfg = makeStallTestConfig();
+    NetworkTimeEstimator est(cfg, nullptr);
+    ClientPredictionClock clock(cfg, est, nullptr);
+    driveTicks(clock, est, 10u);
+    const unsigned int before = clock.getPredictionTick();
+
+    clock.requestInputDelayTransition(+2);
+    clock.requestInputDelayTransition(-1);
+    CHECK(clock.getPendingInputDelayTransitionTicks() == 1);
+    CHECK(clock.getRequiredInputDelayIncreaseStallTicks() == 1u);
+
+    int stalls = 0;
+    int skips  = 0;
+    for (int i = 0; i < 10; ++i)
+    {
+        const ClientPredictionClock::AdvanceResult result = advanceChecked(clock, est);
+        stalls += result == ClientPredictionClock::AdvanceResult::Stall ? 1 : 0;
+        skips  += result == ClientPredictionClock::AdvanceResult::Skip ? 1 : 0;
+    }
+    CHECK(stalls == 1);
+    CHECK(skips == 0);
+    CHECK(clock.getPredictionTick() == before + 9u);
+    CHECK(clock.getPendingInputDelayTransitionTicks() == 0);
+
+    // The T11 entry point keeps its contract: a non-positive delta adds nothing.
+    clock.requestInputDelayIncreaseStall(-3);
+    clock.requestInputDelayIncreaseStall(0);
+    CHECK(clock.getPendingInputDelayTransitionTicks() == 0);
+    clock.requestInputDelayIncreaseStall(2);
+    CHECK(clock.getPendingInputDelayTransitionTicks() == 2);
+}
+
+TEST_CASE("PCTM.ClientPredictionClock.DelayTransition.AHardResyncClearsEitherSign",
+          "[PCTM][ClientPredictionClock][DelayTransition]")
+{
+    for (const int32_t debt : {-3, +3})
+    {
+        CAPTURE(debt);
+        TimeConfig cfg               = makeStallTestConfig();
+        cfg.hardResyncThresholdTicks = 10;
+        NetworkTimeEstimator est(cfg, nullptr);
+        ClientPredictionClock clock(cfg, est, nullptr);
+        for (int i = 0; i < 5; ++i)
+        {
+            est.recordAuthorityTick(clock.getPredictionTick());
+            clock.advancePrediction();
+        }
+
+        clock.requestInputDelayTransition(debt);
+        CHECK(clock.getPendingInputDelayTransitionTicks() == debt);
+        CHECK(clock.publishedCorrectionPhase().transitionDebt);
+
+        est.recordAuthorityTick(1000u);
+        CHECK(clock.evaluateDrift() == ClientPredictionClock::DriftAction::HardResync);
+        CHECK(clock.advancePrediction() == ClientPredictionClock::AdvanceResult::HardResync);
+        CHECK(clock.getPendingInputDelayTransitionTicks() == 0);
+        CHECK(clock.getRequiredInputDelayIncreaseStallTicks() == 0u);
+        CHECK_FALSE(clock.publishedCorrectionPhase().transitionDebt);
+    }
 }
 
 // ===========================================================================
@@ -2062,7 +2192,7 @@ struct ClientPredictionClockPhaseProbe
     static uint32_t againstTruth(const ClientPredictionClock& clock, uint32_t seed)
     {
         const uint32_t flags = ClientPredictionClock::kPhaseRecentreArmedBit | ClientPredictionClock::kPhaseRecentringBit
-                             | ClientPredictionClock::kPhaseStallDebtBit | ClientPredictionClock::kPhaseAwaitsFirstRttBit;
+                             | ClientPredictionClock::kPhaseTransitionDebtBit | ClientPredictionClock::kPhaseAwaitsFirstRttBit;
         const uint32_t now   = word(clock);
         const uint32_t count = ((now >> ClientPredictionClock::kPhaseHardResyncShift) + 1u + seed)
                              & ClientPredictionClock::kPhaseHardResyncMask;
@@ -2089,7 +2219,7 @@ namespace phaseTest
         ClockCorrectionPhase phase;
         phase.recentreArmed  = clock.isRecentreArmed();
         phase.recentring     = clock.isRecentring();
-        phase.stallDebt      = clock.getRequiredInputDelayIncreaseStallTicks() > 0u;
+        phase.transitionDebt = clock.getPendingInputDelayTransitionTicks() != 0;
         phase.awaitsFirstRtt = ClientPredictionClockPhaseProbe::awaitsFirstRtt(clock);
         phase.hardResyncs    = hardResyncs;
         return phase;
@@ -2160,13 +2290,13 @@ TEST_CASE("PCTM.ClientPredictionClock.Phase.ThePublishedWordFollowsEveryAdvanceT
         {
             ++mismatches;
             UNSCOPED_INFO(where << " advance " << advances << ": published armed=" << published.recentreArmed
-                << " recentring=" << published.recentring << " debt=" << published.stallDebt << " awaits="
+                << " recentring=" << published.recentring << " debt=" << published.transitionDebt << " awaits="
                 << published.awaitsFirstRtt << " resyncs=" << published.hardResyncs << ", clock armed="
-                << expected.recentreArmed << " recentring=" << expected.recentring << " debt=" << expected.stallDebt
+                << expected.recentreArmed << " recentring=" << expected.recentring << " debt=" << expected.transitionDebt
                 << " awaits=" << expected.awaitsFirstRtt << " resyncs=" << expected.hardResyncs);
         }
         ++comparisons;
-        const bool flags[4] = {expected.recentreArmed, expected.recentring, expected.stallDebt, expected.awaitsFirstRtt};
+        const bool flags[4] = {expected.recentreArmed, expected.recentring, expected.transitionDebt, expected.awaitsFirstRtt};
         for (unsigned int i = 0u; i < 4u; ++i)
         {
             if (flags[i])
@@ -2271,7 +2401,7 @@ namespace phaseTest
                 const ClockCorrectionPhase read  = rig.clock.publishedCorrectionPhase();
                 const ClockCorrectionPhase truth = phaseTest::truth(rig.clock, 0u);
                 if (read.recentreArmed != truth.recentreArmed && read.recentring != truth.recentring
-                    && read.stallDebt != truth.stallDebt && read.awaitsFirstRtt != truth.awaitsFirstRtt)
+                    && read.transitionDebt != truth.transitionDebt && read.awaitsFirstRtt != truth.awaitsFirstRtt)
                     ++trace.poisonedWrites;
             }
         };
