@@ -348,8 +348,8 @@ TEST_CASE("CorrectionCache.AdvanceFrameMatchesManagerPath", "[CorrectionCache]")
 		// manager now reads `collectInputAll` from the resolution peer.
 		inputResolution.nextInputs = makeResolvedInputs(CounterInput{ accelForStep(i) });
 
-		// The production dispatch entry point (what FSimulationManagerAsyncCallback
-		// calls); with shouldRunPrediction=false it routes to the authority tick.
+		// The production dispatch entry point (what the step driver calls); with
+		// shouldRunPrediction=false it routes to the authority tick.
 		manager.onGameSimulation(SimulationUpdateInfo(
 			/*isResimulation=*/false, /*isFirstResimulationStep=*/false));
 

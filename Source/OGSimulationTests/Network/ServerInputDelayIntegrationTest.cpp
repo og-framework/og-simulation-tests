@@ -37,10 +37,11 @@
 // (a plausible "improvement") would fail here.
 //
 // WHAT THIS DELIBERATELY DOES NOT COVER. The GAME-THREAD/PHYSICS-THREAD split
-// itself, and the ChaosTickMapper step->tick conversion, are UE-side and cannot
-// be linked from this engine-free suite. The mapper's off-by-one is verified by
-// derivation and documented on
-// AOGBrawlerSimulationManager::releaseDelayedInputsForStep; it is provable only in
+// itself, and the former Chaos tick mapper's step->tick conversion (removed by
+// og-session-runtime task 4), are UE-side and cannot
+// be linked from this engine-free suite. The real release is
+// UESimulationSession::releaseDelayedInputsForStep, called once per authority
+// step for the tick it is about to simulate; its tick alignment is provable only in
 // the PIE smoke test. Do NOT read a green run here as evidence of tick
 // alignment in the real engine — this suite fixes the DELAY, not the EPOCH.
 // ---------------------------------------------------------------------------
@@ -79,7 +80,7 @@ namespace
 
     // The server, reduced to the two hops that matter and nothing else.
     //
-    // Mirrors AOGBrawlerSimulationManager::releaseDelayedInputsForStep +
+    // Mirrors UESimulationSession::releaseDelayedInputsForStep +
     // SimulationInputResolution::collectInputAll. Under the T26 due-or-overdue release the
     // delivered captureTick is the entry's STORED tick, surfaced by
     // tryDequeueForTick's out-param (F1) — NOT reconstructed as `simTick - delay`,

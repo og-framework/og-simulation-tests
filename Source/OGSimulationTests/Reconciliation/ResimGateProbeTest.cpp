@@ -301,7 +301,8 @@ TEST_CASE("Reconciliation.ResimGateProbe.RequestDepthTracksMinAndMaxAndFloorsThe
     REQUIRE(window.maxRequestDepth == 4u);
 
     // A NEGATIVE depth — we asked to rewind to a frame at or ahead of the last
-    // completed one — is the ±1 ChaosTickMapper skew finding §3 describes. It floors
+    // completed one — is the ±1 tick-mapper skew finding §3 describes (the former
+    // Chaos tick mapper's, removed by og-session-runtime task 4). It floors
     // at 0 rather than wrapping to ~4 billion, which would destroy the max as well
     // as the min.
     probe.noteRequest(4u, 200, 203);

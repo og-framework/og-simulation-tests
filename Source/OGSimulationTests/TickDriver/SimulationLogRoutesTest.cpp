@@ -140,7 +140,6 @@ TEST_CASE("SimulationLogRoutes.FirstMatch.TakesTheSpecificRowIgnoresCaseAndLeave
     CHECK(prefixOfFirstMatch("[RelayProbe.Write] x=1") == "<none>");
     CHECK(prefixOfFirstMatch("[ServerReceive] id=1") == "<none>");
     CHECK(prefixOfFirstMatch("[ReleaseBatch] first=1") == "<none>");
-    CHECK(prefixOfFirstMatch("[ResimCheck.TriggerRewind] rewind=0") == "<none>");
     CHECK(prefixOfFirstMatch("[Resim") == "<none>");
     CHECK(prefixOfFirstMatch("") == "<none>");
 

@@ -607,7 +607,8 @@ TEST_CASE("ResimGate.Policy.TheResimGateProbeAccessorObservesTheShippedFeed",
 //      `m_resimulationTick` in lockstep while the two are in sync. This is
 //      exact, deterministic arithmetic, not a race against drift correction.
 //   2. `prepareResimulation(physicsStep=0, simTick=1)` — the SAME public entry
-//      point Chaos's rewind hook calls in production — sets the resim cursor
+//      point the step driver's resim calls in production (Chaos's rewind hook did,
+//      until og-session-runtime tasks 3-6 removed it) — sets the resim cursor
 //      to 1, one tick behind the frontier (2), so `isResimulating()` becomes
 //      true.
 //   3. One resim replay tick (`onGameSimulation`, `isResimulation=true` →
@@ -615,8 +616,8 @@ TEST_CASE("ResimGate.Policy.TheResimGateProbeAccessorObservesTheShippedFeed",
 //      `advanceResimulation()`, bringing the resim cursor to 2 — EQUAL to the
 //      frontier. That is "our clock has caught up", the production comment's
 //      own words at the `[Resim.Finish]` site: `isResimulating()` now reads
-//      false while Chaos (via `updateInfo`) still reports a resim step.
-//   4. `onPostGameSimulation(isResimulation=true)` — `chaosIsResim (true) &&
+//      false while the host (via `updateInfo`) still reports a resim step.
+//   4. `onPostGameSimulation(isResimulation=true)` — `engineIsResim (true) &&
 //      !clockIsResim (true)` — takes the `[Resim.Finish]` branch and reaches
 //      line 390.
 //
@@ -637,12 +638,13 @@ TEST_CASE("ResimGate.Policy.OnPostGameSimulationFeedsSurvivingAnchorsToTheProbe"
 	rig.manager.onGameSimulation(SimulationUpdateInfo(/*isResimulation=*/false, /*isFirstResimulationStep=*/false));
 
 	// Step 2: prepare a resim from tick 1 — one behind the frontier (2) — the
-	// same door `FSimulationManagerAsyncCallback::TriggerRewindIfNeeded_Internal`
-	// calls in production.
+	// same door `SimulationStepDriver::resimulateIfRequested` calls in production
+	// (the former Chaos adapter's rewind hook, removed by og-session-runtime
+	// tasks 3-6, called it too).
 	rig.manager.prepareResimulation(/*physicsStep=*/0, /*simTick=*/1u);
 
 	// Step 3: one resim replay tick brings the resim cursor to 2, equal to the
-	// frontier — the clock has caught up mid-Chaos-resim.
+	// frontier — the clock has caught up mid-resim.
 	rig.manager.onGameSimulation(SimulationUpdateInfo(/*isResimulation=*/true, /*isFirstResimulationStep=*/true));
 
 	// Precondition this whole sequence exists to set up — named explicitly so
