@@ -386,7 +386,7 @@ namespace simulationTickDriverDisplayFillTest
 
     const char* nameOf(FrameWait frameWait)
     {
-        return frameWait == FrameWait::EarlierFrames ? "frame-locked (EarlierFrames)" : "immediate (ThisFramesSingleStep)";
+        return frameWait == FrameWait::EarlierFrames ? "EarlierFrames" : "ThisFramesSingleStep";
     }
 } // namespace simulationTickDriverDisplayFillTest
 

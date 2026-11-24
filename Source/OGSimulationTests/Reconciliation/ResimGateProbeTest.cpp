@@ -182,8 +182,9 @@ TEST_CASE("Reconciliation.ResimGateProbe.RefusalIsRequestsMinusGrantsAndNeverUnd
     ResimGateProbe probe(kBigWindow);
     ResimGateWindowSummary window;
 
-    // Five requests, three of which Chaos executed. The two it did not are the
-    // refusals — silent in any normal build, because every refusal diagnostic in
+    // Five requests, three of which were granted. The two that were not are the
+    // refusals — in the former Chaos configuration (removed by og-session-runtime
+    // tasks 3-6) silent in any normal build, because every refusal diagnostic in
     // FRewindData / FPBDRigidsSolver is compiled out behind DEBUG_REWIND_DATA.
     for (std::uint32_t i = 0u; i < 5u; ++i)
         probe.noteRequest(/*anchorTick=*/100u + i, /*lastCompletedStep=*/200, /*requestedChaosFrame=*/199);
@@ -198,9 +199,10 @@ TEST_CASE("Reconciliation.ResimGateProbe.RefusalIsRequestsMinusGrantsAndNeverUnd
     REQUIRE(window.refusedRatePerMille == 400u);
 
     // MORE GRANTS THAN REQUESTS IS LEGAL, and it must not wrap into 4 billion.
-    // Finding §3: FNetworkPhysicsCallback merges our frame with engine-side
-    // requesters (RewindData->GetResimFrame(), CompareTargetsToLastFrame), so Chaos
-    // can rewind on its own initiative with nothing of ours on record.
+    // Finding §3: in the former Chaos configuration FNetworkPhysicsCallback merged our
+    // frame with engine-side requesters (RewindData->GetResimFrame(),
+    // CompareTargetsToLastFrame), so Chaos could rewind on its own initiative with
+    // nothing of ours on record.
     probe.noteGrant(199);
     probe.noteGrant(199);
     probe.noteGrant(199);
@@ -240,19 +242,18 @@ TEST_CASE("Reconciliation.ResimGateProbe.ClampedGrantsCountAnyRequestedVsGranted
     ResimGateProbe probe(kBigWindow);
     ResimGateWindowSummary window;
 
-    // Asked for frame 190, Chaos started at 190 — no mismatch.
+    // Asked for frame 190, granted 190 — no mismatch.
     probe.noteRequest(100u, 200, 190);
     probe.noteGrant(190);
-    // Asked for 191, Chaos started at 194 — PURE ARITHMETIC driving the
+    // Asked for 191, granted 194 — PURE ARITHMETIC driving the
     // direction-agnostic detector 0→1 on a requested-vs-granted mismatch.
-    // ⚠ NOT the engine's live behaviour: a grant LATER than requested (a shallow
-    // clamp) is structurally impossible on this wiring — FindValidResimFrame walks
-    // DOWNWARD (return ≤ requested), the engine's FMath::Min merge can only
-    // DEEPEN, and the replay-loop push-data skip is dead code, so the observed
-    // PhysicsStep always equals the solver's ResimStep ≤ the requested frame
-    // (item 42 review §2). What the counter would catch live is an engine-side
-    // requester DEEPENING the grant; its live reading is a constant 0 by
-    // construction, and any nonzero is an engine-behaviour-change alarm.
+    // ⚠ NOT a live behaviour: a grant LATER than requested (a shallow clamp) was
+    // structurally impossible on the former Chaos wiring (removed by
+    // og-session-runtime tasks 3-6) — FindValidResimFrame walked DOWNWARD (return
+    // ≤ requested) and the engine's FMath::Min merge could only DEEPEN (item 42
+    // review §2). On the tick driver the step driver grants exactly the requested
+    // anchor, so the counter's live reading is a constant 0 by construction, and
+    // any nonzero is a behaviour-change alarm.
     probe.noteRequest(101u, 201, 191);
     probe.noteGrant(194);
 

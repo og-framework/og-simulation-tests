@@ -1993,7 +1993,7 @@ TEST_CASE("FrameHealthProbe: a hook that SKIPS frames still reports the right ra
 TEST_CASE("FrameHealthProbe: SUB-STEPPING and FRAME SHORTFALL give the same ratio and are still told apart",
           "[Network][FrameHealthProbe]")
 {
-    // TWO DIFFERENT DEFECTS, ONE IDENTICAL RATIO. Chaos running two fixed sub-steps
+    // TWO DIFFERENT DEFECTS, ONE IDENTICAL RATIO. A host running two fixed sub-steps
     // inside a healthy 60 fps frame, and a 30 fps frame running one step that covers
     // two ticks, both read as "two sim ticks per frame". They need different fixes,
     // so a probe that reported only the ratio would send the reader the wrong way

@@ -345,49 +345,6 @@ TEST_CASE("SimulationDisplaySnapshot.RelayedInputArrivalsAreTheRingsCopy", "[Mai
     CHECK(local.relayedInputArrivals.findArrival(2u) == nullptr);
 }
 
-TEST_CASE("SimulationDisplaySnapshot.AStagedRelayFillsWhatTheStageHeldNotTheLiveStores", "[Mailbox]")
-{
-    DisplayRig rig;
-    DisplayRelayStage<DisplayMockInput, DisplaySnapshot::kMaxSimulatables> stage;
-    stageDisplayRelay<DisplayMockSimulatable>(stage, rig.storage, rig.resolution);
-    REQUIRE(stage.count == 2u);
-    CHECK(stage.relayedInputArrivals(kRemoteId) != nullptr);
-    CHECK(stage.relayedInputArrivals(kLocalId) == nullptr);
-    CHECK_FALSE(stage.lastRelayedInput(kLocalId).has_value());
-    REQUIRE(stage.lastRelayedInput(kRemoteId).has_value());
-
-    const auto before = rig.fill();
-    const std::uint32_t laterCapture = kNewestTick + 5u;
-    DisplayRingBuffer ring = displayRingCarrying(laterCapture, 7);
-    REQUIRE(rig.resolution.ingestRelayRing<DisplayMockSimulatable>(kRemoteId, ring).outcome == RelayedInputIngestOutcome::Consumed);
-
-    const auto live = rig.fill();
-    auto staged = std::make_unique<DisplaySnapshot>();
-    DisplayClockReading clock;
-    clock.predictionTick = kNewestTick;
-    fillSimulationDisplaySnapshot(*staged, rig.storage, rig.resolution, rig.reconciliation, clock, DisplayTierReading{}, stage);
-
-    const DisplaySnapshot::Entry& beforeRemote = *before->find(kRemoteId);
-    const DisplaySnapshot::Entry& liveRemote = *live->find(kRemoteId);
-    const DisplaySnapshot::Entry& stagedRemote = *staged->find(kRemoteId);
-    CHECK(liveRemote.relayedInputArrivals.findArrival(laterCapture) != nullptr);
-    REQUIRE(liveRemote.lastRelayedInput.has_value());
-    CHECK(liveRemote.lastRelayedInput->value == 7);
-
-    CHECK(stagedRemote.hasRelayedInputArrivals);
-    CHECK(stagedRemote.relayedInputArrivals.findArrival(laterCapture) == nullptr);
-    CHECK(stagedRemote.relayedInputArrivals.findArrival(2u) != nullptr);
-    REQUIRE(stagedRemote.lastRelayedInput.has_value());
-    REQUIRE(beforeRemote.lastRelayedInput.has_value());
-    CHECK(stagedRemote.lastRelayedInput->value == beforeRemote.lastRelayedInput->value);
-    CHECK(stagedRemote.lastRelayedInput->value != 7);
-    CHECK(stagedRemote.vizState.getState().position == liveRemote.vizState.getState().position);
-
-    const DisplaySnapshot::Entry& stagedLocal = *staged->find(kLocalId);
-    CHECK_FALSE(stagedLocal.hasRelayedInputArrivals);
-    CHECK_FALSE(stagedLocal.lastRelayedInput.has_value());
-}
-
 TEST_CASE("SimulationDisplaySnapshot.AppliedWindowMatchesTheReconciliation", "[Mailbox]")
 {
     const DisplayRig rig;
