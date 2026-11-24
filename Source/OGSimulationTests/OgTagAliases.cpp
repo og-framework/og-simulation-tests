@@ -64,7 +64,10 @@
 // IntegrateScopeTest.cpp, the simulationLog::IntegrateScope log context that
 // integrateAll opens around each integrate. Its nested-scope vacuity arm is
 // hidden ([.][IntegrationExecutorNestedScope]) because it is expected to abort.
+// Note on [Session]: og-sim-session's tests (og-session-runtime task 22), built into this
+// target from the plugin's og-sim-session/tests folder. Its death case is hidden
+// ([.][SessionThreadsDeath]) because it is expected to fire an OG_CHECK.
 CATCH_REGISTER_TAG_ALIAS("[@og]",
-    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Network],[Reconciliation],[Determinism][Production],[SimulatableList],[StorageView],[SystemsExecutor],[CorrectionCache],[InputResolution],[LinearBodyState],[SimulationComposite],[Registration],[IntegrationExecutor],[Scheduler],[StepDriver],[Mailbox],[PhysicsWorld],[StaticGeometry],[ThreadRunner],[LatencyProbe],[Jolt],[NetTransport],[HotPathSession],[Dilation],[Outbound],[Lifecycle],[RenderSnapshot],[RenderInterpolation],[TickDriver],[TickDriverWindow],[TickDriverHooks],[TickDriverPresenter],[TickSlotTable],[JoltTickWorldHost],[SimulationFrame]")
+    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Network],[Reconciliation],[Determinism][Production],[SimulatableList],[StorageView],[SystemsExecutor],[CorrectionCache],[InputResolution],[LinearBodyState],[SimulationComposite],[Registration],[IntegrationExecutor],[Scheduler],[StepDriver],[Mailbox],[PhysicsWorld],[StaticGeometry],[ThreadRunner],[LatencyProbe],[Jolt],[NetTransport],[HotPathSession],[Dilation],[Outbound],[Lifecycle],[RenderSnapshot],[RenderInterpolation],[TickDriver],[TickDriverWindow],[TickDriverHooks],[TickDriverPresenter],[TickSlotTable],[JoltTickWorldHost],[SimulationFrame],[Session]")
 
 #endif // WITH_LOW_LEVEL_TESTS
