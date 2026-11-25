@@ -23,12 +23,12 @@
 #include "OGSimulation/PCTimeManagement/ServerTickClock.h"
 #include "OGSimulation/ResimGateProbe.h"
 #include "OGSimulation/SimulationManager.h"
-#include "OGSimulation/SimulationTickDriver.h"
+#include "OGTickDriver/SimulationTickDriver.h"
 #include "OGSimulation/SimulationTimeContext.h"
 #include "OGSimulation/StepHooks.h"
-#include "OGSimulation/ThreadChainExecutor.h"
-#include "OGSimulation/TickDriverConcepts.h"
-#include "OGSimulation/TickDriverThreadContext.h"
+#include "OGTickDriver/ThreadChainExecutor.h"
+#include "OGTickDriver/TickDriverConcepts.h"
+#include "OGTickDriver/TickDriverThreadContext.h"
 #include "TickDriverFakes.h"
 
 namespace threadChainExecutorTest

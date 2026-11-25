@@ -16,10 +16,10 @@
 #include "OGSimulation/ResimGateProbe.h"
 #include "OGSimulation/SimulationManager.h"
 #include "OGSimulation/SimulationScheduler.h"
-#include "OGSimulation/SimulationTickDriver.h"
+#include "OGTickDriver/SimulationTickDriver.h"
 #include "OGSimulation/SimulationTimeContext.h"
-#include "OGSimulation/TickDriverConcepts.h"
-#include "OGSimulation/TickDriverThreadContext.h"
+#include "OGTickDriver/TickDriverConcepts.h"
+#include "OGTickDriver/TickDriverThreadContext.h"
 #include "TickDriverFakes.h"
 
 namespace simulationTickDriverTimeBaseTest

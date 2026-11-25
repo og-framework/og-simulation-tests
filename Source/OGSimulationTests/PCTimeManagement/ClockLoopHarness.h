@@ -23,7 +23,7 @@
 #include "OGSimulation/RenderInterpolation.h"
 #include "OGSimulation/RenderSnapshot.h"
 #include "OGSimulation/SimulationScheduler.h"
-#include "OGSimulation/TickDriverConcepts.h"
+#include "OGTickDriver/TickDriverConcepts.h"
 
 namespace clockLoopHarness
 {

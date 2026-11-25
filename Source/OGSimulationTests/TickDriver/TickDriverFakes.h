@@ -23,12 +23,12 @@
 #include "glm/gtc/quaternion.hpp"
 #include "glm/vec3.hpp"
 #include "OGSimulation/QueryGeometry.h"
-#include "OGSimulation/SimulationTickBackend.h"
+#include "OGTickDriver/SimulationTickBackend.h"
 #include "OGSimulation/StaticGeometry.h"
 #include "OGSimulation/StepHooks.h"
-#include "OGSimulation/TickDriverConcepts.h"
-#include "OGSimulation/TickDriverLog.h"
-#include "OGSimulation/TickDriverThreadContext.h"
+#include "OGTickDriver/TickDriverConcepts.h"
+#include "OGTickDriver/TickDriverLog.h"
+#include "OGTickDriver/TickDriverThreadContext.h"
 #include "../StepDriver/StepDriverTestSupport.h"
 
 namespace tickDriverFakes

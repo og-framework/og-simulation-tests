@@ -18,8 +18,8 @@
 #include "catch_amalgamated.hpp"
 #include "OGSimulation/BodySlotAssignment.h"
 #include "OGSimulation/BodySlotOccupancy.h"
-#include "OGSimulation/TickDriverLog.h"
-#include "OGSimulation/TickSlotTable.h"
+#include "OGTickDriver/TickDriverLog.h"
+#include "OGTickDriver/TickSlotTable.h"
 #include "TickDriverFakes.h"
 
 namespace

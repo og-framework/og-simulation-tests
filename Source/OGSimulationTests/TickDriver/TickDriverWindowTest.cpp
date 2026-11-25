@@ -12,7 +12,7 @@
 #include "catch_amalgamated.hpp"
 #include "OGSimulation/LatencyBudgetProbe.h"
 #include "OGSimulation/SimulationScheduler.h"
-#include "OGSimulation/TickDriverWindow.h"
+#include "OGTickDriver/TickDriverWindow.h"
 
 namespace tickDriverWindowTest
 {

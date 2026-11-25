@@ -17,7 +17,7 @@
 #include "OGSimulation/PCTimeManagement/ServerTickClock.h"
 #include "OGSimulation/ResimGateProbe.h"
 #include "OGSimulation/SimulationManager.h"
-#include "OGSimulation/SimulationStepDriver.h"
+#include "OGTickDriver/SimulationStepDriver.h"
 #include "OGSimulation/StepHooks.h"
 #include "StepDriverTestSupport.h"
 

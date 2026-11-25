@@ -16,12 +16,12 @@
 #include "OGSimulation/Mailbox.h"
 #include "OGSimulation/OGAssert.h"
 #include "OGSimulation/SimulationScheduler.h"
-#include "OGSimulation/SimulationStepDriver.h"
+#include "OGTickDriver/SimulationStepDriver.h"
 #include "OGSimulation/StepHooks.h"
-#include "OGSimulation/TickDriverConcepts.h"
-#include "OGSimulation/TickDriverLog.h"
-#include "OGSimulation/TickDriverStepHooks.h"
-#include "OGSimulation/TickDriverThreadContext.h"
+#include "OGTickDriver/TickDriverConcepts.h"
+#include "OGTickDriver/TickDriverLog.h"
+#include "OGTickDriver/TickDriverStepHooks.h"
+#include "OGTickDriver/TickDriverThreadContext.h"
 
 namespace legacyFrameHost
 {

@@ -12,9 +12,9 @@
 #include "catch_amalgamated.hpp"
 #include "OGSimulation/SimulationScheduler.h"
 #include "OGSimulation/StaticGeometry.h"
-#include "OGSimulation/TickDriverConcepts.h"
-#include "OGSimulation/TickDriverLog.h"
-#include "OGSimulation/TickDriverThreadContext.h"
+#include "OGTickDriver/TickDriverConcepts.h"
+#include "OGTickDriver/TickDriverLog.h"
+#include "OGTickDriver/TickDriverThreadContext.h"
 #include "TickDriverFakes.h"
 
 namespace tickDriverFakesTest

@@ -12,7 +12,7 @@
 #include "OGSimulation/ResimGateProbe.h"
 #include "OGSimulation/SimulationManager.h"
 #include "OGSimulation/SimulationReconciliation.h"
-#include "OGSimulation/SimulationStepDriver.h"
+#include "OGTickDriver/SimulationStepDriver.h"
 #include "StepDriverTestSupport.h"
 
 // ---------------------------------------------------------------------------

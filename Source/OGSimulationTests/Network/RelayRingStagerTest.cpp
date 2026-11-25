@@ -8,7 +8,7 @@
 #include "OGSimulation/RelayedInputRingCodec.h"
 #include "OGSimulation/SimulationFieldDescriptors.h"
 #include "OGSimulation/SimulationLogRoutes.h"
-#include "OGSimulation/TickDriverLog.h"
+#include "OGTickDriver/TickDriverLog.h"
 
 #include <cstddef>
 #include <cstdint>

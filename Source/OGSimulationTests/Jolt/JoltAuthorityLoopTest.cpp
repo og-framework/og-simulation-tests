@@ -20,10 +20,10 @@
 #include "OGSimulation/SimulationComposite.h"
 #include "OGSimulation/SimulationManager.h"
 #include "OGSimulation/SimulationObjectStorage.h"
-#include "OGSimulation/SimulationTickBackend.h"
+#include "OGTickDriver/SimulationTickBackend.h"
 #include "OGSimulation/StepHooks.h"
-#include "OGSimulation/TickDriverPresenter.h"
-#include "OGSimulation/TickDriverThreadContext.h"
+#include "OGTickDriver/TickDriverPresenter.h"
+#include "OGTickDriver/TickDriverThreadContext.h"
 
 #include <algorithm>
 #include <array>

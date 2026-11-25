@@ -20,9 +20,9 @@
 #include "OGSimulation/ResimGateProbe.h"
 #include "OGSimulation/SimulationComposite.h"
 #include "OGSimulation/SimulationManager.h"
-#include "OGSimulation/SimulationStepDriver.h"
+#include "OGTickDriver/SimulationStepDriver.h"
 #include "OGSimulation/StepHooks.h"
-#include "OGSimulation/TickDriverThreadContext.h"
+#include "OGTickDriver/TickDriverThreadContext.h"
 
 #include <atomic>
 #include <chrono>
