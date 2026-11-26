@@ -45,8 +45,6 @@ namespace simulationLogRoutesTest
         { "[InputDomain]",                  SimulationLogRoute::Net,             HostLogLevel::Log },
         { "[RelaySkip]",                    SimulationLogRoute::Net,             HostLogLevel::Log },
         { "[RelayFlush]",                   SimulationLogRoute::Net,             HostLogLevel::Log },
-        { "[SimNet.",                       SimulationLogRoute::Net,             HostLogLevel::Log },
-        { "[Roster.",                       SimulationLogRoute::Net,             HostLogLevel::Log },
         { "[DivergenceProbe",               SimulationLogRoute::DivergenceProbe, HostLogLevel::Log },
     };
 
@@ -72,7 +70,7 @@ TEST_CASE("SimulationLogRoutes.Rows.PrefixRouteAndPlainLevelArePinnedInOrder", "
     using namespace simulationLogRoutesTest;
 
     REQUIRE(std::size(kSimulationLogRoutes) == std::size(kPinnedRows));
-    REQUIRE(std::size(kSimulationLogRoutes) == 30u);
+    REQUIRE(std::size(kSimulationLogRoutes) == 28u);
     for (std::size_t row = 0; row < std::size(kPinnedRows); ++row)
     {
         INFO("row " << row << " pinned " << kPinnedRows[row].prefix);
@@ -131,10 +129,10 @@ TEST_CASE("SimulationLogRoutes.FirstMatch.TakesTheSpecificRowIgnoresCaseAndLeave
     CHECK(prefixOfFirstMatch("[TimeResync.Wipe] from=1") == "[TimeResync.");
     CHECK(prefixOfFirstMatch("[InputArrival.Window] conn=1 samples=2") == "[InputArrival.Window]");
     CHECK(prefixOfFirstMatch("[InputArrival.BackDate] conn=1 m0P50=-6") == "[InputArrival.BackDate]");
-    CHECK(prefixOfFirstMatch("[SimNet.Window] role=server drains=1") == "[SimNet.");
-    CHECK(prefixOfFirstMatch("[SimNet.Host] role=client immediate=0") == "[SimNet.");
-    CHECK(prefixOfFirstMatch("[Roster.Refused] role=server simId=1 slot=2 reason=SimIdLive") == "[Roster.");
-    CHECK(prefixOfFirstMatch("[Roster.InputRefused] conn=1 simId=2 reason=NotOwner") == "[Roster.");
+    CHECK(prefixOfFirstMatch("[SimNet.Window] role=server drains=1") == "<none>");
+    CHECK(prefixOfFirstMatch("[SimNet.Host] role=client immediate=0") == "<none>");
+    CHECK(prefixOfFirstMatch("[Roster.Refused] role=server simId=1 slot=2 reason=SimIdLive") == "<none>");
+    CHECK(prefixOfFirstMatch("[Roster.InputRefused] conn=1 simId=2 reason=NotOwner") == "<none>");
 
     CHECK(prefixOfFirstMatch("[ResimProbe.Gate] x=1") == "<none>");
     CHECK(prefixOfFirstMatch("[RelayProbe.Write] x=1") == "<none>");
