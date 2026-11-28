@@ -46,9 +46,10 @@
 //      version byte on a well-formed ring and require that NOTHING enters.
 //
 // These run against the REAL production types — the store, the real codec, and the
-// real populate — over a std::vector-backed buffer standing in for the USTRUCT's
-// TArray-backed one, per the codec's BUFFER CONCEPT. Only UE replication itself
-// (NetSerialize / OnRep) is out of reach from this target.
+// real populate — over a std::vector-backed buffer standing in for the production
+// one (og-simulation's `RelayRingBuffer`, Network/SimPayloadBuffers.h; a UE USTRUCT's
+// TArray until og-input-latency P5-9), per the codec's BUFFER CONCEPT. Only the
+// transport (og-sim-net's channel) is out of reach from this target.
 //////////////////////////////////////////////////////////////////////////////
 
 namespace
@@ -97,7 +98,7 @@ namespace
     }
 
     // UE-free byte buffer satisfying the codec's BUFFER CONCEPT — the same four
-    // methods FRelayedInputRing exposes over its TArray<uint8>.
+    // methods og-sim's RelayRingBuffer exposes over its fixed array.
     struct StoreTestRing
     {
         std::vector<std::uint8_t> bytes;

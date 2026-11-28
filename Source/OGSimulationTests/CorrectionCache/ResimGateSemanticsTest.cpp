@@ -123,7 +123,7 @@ namespace
 		cache.pushPredictionState(GateState{ value });
 	}
 
-	// A landed, DISAGREEING correction for `tick` — the OnRep path
+	// A landed, DISAGREEING correction for `tick` — the correction-arrival path
 	// (`SimulationReconciliation::injectCorrectionState`).
 	void landCorrection(GateCache& cache, std::uint32_t tick)
 	{
@@ -1126,7 +1126,8 @@ TEST_CASE("CorrectionCache.ResimGate.AMidReplayLandingBelowTheCapturedAnchorIsFr
 // and the stale arm CANNOT be produced with one cache (see the third section).
 //
 // `checkDivergenceAll` folds the per-character anchors with `std::min`, because a
-// Chaos rewind is global: one restore tick has to serve everybody. So character B,
+// rewind is global (the step driver restores the whole world at one tick): one
+// restore tick has to serve everybody. So character B,
 // whose anchor is NEWER than the min, is restored at A's tick and replayed
 // forward THROUGH its own corrected slots — the population that used to be
 // clobbered without ever being applied, while B's anchor was consumed by the

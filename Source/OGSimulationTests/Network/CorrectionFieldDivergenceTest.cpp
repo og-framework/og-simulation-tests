@@ -444,15 +444,14 @@ TEST_CASE("Correction field divergence: the FIRST differing field wins, in decla
 // case plants a difference far larger than `kDefaultSimilarityEpsilon`, where
 // every plausible predicate agrees; only a SUB-EPSILON plant can tell them apart.
 //
-// ⛔ IT ASSERTS A RELATION, NEVER A DIRECTION, AND THAT IS DELIBERATE. Under
-// /permissive- the glm overloads of `isSimilarToField` are not found from
-// `fieldwiseIsSimilarTo` (they are in the global namespace, not in `glm`), so a
-// vector field compares EXACTLY while a bare float compares with the 1e-4
-// epsilon. That asymmetry is a known, recorded property of this tree that is
-// deliberately NOT being fixed here and deliberately NOT pinned: a test asserting
-// "a 1e-5 vector difference IS a divergence" would turn the eventual fix into a
-// false regression. What must hold either way is that ONE verdict comes out of
-// this codebase — `named() == !isSimilarTo()` — and that survives the fix.
+// ⛔ IT ASSERTS A RELATION, NEVER A DIRECTION, AND THAT IS DELIBERATE. When this
+// case was written, the glm overloads of `isSimilarToField` were not found from
+// `fieldwiseIsSimilarTo` under /permissive- (they were in the global namespace,
+// not in `glm`), so a vector field compared EXACTLY while a bare float compared
+// with the 1e-4 epsilon. og-input-latency task 2e moved them into `namespace glm`
+// and pinned the direction in `Network/GlmFieldSimilarityTest.cpp`. What must hold
+// either way is that ONE verdict comes out of this codebase —
+// `named() == !isSimilarTo()` — and it held across the fix.
 //
 // ⛔ SO A RE-DERIVED LEAF PREDICATE IN THE WALK BREAKS THIS CASE IN BOTH
 // DIRECTIONS: an exact `==` names the sub-epsilon float the fold forgave, and a

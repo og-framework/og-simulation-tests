@@ -19,12 +19,12 @@
 #include "OGSimulation/PCTimeManagement/ServerTickClock.h"
 #include "OGSimulation/ResimGateProbe.h"
 #include "OGSimulation/SimulationManager.h"
-#include "OGSimulation/SimulationStepDriver.h"
+#include "OGTickDriver/SimulationStepDriver.h"
 #include "OGSimulation/SimulationTimeContext.h"
 #include "OGSimulation/StepHooks.h"
-#include "OGSimulation/TickDriverConcepts.h"
-#include "OGSimulation/TickDriverStepHooks.h"
-#include "OGSimulation/TickDriverThreadContext.h"
+#include "OGTickDriver/TickDriverConcepts.h"
+#include "OGTickDriver/TickDriverStepHooks.h"
+#include "OGTickDriver/TickDriverThreadContext.h"
 #include "TickDriverFakes.h"
 
 namespace

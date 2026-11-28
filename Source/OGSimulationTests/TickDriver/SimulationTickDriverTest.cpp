@@ -2,6 +2,9 @@
 #if WITH_LOW_LEVEL_TESTS
 
 #include <algorithm>
+#include <atomic>
+#include <bit>
+#include <chrono>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -9,6 +12,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -17,11 +21,11 @@
 #include "OGSimulation/PCTimeManagement/ServerTickClock.h"
 #include "OGSimulation/ResimGateProbe.h"
 #include "OGSimulation/SimulationManager.h"
-#include "OGSimulation/SimulationTickDriver.h"
+#include "OGTickDriver/SimulationTickDriver.h"
 #include "OGSimulation/SimulationTimeContext.h"
 #include "OGSimulation/StepHooks.h"
-#include "OGSimulation/TickDriverConcepts.h"
-#include "OGSimulation/TickDriverThreadContext.h"
+#include "OGTickDriver/TickDriverConcepts.h"
+#include "OGTickDriver/TickDriverThreadContext.h"
 #include "LegacyFrameHostModel.h"
 #include "TickDriverFakes.h"
 
@@ -594,14 +598,10 @@ namespace
     }
 
     template <typename RunT>
-    void rateScaleSession(RunT& run, uint32_t frames, std::optional<uint32_t> rateFrame)
+    void doorSession(RunT& run, uint32_t frames, std::function<void(uint32_t, TickRateDoor&)> onDoor)
     {
         uint32_t frame = 0u;
-        run.side.game.onBeforePump = [&frame, rateFrame](double, TickRateDoor& rate)
-        {
-            if (rateFrame.has_value() && frame == *rateFrame)
-                rate.setRateScale(1.1);
-        };
+        run.side.game.onBeforePump = [&frame, &onDoor](double, TickRateDoor& rate) { onDoor(frame, rate); };
         FakeCompletion completion;
         for (; frame < frames; ++frame)
         {
@@ -614,6 +614,55 @@ namespace
         run.events.push_back("stop");
         run.pipeline.stop();
         run.side.game.onBeforePump = nullptr;
+    }
+
+    template <typename RunT>
+    void rateScaleSession(RunT& run, uint32_t frames, std::optional<uint32_t> rateFrame, double scale = 1.1)
+    {
+        doorSession(run, frames, [rateFrame, scale](uint32_t frame, TickRateDoor& rate)
+        {
+            if (rateFrame.has_value() && frame == *rateFrame)
+                rate.setRateScale(scale);
+        });
+    }
+
+    struct DoorReading
+    {
+        double nextDeadline = 0.0;
+        double currentInterval = 0.0;
+        int64_t tickOffset = 0;
+        uint64_t refusedRateChanges = 0u;
+    };
+
+    template <typename RunT>
+    std::vector<DoorReading> readingDoorSession(RunT& run, uint32_t frames, uint32_t rateFrame, double scale,
+        std::optional<uint64_t>& refusedAfterTheCall)
+    {
+        std::vector<DoorReading> readings;
+        doorSession(run, frames, [&readings, &refusedAfterTheCall, rateFrame, scale](uint32_t frame, TickRateDoor& rate)
+        {
+            readings.push_back(DoorReading{ rate.nextDeadline(), rate.currentInterval(), rate.tickOffset(),
+                rate.refusedRateChanges() });
+            if (frame != rateFrame)
+                return;
+            rate.setRateScale(scale);
+            refusedAfterTheCall = rate.refusedRateChanges();
+        });
+        return readings;
+    }
+
+    std::vector<DoorReading> referenceDoorReadings(const std::vector<double>& hostSeconds, uint32_t rateFrame, double scale)
+    {
+        SimulationScheduler scheduler(SchedulerConfig{ static_cast<double>(kDt), MaxCatchUpSteps{ 60u }, 0.75, 1.25 }, 0.0);
+        std::vector<DoorReading> readings;
+        for (size_t frame = 0u; frame < hostSeconds.size(); ++frame)
+        {
+            readings.push_back(DoorReading{ scheduler.nextDeadline(), scheduler.currentStepInterval(), 0, 0u });
+            if (frame == rateFrame)
+                scheduler.setRateScale(scale);
+            scheduler.pump(hostSeconds[frame]);
+        }
+        return readings;
     }
 } // namespace
 
@@ -885,7 +934,7 @@ TEST_CASE("SimulationTickDriver.BeforePump.RunsOncePerFrameBeforeThePumpWithTheH
 
 TEST_CASE("SimulationTickDriver.BeforePump.ARateScaleThroughTheDoorChangesTheStepCountsAsTheTranscriptionDoes", "[TickDriver]")
 {
-    const Setup setup{ true, true, 60 };
+    const Setup setup{ false, true, 60 };
     Run<DriverPipeline> baseline(setup);
     Run<DriverPipeline> driver(setup);
     Run<LegacyPipeline> legacy(setup);
@@ -911,6 +960,104 @@ TEST_CASE("SimulationTickDriver.BeforePump.ARateScaleThroughTheDoorChangesTheSte
     REQUIRE(firstChange.first != rated.end());
     CHECK(firstChange.first - rated.begin() >= 40);
     CHECK(driver.pipeline.physicsStepCount() > baseline.pipeline.physicsStepCount());
+    CHECK(driver.pipeline.driver().getDiagnostics().refusedRateChanges() == 0u);
+}
+
+TEST_CASE("SimulationTickDriver.BeforePump.TheDoorReadsTheSchedulerAndTheOffsetTheStepsPublished", "[TickDriver]")
+{
+    constexpr uint32_t kRateFrame = 40u;
+    const Setup setup{ false, true, 60 };
+    Run<DriverPipeline> driver(setup);
+    driver.side.manager.editClientClock().advancePrediction();
+    std::optional<uint64_t> refusedAfterTheCall;
+    const std::vector<DoorReading> readings = readingDoorSession(driver, 120u, kRateFrame, 1.01, refusedAfterTheCall);
+
+    const std::vector<double>& hostSeconds = driver.side.game.beforePumpHostSeconds;
+    REQUIRE(readings.size() == 120u);
+    REQUIRE(hostSeconds.size() == 120u);
+    const std::vector<DoorReading> reference = referenceDoorReadings(hostSeconds, kRateFrame, 1.01);
+    for (size_t frame = 0u; frame < readings.size(); ++frame)
+    {
+        INFO("frame " << frame);
+        CHECK(readings[frame].nextDeadline == reference[frame].nextDeadline);
+        CHECK(readings[frame].currentInterval == reference[frame].currentInterval);
+        CHECK(readings[frame].refusedRateChanges == 0u);
+    }
+    CHECK(readings[kRateFrame].currentInterval == static_cast<double>(kDt));
+    CHECK(readings[kRateFrame + 1u].currentInterval == static_cast<double>(kDt) / 1.01);
+
+    const std::vector<int32_t> steps = stepsPerFrame(driver.events);
+    REQUIRE(steps.size() == 120u);
+    const size_t firstFrameWithSteps = static_cast<size_t>(
+        std::find_if(steps.begin(), steps.end(), [](int32_t n) { return n > 0; }) - steps.begin());
+    REQUIRE(firstFrameWithSteps < 100u);
+    for (size_t frame = 0u; frame < readings.size(); ++frame)
+    {
+        INFO("frame " << frame);
+        CHECK(readings[frame].tickOffset == (frame <= firstFrameWithSteps ? 0 : 2));
+    }
+    const TickOutcome& last = driver.side.presenter.published.back();
+    CHECK(static_cast<int64_t>(last.tick) - static_cast<int64_t>(last.physicsStep) == 2);
+    CHECK(driver.pipeline.driver().tickOffset() == 2);
+
+    CHECK(refusedAfterTheCall == std::optional<uint64_t>{ 0u });
+    CHECK(driver.pipeline.rateScale() == 1.01);
+    CHECK(driver.pipeline.driver().getDiagnostics().refusedRateChanges() == 0u);
+}
+
+TEST_CASE("SimulationTickDriver.BeforePump.AnAuthoritysRateChangeIsRefusedCountedAndChangesNothing", "[TickDriver]")
+{
+    const Setup setup{ true, true, 60 };
+    Run<DriverPipeline> baseline(setup);
+    Run<DriverPipeline> driver(setup);
+    Run<LegacyPipeline> legacy(setup);
+    std::optional<uint64_t> refusedAfterTheCall;
+    rateScaleSession(baseline, 120u, std::nullopt, 1.01);
+    const std::vector<DoorReading> readings = readingDoorSession(driver, 120u, 40u, 1.01, refusedAfterTheCall);
+    rateScaleSession(legacy, 120u, 40u, 1.01);
+
+    CHECK(refusedAfterTheCall == std::optional<uint64_t>{ 1u });
+    CHECK(driver.pipeline.rateScale() == 1.0);
+    CHECK(driver.pipeline.driver().getDiagnostics().refusedRateChanges() == 1u);
+    CHECK(driver.pipeline.stepIntervalSeconds() == static_cast<double>(kDt));
+    REQUIRE(readings.size() == 120u);
+    for (size_t frame = 0u; frame < readings.size(); ++frame)
+    {
+        INFO("frame " << frame);
+        CHECK(readings[frame].currentInterval == static_cast<double>(kDt));
+        CHECK(readings[frame].refusedRateChanges == (frame <= 40u ? 0u : 1u));
+    }
+
+    CHECK(firstDifference(driver.events, baseline.events) == "");
+    CHECK(driver.pipeline.physicsStepCount() == baseline.pipeline.physicsStepCount());
+    CHECK(firstDifference(driver.events, legacy.events) == "");
+    CHECK(legacy.pipeline.rateScale() == 1.0);
+}
+
+TEST_CASE("SimulationTickDriver.Begin.TheFrameLinePrintsTheConfiguredRateBounds", "[TickDriver]")
+{
+    const auto frameLine = [](const Events& events)
+    {
+        const auto line = std::find_if(events.begin(), events.end(),
+            [](const std::string& event) { return event.rfind("log:W:[SimHost.Frame] ", 0) == 0; });
+        return line == events.end() ? std::string() : *line;
+    };
+
+    const Setup setup{ true, true, 60 };
+    Run<DriverPipeline> defaults(setup);
+    CHECK(frameLine(defaults.events) ==
+        "log:W:[SimHost.Frame] role=Authority stepping=inline dt=0.016667 maxCatchUpSteps=60 rateScale=[0.75,1.25] "
+        "timeBase=worldDelta");
+
+    Events events;
+    TraceEngine engine(events);
+    Side side(events, Setup{ false, false, 60 });
+    Driver narrow(side.game, side.host, side.presenter, engine,
+        Driver::Config{ static_cast<double>(kDt), false, StepThreading::FrameBounded, 60, 0.9, 1.1 });
+    CHECK(frameLine(events) ==
+        "log:W:[SimHost.Frame] role=Client stepping=worker dt=0.016667 maxCatchUpSteps=60 rateScale=[0.90,1.10] "
+        "timeBase=worldDelta");
+    narrow.stop();
 }
 
 namespace
@@ -1013,6 +1160,658 @@ TEST_CASE("SimulationTickDriver.Doors.SavesTicksAndGrantedResimsEqualTheStepDriv
         CHECK(std::adjacent_find(run.presenter.grantedAtCapture.begin(), run.presenter.grantedAtCapture.end(),
             [](uint64_t before, uint64_t after) { return after > before; }) != run.presenter.grantedAtCapture.end());
     }
+}
+
+namespace
+{
+    using IdleGame = BasicRecordingIdleGame<true, TestManager>;
+    using RunnerDriver = SimulationTickDriver<IdleGame, FakeWorldHost, FakePresenter, FakeEngine>;
+    using RealRunnerDriver = SimulationTickDriver<IdleGame, FakeWorldHost, FakePresenter, RealClockFakeEngine>;
+
+    constexpr double kDtSeconds = static_cast<double>(std::bit_cast<float>(std::bit_cast<uint32_t>(kDt)));
+    static_assert(kDtSeconds != 1.0 / 60.0, "kDtSeconds is the float kDt widened, as the Inline pipelines pass it; "
+        "a constexpr static_cast<double>(kDt) keeps 1/60 in double under MSVC constant evaluation");
+    constexpr double kLoopOriginSeconds = 0.0;
+
+    struct RunnerSetup
+    {
+        IdleScript script = idleScript::HonourDeadline{};
+        double idleSlackSeconds = 0.0;
+        int32_t maxCatchUpSteps = 60;
+        double buildClockSeconds = 0.0;
+    };
+
+    RunnerDriver::Config runnerConfig(const RunnerSetup& setup)
+    {
+        return RunnerDriver::Config{ kDtSeconds, true, StepThreading::FreeRunning, setup.maxCatchUpSteps, 0.75, 1.25,
+            setup.idleSlackSeconds };
+    }
+
+    struct RunnerRun
+    {
+        explicit RunnerRun(const RunnerSetup& setup)
+            : host(events, kAuthorityRoleBit, StepThreading::FreeRunning, kRingDepthTicks)
+            , manager(false, events)
+            , game(events, manager, storage, engine, setup.script)
+            , presenter(events)
+            , runner(engine, &events)
+        {
+            engine.now = setup.buildClockSeconds;
+            driver.emplace(game, host, presenter, engine, runnerConfig(setup));
+        }
+
+        void runLoopThenStop()
+        {
+            driver->runAuthorityLoop(runner, stop);
+            driver->stop();
+        }
+
+        size_t wakes() const { return game.beforePumpHostSeconds.size(); }
+
+        Events events;
+        FakeEngine engine;
+        FakeWorldHost host;
+        TestManager manager;
+        FakeStorage storage;
+        IdleGame game;
+        FakePresenter presenter;
+        FakeRunnerHost runner;
+        std::atomic<bool> stop{ false };
+        std::optional<RunnerDriver> driver;
+    };
+
+    std::vector<float> jitteredAuthorityDeltas(uint32_t frames, uint32_t hitchFrame, float hitchSeconds)
+    {
+        Lcg random(7u);
+        std::vector<float> deltas;
+        for (uint32_t frame = 0u; frame < frames; ++frame)
+            deltas.push_back(frame == hitchFrame ? hitchSeconds : kDt * (0.3f + 1.4f * random.unit()));
+        return deltas;
+    }
+
+    std::vector<double> wakeTimes(const std::vector<float>& deltas)
+    {
+        std::vector<double> times;
+        double hostSeconds = 0.0;
+        for (float delta : deltas)
+        {
+            hostSeconds += static_cast<double>(delta);
+            times.push_back(hostSeconds);
+        }
+        return times;
+    }
+
+    Events stepTrace(const Events& events)
+    {
+        Events trace;
+        for (const std::string& event : events)
+        {
+            if (event == "clock" || event == "onPostPhysics" || event == "sleepUntil" || event.rfind("log:", 0) == 0
+                || event.rfind("idleUntil:", 0) == 0)
+                continue;
+            trace.push_back(event);
+        }
+        return trace;
+    }
+
+    template <typename RunT>
+    void inlineSessionAfterALeadingZeroFrame(RunT& run, const std::vector<float>& deltas)
+    {
+        FakeCompletion completion;
+        run.pipeline.startFrame(0.f);
+        run.pipeline.endFrame(&completion, 0);
+        for (uint32_t frame = 0u; frame < deltas.size(); ++frame)
+        {
+            run.engine.advance(static_cast<double>(deltas[frame]));
+            if (frame % 50u == 7u)
+                run.pipeline.pushBodySlotOccupancy(frame % 4u, frame % 100u < 50u);
+            if (frame % 97u == 3u)
+                run.pipeline.noteWorldLockWait(0.0002 + 0.00001 * static_cast<double>(frame));
+            run.pipeline.startFrame(deltas[frame]);
+            run.pipeline.endFrame(&completion, 0);
+        }
+        run.pipeline.stop();
+    }
+
+    void runnerWokenAtTheFrameTimes(RunnerRun& run, const std::vector<float>& deltas)
+    {
+        const size_t frames = deltas.size();
+        run.game.beforePumpHook = [&run, frames]()
+        {
+            const size_t wake = run.wakes() - 1u;
+            if (wake == 0u)
+                return;
+            const uint32_t frame = static_cast<uint32_t>(wake - 1u);
+            if (frame % 50u == 7u)
+                run.driver->pushBodySlotOccupancy(frame % 4u, frame % 100u < 50u);
+            if (frame % 97u == 3u)
+                run.driver->noteWorldLockWait(0.0002 + 0.00001 * static_cast<double>(frame));
+            if (wake == frames)
+                run.stop.store(true);
+        };
+        run.runLoopThenStop();
+    }
+
+    std::vector<std::string> linesWith(const std::vector<LoggedLine>& lines, const std::string& prefix)
+    {
+        std::vector<std::string> found;
+        for (const LoggedLine& line : lines)
+        {
+            if (line.text.rfind(prefix, 0) == 0)
+                found.push_back(line.text);
+        }
+        return found;
+    }
+
+    std::string fieldOf(const std::string& line, const std::string& name)
+    {
+        const std::string key = " " + name + "=";
+        const size_t at = line.find(key);
+        if (at == std::string::npos)
+            return "<missing>";
+        const size_t from = at + key.size();
+        return line.substr(from, line.find(' ', from) - from);
+    }
+
+    double p99Of(const std::string& percentiles)
+    {
+        const size_t first = percentiles.find('/');
+        const size_t second = percentiles.find('/', first + 1u);
+        return std::stod(percentiles.substr(first + 1u, second - first - 1u));
+    }
+
+    std::vector<std::string> idlePatternsBetweenSteps(const Events& events)
+    {
+        std::vector<std::string> patterns;
+        for (const std::string& event : events)
+        {
+            if (event == "onStepEnded")
+                patterns.emplace_back();
+            else if (!patterns.empty() && event.rfind("idleUntil:", 0) == 0)
+                patterns.back() += 'i';
+            else if (!patterns.empty() && event == "sleepUntil")
+                patterns.back() += 's';
+        }
+        return patterns;
+    }
+
+    struct OffRunnerReading
+    {
+        double hostNowSeconds = -1.0;
+        double stepIntervalSeconds = -1.0;
+    };
+
+    OffRunnerReading readOffTheRunner(RunnerDriver& driver)
+    {
+        OffRunnerReading reading;
+        std::thread reader([&driver, &reading]() { reading = OffRunnerReading{ driver.hostNowSeconds(), driver.stepIntervalSeconds() }; });
+        reader.join();
+        return reading;
+    }
+} // namespace
+
+TEST_CASE("SimulationTickDriver.FreeRunning.WokenAtTheInlineFrameTimesItGivesTheInlineAuthoritysStepTrace", "[TickDriver]")
+{
+    const std::vector<float> deltas = jitteredAuthorityDeltas(600u, 300u, 0.25f);
+    {
+        Run<DriverPipeline> reference(Setup{ true, true, 60 });
+        REQUIRE(authorityInlineSession(reference, 600u, 300u, 0.25f) == deltas);
+    }
+
+    Run<DriverPipeline> inlineAuthority(Setup{ true, true, 60 });
+    inlineSessionAfterALeadingZeroFrame(inlineAuthority, deltas);
+    RunnerRun runner(RunnerSetup{ idleScript::Wakes{ wakeTimes(deltas) } });
+    runnerWokenAtTheFrameTimes(runner, deltas);
+
+    const Events runnerTrace = stepTrace(runner.events);
+    const Events inlineTrace = stepTrace(inlineAuthority.events);
+    CHECK(firstDifference(runnerTrace, inlineTrace) == "");
+
+    CHECK(countPrefix(runnerTrace, "beforePump") == 601u);
+    CHECK(countPrefix(runnerTrace, "onFrameStepsDue:") > 300u);
+    CHECK(countPrefix(runnerTrace, "afterInlineBatch:") == countPrefix(runnerTrace, "onFrameStepsDue:"));
+    CHECK(countPrefix(runnerTrace, "releaseInputs:") == runner.driver->getDiagnostics().physicsStepCount());
+    CHECK(countPrefix(runnerTrace, "onStepStarted") == runner.driver->getDiagnostics().physicsStepCount());
+    CHECK(countPrefix(runnerTrace, "onStepEnded") == runner.driver->getDiagnostics().physicsStepCount());
+    CHECK(countPrefix(runnerTrace, "publish:") == runner.driver->getDiagnostics().physicsStepCount());
+    CHECK(countPrefix(runnerTrace, "afterRunTick:") == runner.driver->getDiagnostics().physicsStepCount());
+    CHECK(countPrefix(runnerTrace, "occ") > 0u);
+    REQUIRE_FALSE(runner.game.frameStepsDue.empty());
+    CHECK(runner.game.frameStepsDue.front() == std::make_pair(0, 1));
+    CHECK(std::count_if(runner.game.frameStepsDue.begin(), runner.game.frameStepsDue.end(),
+        [](const std::pair<int32_t, int32_t>& due) { return due.second == 15; }) == 1);
+
+    CHECK(runner.driver->getDiagnostics().physicsStepCount() == inlineAuthority.pipeline.physicsStepCount());
+    CHECK(runner.driver->getDiagnostics().lostTime().steps == inlineAuthority.pipeline.lostTime().steps);
+    CHECK(runner.driver->getDiagnostics().lostTime().seconds == inlineAuthority.pipeline.lostTime().seconds);
+    CHECK(runner.game.beforePumpHostSeconds == inlineAuthority.side.game.beforePumpHostSeconds);
+    CHECK(runner.game.scriptExhaustedCalls == 1u);
+    CHECK(countPrefix(runner.events, "onPostPhysics") == 0u);
+    CHECK(countPrefix(inlineAuthority.events, "onPostPhysics") == 601u);
+    CHECK(linesWith(runner.engine.lines, "[SimHost.Frame] ")
+        == std::vector<std::string>{ "[SimHost.Frame] role=Authority stepping=runner dt=0.016667 maxCatchUpSteps=60 "
+                                     "rateScale=[0.75,1.25] timeBase=monotonic idleSlackUs=0" });
+    CHECK(linesWith(runner.engine.lines, "[SimHost.FirstStep] ")
+        == std::vector<std::string>{ "[SimHost.FirstStep] role=Authority thread=runner physicsStep=0 batch=1" });
+    CHECK_FALSE(runner.driver->getDiagnostics().isRunning());
+}
+
+TEST_CASE("SimulationTickDriver.FreeRunning.ADeadlineHonouringIdleRunsOneStepPerWakeAtItsDeadline", "[TickDriver]")
+{
+    RunnerRun run(RunnerSetup{ .buildClockSeconds = -1.0 });
+    run.engine.now = kLoopOriginSeconds;
+    run.game.setStopAfterSteps(run.stop, 600u);
+    run.runLoopThenStop();
+
+    REQUIRE(run.presenter.published.size() == 600u);
+    REQUIRE(run.game.frameStepsDue.size() == 600u);
+    CHECK(std::all_of(run.game.frameStepsDue.begin(), run.game.frameStepsDue.end(),
+        [](const std::pair<int32_t, int32_t>& due) { return due.second == 1; }));
+    REQUIRE(run.game.idleCalls.size() == 600u);
+    REQUIRE(run.game.stepStartedSeconds.size() == 600u);
+    for (size_t step = 0u; step < 600u; ++step)
+    {
+        CHECK(run.game.stepStartedSeconds[step] == kLoopOriginSeconds + run.presenter.publishedDeadlines[step]);
+        if (step > 0u)
+            CHECK(run.game.idleCalls[step - 1u].deadline == kLoopOriginSeconds + run.presenter.publishedDeadlines[step]);
+    }
+    CHECK(std::all_of(run.game.idleCalls.begin(), run.game.idleCalls.end(),
+        [](const IdleCall& call) { return call.wake == IdleWake::Deadline && call.deadline > call.now; }));
+
+    const std::vector<std::string> windows = linesWith(run.engine.lines, "[SimHost.Window] role=Authority stepping=runner ");
+    REQUIRE(windows.size() == 1u);
+    for (const std::string& line : windows)
+    {
+        CHECK(fieldOf(line, "maxStepsPerFrame") == "1");
+        CHECK(fieldOf(line, "lateUs") == "0.0/0.0/0.0");
+        CHECK(fieldOf(line, "frames") == fieldOf(line, "steps"));
+        CHECK(fieldOf(line, "frames") == "541");
+        CHECK(fieldOf(line, "lostSteps") == "0");
+    }
+    const TickDriverWindowCounts& counts = run.driver->getDiagnostics().windowCounts();
+    CHECK(counts.frames == 59u);
+    CHECK(counts.steps == 59u);
+    CHECK(counts.maxStepsPerFrame == 1u);
+    CHECK(counts.activityWakes == 0u);
+    CHECK(counts.earlyWakes == 0u);
+    CHECK(counts.idleFallbacks == 0u);
+    CHECK(run.driver->getDiagnostics().windowSampleCount(TickDriverWindowSeries::LateUs) == 59u);
+    CHECK(run.driver->getDiagnostics().windowSampleCount(TickDriverWindowSeries::ApproachUs) == 0u);
+    CHECK(run.runner.sleeps.empty());
+}
+
+TEST_CASE("SimulationTickDriver.FreeRunning.ActivityWakesRePumpWithoutStepping", "[TickDriver]")
+{
+    std::vector<double> activity;
+    for (uint32_t index = 1u; index <= 3400u; ++index)
+        activity.push_back(0.003 * static_cast<double>(index));
+    RunnerRun run(RunnerSetup{ idleScript::ActivityAt{ activity } });
+    run.game.setStopAfterSteps(run.stop, 600u);
+    run.runLoopThenStop();
+
+    REQUIRE(run.presenter.published.size() == 600u);
+    REQUIRE(run.game.stepStartedSeconds.size() == 600u);
+    const uint32_t activityReturns = static_cast<uint32_t>(std::count_if(run.game.idleCalls.begin(), run.game.idleCalls.end(),
+        [](const IdleCall& call) { return call.wake == IdleWake::Activity; }));
+    const TickDriverWindowCounts& counts = run.driver->getDiagnostics().windowCounts();
+    CHECK(activityReturns > 3000u);
+    CHECK(counts.activityWakes == activityReturns);
+    CHECK(counts.earlyWakes == 0u);
+    CHECK(counts.idleFallbacks == 0u);
+    CHECK(counts.frames == 600u);
+    CHECK(counts.steps == 600u);
+    REQUIRE_FALSE(run.game.idleCalls.empty());
+    const uint32_t finalActivity = run.game.idleCalls.back().wake == IdleWake::Activity ? 1u : 0u;
+    CHECK(countPrefix(run.events, "beforePump") == 600u + activityReturns - finalActivity);
+    CHECK(countPrefix(run.events, "beforePump") == run.game.idleCalls.size());
+    CHECK(run.game.frameStepsDue.size() == 600u);
+    CHECK(std::all_of(run.game.frameStepsDue.begin(), run.game.frameStepsDue.end(),
+        [](const std::pair<int32_t, int32_t>& due) { return due.second == 1; }));
+    for (size_t step = 0u; step < 600u; ++step)
+    {
+        CHECK(run.game.stepStartedSeconds[step] >= kLoopOriginSeconds + run.presenter.publishedDeadlines[step]);
+        CHECK(run.game.stepStartedSeconds[step] < 10.0);
+    }
+    CHECK(run.presenter.publishedDeadlines.back() + kDtSeconds >= 10.0);
+    CHECK(linesWith(run.engine.lines, "[SimHost.Window] ").empty());
+}
+
+TEST_CASE("SimulationTickDriver.FreeRunning.TheSlackIdlesToTheApproachThenPollsToTheDeadline", "[TickDriver]")
+{
+    constexpr double kSlackSeconds = 0.0005;
+    RunnerRun run(RunnerSetup{ idleScript::HonourDeadline{}, kSlackSeconds });
+    run.game.setStopAfterSteps(run.stop, 600u);
+    run.runLoopThenStop();
+
+    REQUIRE(run.presenter.published.size() == 600u);
+    REQUIRE(run.game.stepStartedSeconds.size() == 600u);
+    std::vector<std::vector<IdleCall>> idles;
+    for (const IdleCall& call : run.game.idleCalls)
+    {
+        if (call.deadline > call.now)
+            idles.emplace_back();
+        REQUIRE_FALSE(idles.empty());
+        idles.back().push_back(call);
+    }
+    REQUIRE(idles.size() == 600u);
+    for (size_t idle = 0u; idle + 1u < idles.size(); ++idle)
+    {
+        const double deadline = kLoopOriginSeconds + run.presenter.publishedDeadlines[idle + 1u];
+        const std::vector<IdleCall>& calls = idles[idle];
+        CHECK(calls.front().deadline == kLoopOriginSeconds + (run.presenter.publishedDeadlines[idle + 1u] - kSlackSeconds));
+        REQUIRE(calls.size() >= 2u);
+        for (size_t poll = 1u; poll < calls.size(); ++poll)
+        {
+            CHECK(calls[poll].deadline <= calls[poll].now);
+            CHECK(calls[poll].now < deadline);
+        }
+        CHECK(calls.back().returnedAt >= deadline);
+    }
+    CHECK(idles.back().size() == 1u);
+    double maxLateSeconds = 0.0;
+    for (size_t step = 0u; step < 600u; ++step)
+    {
+        const double lateSeconds = run.game.stepStartedSeconds[step] - (kLoopOriginSeconds + run.presenter.publishedDeadlines[step]);
+        CHECK(lateSeconds >= 0.0);
+        maxLateSeconds = std::max(maxLateSeconds, lateSeconds);
+    }
+    CHECK(maxLateSeconds <= 50e-6);
+    CHECK(maxLateSeconds > 0.0);
+    CHECK(run.driver->getDiagnostics().windowSampleCount(TickDriverWindowSeries::LateUs) == 600u);
+    CHECK(run.driver->getDiagnostics().windowSampleCount(TickDriverWindowSeries::ApproachUs) == 600u);
+    CHECK(run.driver->getDiagnostics().windowCounts().earlyWakes == 0u);
+    CHECK(linesWith(run.engine.lines, "[SimHost.Frame] ")
+        == std::vector<std::string>{ "[SimHost.Frame] role=Authority stepping=runner dt=0.016667 maxCatchUpSteps=60 "
+                                     "rateScale=[0.75,1.25] timeBase=monotonic idleSlackUs=500" });
+}
+
+TEST_CASE("SimulationTickDriver.FreeRunning.AnUnavailableIdleSleepsOnTheRunnerHost", "[TickDriver]")
+{
+    RunnerRun run(RunnerSetup{ idleScript::Unavailable{} });
+    run.game.setStopAfterSteps(run.stop, 60u);
+    run.runLoopThenStop();
+
+    REQUIRE(run.presenter.published.size() == 60u);
+    REQUIRE(run.game.idleCalls.size() == 60u);
+    REQUIRE(run.runner.sleeps.size() == 60u);
+    for (size_t idle = 0u; idle < 60u; ++idle)
+    {
+        CHECK(run.game.idleCalls[idle].wake == IdleWake::Unavailable);
+        CHECK(run.runner.sleeps[idle] == run.game.idleCalls[idle].deadline);
+        if (idle + 1u < 60u)
+            CHECK(run.game.idleCalls[idle].deadline == kLoopOriginSeconds + run.presenter.publishedDeadlines[idle + 1u]);
+    }
+    CHECK(idlePatternsBetweenSteps(run.events) == std::vector<std::string>(60u, "is"));
+    CHECK(run.driver->getDiagnostics().windowCounts().idleFallbacks == 60u);
+    CHECK(run.driver->getDiagnostics().windowCounts().earlyWakes == 0u);
+    for (size_t step = 0u; step < 60u; ++step)
+        CHECK(run.game.stepStartedSeconds[step] >= kLoopOriginSeconds + run.presenter.publishedDeadlines[step]);
+}
+
+TEST_CASE("SimulationTickDriver.FreeRunning.ThreeEarlyDeadlineReturnsFallBackToTheRunnerSleep", "[TickDriver]")
+{
+    RunnerRun run(RunnerSetup{ idleScript::EarlyDeadline{} });
+    run.game.setStopAfterSteps(run.stop, 30u);
+    run.runLoopThenStop();
+
+    REQUIRE(run.presenter.published.size() == 30u);
+    const std::vector<std::string> patterns = idlePatternsBetweenSteps(run.events);
+    REQUIRE(patterns.size() == 30u);
+    for (const std::string& pattern : patterns)
+    {
+        CHECK(std::count(pattern.begin(), pattern.end(), 'i') <= 4);
+        CHECK(std::count(pattern.begin(), pattern.end(), 's') == 1);
+        CHECK(pattern.back() == 's');
+    }
+    CHECK(run.driver->getDiagnostics().windowCounts().earlyWakes == 30u * simulationTickDriver::kEarlyWakesBeforeFallback);
+    CHECK(run.driver->getDiagnostics().windowCounts().idleFallbacks == 30u);
+    for (size_t step = 0u; step < 30u; ++step)
+        CHECK(run.game.stepStartedSeconds[step] >= kLoopOriginSeconds + run.presenter.publishedDeadlines[step]);
+}
+
+TEST_CASE("SimulationTickDriver.FreeRunning.AStalledRunnerCatchesUpToTheCapAndCountsTheRest", "[TickDriver]")
+{
+    std::vector<float> deltas(30u, kDt);
+    deltas.push_back(2.f);
+    deltas.insert(deltas.end(), 30u, kDt);
+
+    Run<LegacyPipeline> transcription(Setup{ true, true, 60 });
+    inlineSessionAfterALeadingZeroFrame(transcription, deltas);
+    RunnerRun run(RunnerSetup{ idleScript::Wakes{ wakeTimes(deltas) } });
+    runnerWokenAtTheFrameTimes(run, deltas);
+
+    CHECK(firstDifference(stepTrace(run.events), stepTrace(transcription.events)) == "");
+    CHECK(std::count_if(run.game.frameStepsDue.begin(), run.game.frameStepsDue.end(),
+        [](const std::pair<int32_t, int32_t>& due) { return due.second == 60; }) == 1);
+    CHECK(std::all_of(run.game.frameStepsDue.begin(), run.game.frameStepsDue.end(),
+        [](const std::pair<int32_t, int32_t>& due) { return due.second <= 60; }));
+    CHECK(run.driver->getDiagnostics().windowCounts().maxStepsPerFrame == 60u);
+
+    const LostTime runnerLost = run.driver->getDiagnostics().lostTime();
+    const LostTime transcriptionLost = transcription.pipeline.lostTime();
+    CHECK(runnerLost.steps > 0u);
+    CHECK(runnerLost.steps == transcriptionLost.steps);
+    CHECK(runnerLost.seconds == transcriptionLost.seconds);
+}
+
+TEST_CASE("SimulationTickDriver.FreeRunning.AFrameThreadStallLeavesTheRunnersStepsOnePerWake", "[TickDriver]")
+{
+    RunnerRun run(RunnerSetup{});
+    uint32_t endFrames = 0u;
+    uint32_t stalledWakes = 0u;
+    run.game.beforePumpHook = [&run, &endFrames, &stalledWakes]()
+    {
+        if (run.engine.now >= 1.0 && run.engine.now < 1.2)
+        {
+            ++stalledWakes;
+            return;
+        }
+        std::thread frameThread([&run]() { run.driver->endFrame(nullptr, 0); });
+        frameThread.join();
+        ++endFrames;
+    };
+    run.game.setStopAfterSteps(run.stop, 120u);
+    run.runLoopThenStop();
+
+    REQUIRE(run.presenter.published.size() == 120u);
+    CHECK(stalledWakes >= 11u);
+    CHECK(run.game.postPhysicsCalls == endFrames);
+    CHECK(std::all_of(run.game.frameStepsDue.begin(), run.game.frameStepsDue.end(),
+        [](const std::pair<int32_t, int32_t>& due) { return due.second == 1; }));
+    const uint32_t runnerMax = run.driver->getDiagnostics().windowCounts().maxStepsPerFrame;
+    CHECK(runnerMax <= 2u);
+    CHECK(runnerMax == 1u);
+
+    Run<DriverPipeline> inlineAuthority(Setup{ true, true, 60 });
+    FakeCompletion completion;
+    double hostSeconds = 0.0;
+    bool stalled = false;
+    for (uint32_t frame = 0u; hostSeconds < 2.0; ++frame)
+    {
+        float delta = offTheDeadlines(frame, kDt);
+        if (!stalled && hostSeconds >= 1.0)
+        {
+            delta = 0.2f;
+            stalled = true;
+        }
+        inlineAuthority.engine.advance(static_cast<double>(delta));
+        inlineAuthority.pipeline.startFrame(delta);
+        inlineAuthority.pipeline.endFrame(&completion, 0);
+        hostSeconds += static_cast<double>(delta);
+    }
+    inlineAuthority.pipeline.stop();
+    const uint32_t inlineMax = inlineAuthority.pipeline.driver().getDiagnostics().windowCounts().maxStepsPerFrame;
+    CHECK(stalled);
+    CHECK(inlineMax >= 12u);
+    CHECK_FALSE(inlineMax <= 2u);
+}
+
+TEST_CASE("SimulationTickDriver.FreeRunning.TheFrameThreadPassRunsOnlyOnPostPhysics", "[TickDriver]")
+{
+    Events events;
+    FakeEngine engine;
+    TestManager manager(false, events);
+    FakeStorage storage;
+    IdleGame game(events, manager, storage, engine);
+    FakePresenter presenter(events);
+    std::optional<FakeWorldHost> host;
+    std::optional<RunnerDriver> driver;
+    std::thread runner([&]()
+    {
+        host.emplace(events, kAuthorityRoleBit, StepThreading::FreeRunning, kRingDepthTicks);
+        driver.emplace(game, *host, presenter, engine, runnerConfig(RunnerSetup{}));
+    });
+    runner.join();
+    REQUIRE(driver.has_value());
+
+    const size_t eventsAtBuild = events.size();
+    const size_t linesAtBuild = engine.lines.size();
+    FakeCompletion completion;
+    for (uint32_t frame = 0u; frame < 30u; ++frame)
+    {
+        engine.advance(kDtSeconds);
+        driver->startFrame(kDtSeconds);
+        driver->endFrame(frame % 2u == 0u ? &completion : nullptr, static_cast<int32_t>(frame % 2u));
+    }
+
+    CHECK(Events(events.begin() + static_cast<std::ptrdiff_t>(eventsAtBuild), events.end()) == Events(30u, "onPostPhysics"));
+    CHECK(game.postPhysicsCalls == 30u);
+    CHECK(game.beforePumpHostSeconds.empty());
+    CHECK(driver->getDiagnostics().physicsStepCount() == 0u);
+    const TickDriverWindowCounts& counts = driver->getDiagnostics().windowCounts();
+    CHECK(counts.frames == 0u);
+    CHECK(counts.steps == 0u);
+    CHECK(counts.endWaits == 0u);
+    for (size_t series = 0u; series < tickDriverWindow::kSeriesCount; ++series)
+        CHECK(driver->getDiagnostics().windowSampleCount(static_cast<TickDriverWindowSeries>(series)) == 0u);
+    CHECK(engine.lines.size() == linesAtBuild);
+    CHECK(engine.deferrals.empty());
+    CHECK(engine.waits.empty());
+    CHECK(completion.continuations.empty());
+    CHECK(driver->hostNowSeconds() == 0.0);
+
+    driver->stop();
+    CHECK(engine.waits.empty());
+    CHECK_FALSE(driver->getDiagnostics().isRunning());
+}
+
+TEST_CASE("SimulationTickDriver.FreeRunning.ThePresentClockIsReadableOffTheRunner", "[TickDriver]")
+{
+    constexpr double kClockAtStartSeconds = 5.0;
+    RunnerRun run(RunnerSetup{ .buildClockSeconds = kClockAtStartSeconds });
+    const OffRunnerReading beforeLoop = readOffTheRunner(*run.driver);
+    CHECK(beforeLoop.hostNowSeconds == 0.0);
+    CHECK(beforeLoop.stepIntervalSeconds == kDtSeconds);
+
+    std::vector<OffRunnerReading> readings;
+    std::vector<double> clockAtWake;
+    run.game.onBeforePump = [&run](double, TickRateDoor& rate)
+    {
+        if (run.wakes() == 11u)
+            rate.setRateScale(1.25);
+    };
+    run.game.beforePumpHook = [&run, &readings, &clockAtWake]()
+    {
+        clockAtWake.push_back(run.engine.now);
+        readings.push_back(readOffTheRunner(*run.driver));
+        if (run.wakes() == 21u)
+            run.stop.store(true);
+    };
+    run.runLoopThenStop();
+
+    REQUIRE(readings.size() == 21u);
+    REQUIRE(run.game.beforePumpHostSeconds.size() == 21u);
+    for (size_t wake = 0u; wake < readings.size(); ++wake)
+    {
+        CHECK(readings[wake].hostNowSeconds == clockAtWake[wake] - kClockAtStartSeconds);
+        CHECK(readings[wake].hostNowSeconds == run.game.beforePumpHostSeconds[wake]);
+        CHECK(readings[wake].stepIntervalSeconds == kDtSeconds);
+    }
+    CHECK(readings.back().hostNowSeconds > 0.0);
+    CHECK(run.driver->getDiagnostics().rateScale() == 1.0);
+    CHECK(run.driver->getDiagnostics().refusedRateChanges() == 1u);
+    const OffRunnerReading afterLoop = readOffTheRunner(*run.driver);
+    CHECK(afterLoop.hostNowSeconds == run.engine.now - kClockAtStartSeconds);
+    CHECK(afterLoop.stepIntervalSeconds == kDtSeconds);
+}
+
+TEST_CASE("SimulationTickDriver.FreeRunning.StopFromTheFrameThreadEndsTheLoopAndStopChecksIt", "[TickDriver]")
+{
+    Events events;
+    RealClockFakeEngine engine;
+    TestManager manager(false, events);
+    FakeStorage storage;
+    IdleGame game(events, manager, storage, IdleScript{ idleScript::RealDeadline{} });
+    FakePresenter presenter(events);
+    RealRunnerHost runnerHost;
+    std::atomic<bool> stop{ false };
+    std::optional<FakeWorldHost> host;
+    std::optional<RealRunnerDriver> driver;
+    std::thread runner([&]()
+    {
+        host.emplace(events, kAuthorityRoleBit, StepThreading::FreeRunning, kRingDepthTicks);
+        driver.emplace(game, *host, presenter, engine,
+            RealRunnerDriver::Config{ kDtSeconds, true, StepThreading::FreeRunning, 60 });
+        driver->runAuthorityLoop(runnerHost, stop);
+    });
+
+    const auto giveUp = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (game.stepsEnded.load() < 5u && std::chrono::steady_clock::now() < giveUp)
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    const uint32_t stepsAtStop = game.stepsEnded.load();
+    stop.store(true);
+    runner.join();
+
+    REQUIRE(stepsAtStop >= 5u);
+    REQUIRE(driver.has_value());
+    const uint32_t stepsAtJoin = game.stepsEnded.load();
+    driver->stop();
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    CHECK(game.stepsEnded.load() == stepsAtJoin);
+    CHECK(stepsAtJoin >= stepsAtStop);
+    CHECK_FALSE(driver->getDiagnostics().isRunning());
+    const std::vector<LoggedLine> lines = engine.snapshotLines();
+    CHECK(linesWith(lines, "[SimHost.FirstStep] role=Authority thread=runner ").size() == 1u);
+    CHECK(linesWith(lines, "[SimHost.Frame] role=Authority stepping=runner ").size() == 1u);
+}
+
+TEST_CASE("SimulationTickDriver.FreeRunning.StopWhileTheLoopIsActiveIsRefused", "[.][TickDriverStopBeforeJoin]")
+{
+    RunnerRun& run = *new RunnerRun(RunnerSetup{});
+    run.game.beforePumpHook = [&run]()
+    {
+        if (run.wakes() == 3u)
+        {
+            run.stop.store(true);
+            run.driver->stop();
+        }
+    };
+    run.driver->runAuthorityLoop(run.runner, run.stop);
+    FAIL("SimulationTickDriver::stop() was accepted while the authority loop was active");
+}
+
+TEST_CASE("SimulationTickDriver.FreeRunning.Timing.LoopOverheadWithASpinPreciseIdle", "[.][OGSimTiming]")
+{
+    Events events;
+    RealClockFakeEngine engine;
+    FakeWorldHost host(events, kAuthorityRoleBit, StepThreading::FreeRunning, kRingDepthTicks);
+    TestManager manager(false, events);
+    FakeStorage storage;
+    IdleGame game(events, manager, storage, IdleScript{ idleScript::RealSpin{} });
+    FakePresenter presenter(events);
+    RealRunnerHost runnerHost;
+    std::atomic<bool> stop{ false };
+    RealRunnerDriver driver(game, host, presenter, engine, RealRunnerDriver::Config{ kDtSeconds, true, StepThreading::FreeRunning, 60 });
+    game.setStopAfterSteps(stop, 601u);
+    driver.runAuthorityLoop(runnerHost, stop);
+    driver.stop();
+
+    const std::vector<std::string> windows = linesWith(engine.snapshotLines(), "[SimHost.Window] role=Authority stepping=runner ");
+    REQUIRE(windows.size() == 1u);
+    WARN(windows.front());
+    WARN("lateUs=" + fieldOf(windows.front(), "lateUs"));
+    CHECK(fieldOf(windows.front(), "steps") == "601");
+    CHECK(p99Of(fieldOf(windows.front(), "lateUs")) <= 100.0);
 }
 
 #endif // WITH_LOW_LEVEL_TESTS

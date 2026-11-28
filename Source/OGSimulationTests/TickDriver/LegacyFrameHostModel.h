@@ -16,12 +16,12 @@
 #include "OGSimulation/Mailbox.h"
 #include "OGSimulation/OGAssert.h"
 #include "OGSimulation/SimulationScheduler.h"
-#include "OGSimulation/SimulationStepDriver.h"
+#include "OGTickDriver/SimulationStepDriver.h"
 #include "OGSimulation/StepHooks.h"
-#include "OGSimulation/TickDriverConcepts.h"
-#include "OGSimulation/TickDriverLog.h"
-#include "OGSimulation/TickDriverStepHooks.h"
-#include "OGSimulation/TickDriverThreadContext.h"
+#include "OGTickDriver/TickDriverConcepts.h"
+#include "OGTickDriver/TickDriverLog.h"
+#include "OGTickDriver/TickDriverStepHooks.h"
+#include "OGTickDriver/TickDriverThreadContext.h"
 
 namespace legacyFrameHost
 {
@@ -318,6 +318,7 @@ namespace legacyFrameHost
         LostTime lostTime() const { return m_scheduler->lostTime(); }
         uint64_t physicsStepCount() const { return m_scheduler->physicsStepCount(); }
         double rateScale() const { return m_scheduler->rateScale(); }
+        uint64_t refusedRateChanges() const { return m_refusedRateChanges; }
 
     private:
         class FrameHostDoors
@@ -435,7 +436,7 @@ namespace legacyFrameHost
 
             SimulationScheduler& scheduler = schedulerOnOwningThread();
             m_hostTimeSeconds += static_cast<double>(deltaSeconds);
-            TickRateDoor rate(scheduler);
+            TickRateDoor rate(scheduler, m_tickOffset.load(std::memory_order_relaxed), m_isAuthority, m_refusedRateChanges);
             m_owner->beforePump(m_hostTimeSeconds, rate);
             const uint32_t numSteps = scheduler.pump(m_hostTimeSeconds);
             if (numSteps == 0u)
@@ -601,6 +602,7 @@ namespace legacyFrameHost
         bool                               m_loggedFirstStep = false;
         double                             m_hostTimeSeconds = 0.0;
         double                             m_lastFrameStartSeconds = 0.0;
+        uint64_t                           m_refusedRateChanges = 0u;
         std::optional<SimulationScheduler> m_scheduler;
         SpscRing<BodySlotOccupancyCommandUImpl, kBodySlotOccupancyCommandCapacity> m_bodySlotOccupancyCommands;
         SpscRing<StepCostSample, kStepCostSampleCapacity>          m_stepCosts;

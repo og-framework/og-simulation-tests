@@ -6,6 +6,7 @@
 
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <limits>
 #include <vector>
 
@@ -190,6 +191,29 @@ TEST_CASE("SimulationScheduler.RateScaleScalesTheStepRate", "[Scheduler]")
     }
 }
 
+TEST_CASE("SimulationScheduler.CurrentStepIntervalIsTheNewestSegmentsInterval", "[Scheduler]")
+{
+    SimulationScheduler scheduler = makeScheduler(2u);
+    CHECK(scheduler.currentStepInterval() == kDt);
+
+    scheduler.setRateScale(1.05);
+    CHECK(scheduler.currentStepInterval() == kDt / 1.05);
+    const double deadline = scheduler.nextDeadline();
+    CHECK(scheduler.pump(deadline + 10.0 * kDt) == 2u);
+    REQUIRE(scheduler.lostTime().steps > 0u);
+    CHECK(scheduler.currentStepInterval() == kDt / 1.05);
+    const uint64_t next = scheduler.physicsStepCount();
+    CHECK(scheduler.stepDeadline(next + 1u) - scheduler.stepDeadline(next) == Catch::Approx(kDt / 1.05).epsilon(1e-9));
+
+    scheduler.reanchor(scheduler.nextDeadline() + 1.0);
+    CHECK(scheduler.currentStepInterval() == kDt / 1.05);
+
+    scheduler.setRateScale(2.0);
+    CHECK(scheduler.currentStepInterval() == kDt / 1.1);
+    scheduler.setRateScale(std::numeric_limits<double>::quiet_NaN());
+    CHECK(scheduler.currentStepInterval() == kDt / 1.1);
+}
+
 TEST_CASE("SimulationScheduler.BackwardTimeIsIgnoredAndCounted", "[Scheduler]")
 {
     SimulationScheduler scheduler = makeScheduler(8u);
@@ -319,6 +343,268 @@ TEST_CASE("SimulationScheduler.StepDeadlineIsStrictlyIncreasingUnderRateChanges"
         {
             REQUIRE(churn.stepDeadline(step) > churn.stepDeadline(step - 1u));
         }
+    }
+}
+
+namespace
+{
+    class DequeSchedulerTranscription
+    {
+    public:
+        static constexpr size_t kDeadlineHistorySegments = 64;
+
+        DequeSchedulerTranscription(const SchedulerConfig& config, double startSeconds)
+            : config_(config)
+            , latestSeconds_(startSeconds)
+        {
+            OG_CHECK(std::isfinite(config.dtSeconds) && config.dtSeconds > 0.0,
+                "DequeSchedulerTranscription: dtSeconds must be finite and positive");
+            OG_CHECK(config.maxCatchUpSteps.value >= 1u,
+                "DequeSchedulerTranscription: maxCatchUpSteps must be at least 1");
+            OG_CHECK(std::isfinite(config.minRateScale) && std::isfinite(config.maxRateScale)
+                && config.minRateScale > 0.0 && config.minRateScale <= 1.0 && config.maxRateScale >= 1.0,
+                "DequeSchedulerTranscription: rate-scale bounds must satisfy 0 < min <= 1 <= max");
+            OG_CHECK(std::isfinite(startSeconds), "DequeSchedulerTranscription: startSeconds must be finite");
+            segments_.push_back(DeadlineSegment{0u, startSeconds, config.dtSeconds});
+        }
+
+        uint32_t pump(double nowSeconds)
+        {
+            if (!acceptTimeSample(nowSeconds))
+            {
+                return 0u;
+            }
+
+            const uint64_t due = stepsDueAt(nowSeconds);
+            const uint64_t run = std::min<uint64_t>(due, config_.maxCatchUpSteps.value);
+            const uint64_t dropped = due - run;
+            if (dropped > 0u)
+            {
+                const double droppedFrom = deadlineAt(physicsSteps_);
+                const double droppedUntil = deadlineAt(physicsSteps_ + dropped);
+                recordLostTime(dropped, droppedUntil - droppedFrom);
+                beginSegment(droppedUntil, currentInterval());
+            }
+            physicsSteps_ += run;
+            return static_cast<uint32_t>(run);
+        }
+
+        void reanchor(double nowSeconds)
+        {
+            if (!acceptTimeSample(nowSeconds))
+            {
+                return;
+            }
+
+            const double next = nextDeadline();
+            if (nowSeconds <= next)
+            {
+                return;
+            }
+            recordLostTime(stepsDueAt(nowSeconds) - 1u, nowSeconds - next);
+            beginSegment(nowSeconds, currentInterval());
+        }
+
+        void setRateScale(double scale)
+        {
+            if (!std::isfinite(scale))
+            {
+                return;
+            }
+            const double clamped = std::clamp(scale, config_.minRateScale, config_.maxRateScale);
+            if (clamped == rateScale_)
+            {
+                return;
+            }
+            rateScale_ = clamped;
+            beginSegment(nextDeadline(), config_.dtSeconds / rateScale_);
+        }
+
+        double rateScale() const { return rateScale_; }
+
+        double nextDeadline() const { return deadlineAt(physicsSteps_); }
+
+        double stepDeadline(uint64_t step) const { return deadlineAt(step); }
+
+        uint64_t physicsStepCount() const { return physicsSteps_; }
+
+        LostTime lostTime() const { return lost_; }
+
+        uint64_t ignoredTimeSamples() const { return ignoredTimeSamples_; }
+
+        const SchedulerConfig& config() const { return config_; }
+
+        uint64_t oldestKeptStep() const { return segments_.front().firstStep; }
+
+        uint64_t segmentsBegun() const { return segmentsBegun_; }
+
+    private:
+        struct DeadlineSegment
+        {
+            uint64_t firstStep;
+            double firstDeadline;
+            double interval;
+        };
+
+        bool acceptTimeSample(double nowSeconds)
+        {
+            if (!std::isfinite(nowSeconds) || nowSeconds < latestSeconds_)
+            {
+                ++ignoredTimeSamples_;
+                return false;
+            }
+            latestSeconds_ = nowSeconds;
+            return true;
+        }
+
+        void recordLostTime(uint64_t steps, double seconds)
+        {
+            lost_.steps += steps;
+            lost_.seconds += seconds;
+        }
+
+        double currentInterval() const { return segments_.back().interval; }
+
+        const DeadlineSegment& segmentFor(uint64_t step) const
+        {
+            for (auto it = segments_.rbegin(); it != segments_.rend(); ++it)
+            {
+                if (it->firstStep <= step)
+                {
+                    return *it;
+                }
+            }
+            return segments_.front();
+        }
+
+        double deadlineAt(uint64_t step) const
+        {
+            const DeadlineSegment& segment = segmentFor(step);
+            const double offset = static_cast<double>(step) - static_cast<double>(segment.firstStep);
+            return segment.firstDeadline + offset * segment.interval;
+        }
+
+        uint64_t stepsDueAt(double nowSeconds) const
+        {
+            const double first = nextDeadline();
+            if (nowSeconds < first)
+            {
+                return 0u;
+            }
+            constexpr double kMaxEstimate = 4503599627370496.0;
+            const double estimate = std::min(std::floor((nowSeconds - first) / currentInterval()) + 1.0, kMaxEstimate);
+            uint64_t due = static_cast<uint64_t>(estimate);
+            for (int fix = 0; fix < 4 && due > 1u && deadlineAt(physicsSteps_ + due - 1u) > nowSeconds; ++fix)
+            {
+                --due;
+            }
+            for (int fix = 0; fix < 4 && deadlineAt(physicsSteps_ + due) <= nowSeconds; ++fix)
+            {
+                ++due;
+            }
+            return due;
+        }
+
+        void beginSegment(double firstDeadline, double interval)
+        {
+            if (segments_.back().firstStep == physicsSteps_)
+            {
+                segments_.back() = DeadlineSegment{physicsSteps_, firstDeadline, interval};
+                return;
+            }
+            segments_.push_back(DeadlineSegment{physicsSteps_, firstDeadline, interval});
+            ++segmentsBegun_;
+            if (segments_.size() > kDeadlineHistorySegments)
+            {
+                segments_.pop_front();
+            }
+        }
+
+        SchedulerConfig config_;
+        std::deque<DeadlineSegment> segments_;
+        uint64_t physicsSteps_ = 0u;
+        double rateScale_ = 1.0;
+        double latestSeconds_;
+        LostTime lost_;
+        uint64_t ignoredTimeSamples_ = 0u;
+        uint64_t segmentsBegun_ = 0u;
+    };
+}
+
+TEST_CASE("SimulationScheduler.LostTime.ByCauseSplitsCatchUpDropsFromReanchorGaps", "[Scheduler]")
+{
+    SimulationScheduler scheduler = makeScheduler(3u);
+    const double last = pumpSteady(scheduler, 10);
+    REQUIRE(scheduler.lostTime().steps == 0u);
+
+    const double droppedFrom = scheduler.nextDeadline();
+    const double hitch = last + 0.250;
+    REQUIRE(scheduler.pump(hitch) == 3u);
+    const double droppedUntil = scheduler.stepDeadline(10u);
+    const LostTimeByCause afterHitch = scheduler.lostTimeByCause();
+    CHECK(afterHitch.catchUp.steps == 12u);
+    CHECK(afterHitch.catchUp.seconds == droppedUntil - droppedFrom);
+    CHECK(std::abs(afterHitch.catchUp.seconds - 12.0 * kDt) <= 1e-9);
+    CHECK(afterHitch.reanchor.steps == 0u);
+    CHECK(afterHitch.reanchor.seconds == 0.0);
+    CHECK(scheduler.lostTime().steps == afterHitch.catchUp.steps);
+    CHECK(scheduler.lostTime().seconds == afterHitch.catchUp.seconds);
+
+    const double resumeFrom = pumpSteady(scheduler, 5);
+    const double gapFrom = scheduler.nextDeadline();
+    const double resume = resumeFrom + 2.0;
+    scheduler.reanchor(resume);
+    const LostTimeByCause afterGap = scheduler.lostTimeByCause();
+    CHECK(afterGap.reanchor.steps == 119u);
+    CHECK(afterGap.reanchor.seconds == resume - gapFrom);
+    CHECK(afterGap.catchUp.steps == afterHitch.catchUp.steps);
+    CHECK(afterGap.catchUp.seconds == afterHitch.catchUp.seconds);
+    CHECK(scheduler.lostTime().steps == afterGap.catchUp.steps + afterGap.reanchor.steps);
+    CHECK(scheduler.lostTime().seconds == afterGap.catchUp.seconds + afterGap.reanchor.seconds);
+    CHECK(scheduler.lostTime().steps == 131u);
+
+    CHECK(scheduler.pump(resume) == 1u);
+    CHECK(scheduler.lostTimeByCause().catchUp.steps == 12u);
+    CHECK(scheduler.lostTimeByCause().reanchor.steps == 119u);
+}
+
+TEST_CASE("SimulationScheduler.Segments.TheRingKeepsTheDequesDeadlinesOverManySegments", "[Scheduler]")
+{
+    SimulationScheduler scheduler = makeScheduler(4u);
+    DequeSchedulerTranscription reference(SchedulerConfig{kDt, 4u}, kStart);
+    const double scales[] = {0.93, 1.07, 0.98, 1.02};
+
+    uint64_t mismatchedDeadlines = 0u;
+    int dropPumps = 0;
+    for (int pump = 0; pump < 1000; ++pump)
+    {
+        if (pump % 3 == 0)
+        {
+            scheduler.setRateScale(scales[(pump / 3) % 4]);
+            reference.setRateScale(scales[(pump / 3) % 4]);
+        }
+        const double now = reference.nextDeadline() + ((pump == 400 || pump == 800) ? 0.5 : kDt * 0.5);
+        const uint64_t lostBefore = reference.lostTime().steps;
+        INFO("pump " << pump);
+        REQUIRE(scheduler.pump(now) == reference.pump(now));
+        dropPumps += reference.lostTime().steps > lostBefore ? 1 : 0;
+        REQUIRE(scheduler.nextDeadline() == reference.nextDeadline());
+        for (uint64_t step = reference.oldestKeptStep(); step <= reference.physicsStepCount() + 10u; ++step)
+        {
+            mismatchedDeadlines += scheduler.stepDeadline(step) == reference.stepDeadline(step) ? 0u : 1u;
+        }
+    }
+    CHECK(mismatchedDeadlines == 0u);
+    REQUIRE(dropPumps == 2);
+    REQUIRE(reference.segmentsBegun() >= 300u);
+    CHECK(scheduler.physicsStepCount() == reference.physicsStepCount());
+    CHECK(scheduler.lostTime().steps == reference.lostTime().steps);
+    CHECK(scheduler.lostTime().seconds == reference.lostTime().seconds);
+
+    for (uint64_t step = reference.oldestKeptStep(); step <= reference.physicsStepCount() + 10u; ++step)
+    {
+        INFO("step " << step << " oldest kept " << reference.oldestKeptStep());
+        REQUIRE(scheduler.stepDeadline(step) == reference.stepDeadline(step));
     }
 }
 

@@ -8,7 +8,7 @@
 
 #include <string>
 
-uint64_t joltVersionIdWithCrossPlatformDeterminism();
+uint64_t joltVersionIdWithoutCrossPlatformDeterminism();
 
 using namespace joltTestRig;
 
@@ -47,8 +47,8 @@ TEST_CASE("JoltDeterminismFingerprint.StableAcrossTwoRunsOfTheSameBinary", "[Jol
 TEST_CASE("JoltDeterminismFingerprint.ChangesWhenCrossPlatformDeterminismIsToggled", "[Jolt]")
 {
     const uint64_t libraryId = JoltRuntime::libraryVersionId();
-    const uint64_t toggledId = joltVersionIdWithCrossPlatformDeterminism();
-    REQUIRE((libraryId & kCrossPlatformDeterministicBit) == 0u);
+    const uint64_t toggledId = joltVersionIdWithoutCrossPlatformDeterminism();
+    REQUIRE((libraryId & kCrossPlatformDeterministicBit) != 0u);
     CHECK((libraryId ^ toggledId) == kCrossPlatformDeterministicBit);
 
     RuntimeLease lease;
@@ -60,7 +60,7 @@ TEST_CASE("JoltDeterminismFingerprint.ChangesWhenCrossPlatformDeterminismIsToggl
     const std::string message = describeFingerprintMismatch(local, toggled);
     INFO(message);
     CHECK(contains(message, "mismatch"));
-    CHECK(contains(message, "JPH_CROSS_PLATFORM_DETERMINISTIC off locally, on remotely"));
+    CHECK(contains(message, "JPH_CROSS_PLATFORM_DETERMINISTIC on locally, off remotely"));
 }
 
 TEST_CASE("JoltDeterminismFingerprint.MismatchMessageNamesTheBuildConfiguration", "[Jolt]")

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MPL-2.0
 #if WITH_LOW_LEVEL_TESTS
 
+#include <algorithm>
 #include <cstdint>
 #include <cstring>
 #include <string>
@@ -123,8 +124,8 @@ namespace
 
     using BundleCoordinator = ServerReceptionCoordinator<FStandaloneTestHandle, BundleSim>;
 
-    // UE-free byte buffer satisfying the codec's Buffer concept — what the
-    // FInputRedundancyBundle USTRUCT supplies in production, without the engine.
+    // UE-free byte buffer satisfying the codec's Buffer concept — what og-sim's
+    // InputBundleBuffer supplies in production (SimNetServer::receiveBundle).
     struct TestBundleBuffer
     {
         std::vector<std::uint8_t> bytes;
@@ -423,17 +424,21 @@ TEST_CASE("ReceptionCoordinator publishes the tier through the sink on a change"
     const FStandaloneTestHandle wire = live(1);
     RecordingTierSink sink;
 
-    // One dwell of tier-1-band samples: the first dwell-1 produce no transition
-    // (and so no publish); the dwell-crossing sample transitions 0 -> 1 and fires
-    // the sink exactly once, with this owner's id and the new tier.
+    // One dwell of tier-1-band samples: the FIRST sample publishes the wire's
+    // first tier, 0 (og-input-latency P6-2: an owner never told runs the
+    // worst-tier fallback, not tier 0); the rest of the dwell produce no
+    // transition (and so no publish); the dwell-crossing sample transitions
+    // 0 -> 1 and fires the sink once more, with this owner's id and the new tier.
     for (int32_t t = 0; t < cfg.tierMinDwellTicks; ++t)
     {
         coord.noteRttSample(wire, /*ownerId=*/10, /*serverTick=*/t, /*rttMs=*/60.0, sink);
     }
 
-    REQUIRE(sink.calls.size() == 1);
+    REQUIRE(sink.calls.size() == 2);
     REQUIRE(sink.calls[0].id == 10);
-    REQUIRE(sink.calls[0].tier == 1);
+    REQUIRE(sink.calls[0].tier == 0);
+    REQUIRE(sink.calls[1].id == 10);
+    REQUIRE(sink.calls[1].tier == 1);
 }
 
 TEST_CASE("ReceptionCoordinator does not re-publish an unchanged tier", "[Network][ReceptionCoordinator]")
@@ -443,17 +448,17 @@ TEST_CASE("ReceptionCoordinator does not re-publish an unchanged tier", "[Networ
     const FStandaloneTestHandle wire = live(1);
     RecordingTierSink sink;
 
-    // Drive to tier 1 (one publish)...
+    // Drive to tier 1 (two publishes: the first sample's tier 0, then 1)...
     for (int32_t t = 0; t < cfg.tierMinDwellTicks; ++t)
         coord.noteRttSample(wire, /*ownerId=*/10, /*serverTick=*/t, /*rttMs=*/60.0, sink);
-    REQUIRE(sink.calls.size() == 1);
+    REQUIRE(sink.calls.size() == 2);
 
     // ...then keep sampling the SAME band. The tier stays 1, so the wire is never
     // dirtied again — the publish-only-on-change dedup (now core-owned) holds.
     for (int32_t t = 0; t < cfg.tierMinDwellTicks; ++t)
         coord.noteRttSample(wire, /*ownerId=*/10, /*serverTick=*/cfg.tierMinDwellTicks + t, /*rttMs=*/60.0, sink);
 
-    REQUIRE(sink.calls.size() == 1);   // still just the single 0 -> 1 transition
+    REQUIRE(sink.calls.size() == 2);   // still just the first tier and the single 0 -> 1 transition
 }
 
 TEST_CASE("ReceptionCoordinator publishes nothing on a negative reading", "[Network][ReceptionCoordinator]")
@@ -478,22 +483,23 @@ TEST_CASE("ReceptionCoordinator publishes once per bundle, not per slot", "[Netw
     const FStandaloneTestHandle wire = live(1);
     RecordingTierSink sink;
 
-    // Park the wire one sample short of the dwell-crossing: still tier 0, no publish.
+    // Park the wire one sample short of the dwell-crossing: still tier 0, published
+    // once, by the first sample (og-input-latency P6-2).
     for (int32_t t = 0; t < cfg.tierMinDwellTicks - 1; ++t)
         coord.noteRttSample(wire, /*ownerId=*/10, /*serverTick=*/t, /*rttMs=*/60.0, sink);
-    REQUIRE(sink.calls.empty());
+    REQUIRE(sink.calls.size() == 1);
 
     // A bundle's worth of PER-SLOT input receipts must not sample or publish — the
     // tier feed is per BUNDLE (noteRttSample), the input path is per SLOT.
     for (int32_t s = 0; s < 8; ++s)
         coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/200 + s, s);
-    REQUIRE(sink.calls.empty());
+    REQUIRE(sink.calls.size() == 1);
 
     // The ONE bundle-level sample that crosses the dwell fires the sink exactly
     // once — not once per slot of the bundle that carried the RTT.
     coord.noteRttSample(wire, /*ownerId=*/10, /*serverTick=*/cfg.tierMinDwellTicks, /*rttMs=*/60.0, sink);
-    REQUIRE(sink.calls.size() == 1);
-    REQUIRE(sink.calls[0].tier == 1);
+    REQUIRE(sink.calls.size() == 2);
+    REQUIRE(sink.calls[1].tier == 1);
 }
 
 TEST_CASE("ReceptionCoordinator publishes to both couch-coop owners sharing one wire", "[Network][ReceptionCoordinator]")
@@ -517,8 +523,8 @@ TEST_CASE("ReceptionCoordinator publishes to both couch-coop owners sharing one 
         coord.noteRttSample(wire, /*ownerId=*/11, /*serverTick=*/t, /*rttMs=*/60.0, sink);
     }
 
-    REQUIRE(sink.countFor(10) == 1);
-    REQUIRE(sink.countFor(11) == 1);
+    REQUIRE(sink.countFor(10) == 2);   // each owner's first tier (0), then 1 (og-input-latency P6-2)
+    REQUIRE(sink.countFor(11) == 2);
     REQUIRE(sink.lastTierFor(10) == 1);
     REQUIRE(sink.lastTierFor(11) == 1);
 }
@@ -1703,6 +1709,145 @@ TEST_CASE("ANewestCaptureThatIsAlsoLateIsNotParkedNorRelayed", "[Network][Recept
         if (s.find("[Park]") != std::string::npos)
         {
             REQUIRE(s.find("id=78") != std::string::npos);
+        }
+    }
+}
+
+namespace
+{
+    std::vector<std::string> releaseLines(const std::vector<std::string>& lines)
+    {
+        std::vector<std::string> out;
+        for (const std::string& line : lines)
+        {
+            if (line.rfind("[Release]", 0) == 0)
+                out.push_back(line);
+        }
+        return out;
+    }
+}
+
+TEST_CASE("ReceptionCoordinator Release lines carry the host's step time only when the host passes it (og-input-latency P5-37)",
+    "[Network][ReceptionCoordinator]")
+{
+    TimeConfig cfg;
+    const std::int32_t delay = cfg.rttTierInputDelays[kMaxConnectionTierIndex];
+    const auto parkTwo = [&](TestCoordinator& coord) {
+        const FStandaloneTestHandle wire = live(1);
+        REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/100, 1).parked);
+        REQUIRE(coord.receiveRemoteInput<MockSimA>(/*id=*/10, wire, /*slot=*/0, /*captureTick=*/101, 2).parked);
+    };
+    const std::string tick104 = "[Release] id=10 captureTick=100 releaseTick=" + std::to_string(100 + delay) + " late=0";
+    const std::string tick105 = "[Release] id=10 captureTick=101 releaseTick=" + std::to_string(101 + delay) + " late=0";
+
+    SECTION("without a step time the line is byte-identical to the line before the field existed")
+    {
+        TestCoordinator coord(cfg);
+        std::vector<std::string> logged;
+        coord.setLogger([&logged](const char* m) { logged.emplace_back(m); });
+        parkTwo(coord);
+        RecordingDeliver deliver;
+        coord.releaseDelayedInputs<MockSimA>(100 + delay, /*numSteps=*/2, std::ref(deliver));
+
+        REQUIRE(deliver.calls.size() == 2);
+        CHECK(releaseLines(logged) == std::vector<std::string>{ tick104, tick105 });
+    }
+
+    SECTION("with a step time every line of the drain ends with it, six decimals, the same value on each")
+    {
+        TestCoordinator coord(cfg);
+        std::vector<std::string> logged;
+        coord.setLogger([&logged](const char* m) { logged.emplace_back(m); });
+        parkTwo(coord);
+        RecordingDeliver deliver;
+        coord.releaseDelayedInputs<MockSimA>(100 + delay, /*numSteps=*/2, std::ref(deliver), 16777300.25);
+
+        REQUIRE(deliver.calls.size() == 2);
+        CHECK(releaseLines(logged) == std::vector<std::string>{
+            tick104 + " stepSeconds=16777300.250000", tick105 + " stepSeconds=16777300.250000" });
+    }
+
+    SECTION("the step time changes only the [Release] lines: every other line of the drain is unchanged")
+    {
+        std::vector<std::string> without;
+        std::vector<std::string> with;
+        for (std::vector<std::string>* sink : { &without, &with })
+        {
+            TestCoordinator coord(cfg);
+            coord.setLogger([sink](const char* m) { sink->emplace_back(m); });
+            parkTwo(coord);
+            RecordingDeliver deliver;
+            if (sink == &with)
+                coord.releaseDelayedInputs<MockSimA>(100 + delay, /*numSteps=*/2, std::ref(deliver), 1.0);
+            else
+                coord.releaseDelayedInputs<MockSimA>(100 + delay, /*numSteps=*/2, std::ref(deliver));
+        }
+        REQUIRE(without.size() == with.size());
+        for (std::size_t index = 0; index < without.size(); ++index)
+        {
+            if (without[index].rfind("[Release]", 0) == 0)
+                CHECK(with[index] == without[index] + " stepSeconds=1.000000");
+            else
+                CHECK(with[index] == without[index]);
+        }
+    }
+}
+
+TEST_CASE("ReceptionCoordinator ServerReceive lines carry the host's receive time only when the host passes it (og-input-latency P5-38)",
+    "[Network][ReceptionCoordinator]")
+{
+    TimeConfig cfg;
+    const FStandaloneTestHandle wire = live(1);
+    const std::string tick100 = "[ServerReceive] id=10 tick=100";
+    const std::string tick101 = "[ServerReceive] id=10 tick=101";
+    const auto receiveLines = [](const std::vector<std::string>& lines) {
+        std::vector<std::string> out;
+        for (const std::string& line : lines)
+        {
+            if (line.rfind("[ServerReceive]", 0) == 0)
+                out.push_back(line);
+        }
+        std::sort(out.begin(), out.end());
+        return out;
+    };
+
+    SECTION("without a receive time the line is byte-identical to the line before the field existed")
+    {
+        BundleCoordinator coord(cfg);
+        std::vector<std::string> logged;
+        coord.setLogger([&logged](const char* m) { logged.emplace_back(m); });
+        RecordingDeliverySink deliver;
+        coord.receiveInputBundle<BundleSim>(/*id=*/10, wire, /*slot=*/0, makeBundle({ { 100u, 42 }, { 101u, 43 } }), deliver);
+
+        CHECK(receiveLines(logged) == std::vector<std::string>{ tick100, tick101 });
+    }
+
+    SECTION("with a receive time every slot's line ends with it, six decimals, and no other line changes")
+    {
+        std::vector<std::string> without;
+        std::vector<std::string> with;
+        for (std::vector<std::string>* sink : { &without, &with })
+        {
+            BundleCoordinator coord(cfg);
+            coord.setLogger([sink](const char* m) { sink->emplace_back(m); });
+            RecordingDeliverySink deliver;
+            const TestBundleBuffer bundle = makeBundle({ { 100u, 42 }, { 101u, 43 } });
+            if (sink == &with)
+                coord.receiveInputBundle<BundleSim>(/*id=*/10, wire, /*slot=*/0, bundle, deliver, NullRemoteInputRelaySink{},
+                    16777300.25);
+            else
+                coord.receiveInputBundle<BundleSim>(/*id=*/10, wire, /*slot=*/0, bundle, deliver);
+        }
+
+        CHECK(receiveLines(with) == std::vector<std::string>{
+            tick100 + " recvSeconds=16777300.250000", tick101 + " recvSeconds=16777300.250000" });
+        REQUIRE(without.size() == with.size());
+        for (std::size_t index = 0; index < without.size(); ++index)
+        {
+            if (without[index].rfind("[ServerReceive]", 0) == 0)
+                CHECK(with[index] == without[index] + " recvSeconds=16777300.250000");
+            else
+                CHECK(with[index] == without[index]);
         }
     }
 }

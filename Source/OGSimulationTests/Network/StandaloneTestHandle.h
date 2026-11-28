@@ -15,14 +15,16 @@
 //
 // The per-connection templates this initiative builds (ConnectionTierTable in
 // T4, ServerInputDelayQueue in T5) are engine-agnostic and live in the sim
-// core, but their only PRODUCTION Address binding — FUEConnectionHandle — drags
-// in UNetConnection and the whole engine. This suite does not link
-// OGSimulationUnreal, so it supplies its own Address instead: a plain POD pair
-// of an id and an explicit liveness bit.
+// core. Their PRODUCTION Address binding is og-sim-net's
+// ogsimnet::SimNetConnectionHandle (since og-input-latency task P5-7), whose liveness
+// is read from a LivenessTable the server's connection events update. (Was
+// FUEConnectionHandle, deleted by og-input-latency task P5-9, which dragged in
+// UNetConnection and the whole engine.) This suite supplies its own Address instead:
+// a plain POD pair of an id and an explicit liveness bit.
 //
-// The explicit `aliveBit` is the point. FUEConnectionHandle's liveness is
-// decided by the engine's object lifetime and cannot be scripted from a test;
-// here a test flips a bool to stage exactly the connection-drop and
+// The explicit `aliveBit` is the point (FUEConnectionHandle's liveness, deleted with
+// it by og-input-latency task P5-9, followed the engine's object lifetime and could not
+// be scripted from a test); here a test flips a bool to stage exactly the connection-drop and
 // stale-entry-reaping scenarios T4/T5 need, deterministically and with no
 // engine present. Two handles with the same id but different aliveBit are
 // deliberately DISTINCT values, so a table cannot silently conflate a live

@@ -20,13 +20,15 @@
 #include "OGSimulation/ResimGateProbe.h"
 #include "OGSimulation/SimulationComposite.h"
 #include "OGSimulation/SimulationManager.h"
-#include "OGSimulation/SimulationStepDriver.h"
+#include "OGTickDriver/SimulationStepDriver.h"
 #include "OGSimulation/StepHooks.h"
-#include "OGSimulation/TickDriverThreadContext.h"
+#include "OGTickDriver/TickDriverThreadContext.h"
 
 #include <atomic>
+#include <chrono>
 #include <cstdint>
 #include <functional>
+#include <future>
 #include <limits>
 #include <optional>
 #include <string>
@@ -854,6 +856,186 @@ TEST_CASE("JoltTickWorldHost.Statics.SplitByThePhysicsOnlyFlags", "[JoltTickWorl
     CHECK(statics.queryable.shapes[0].stableKey == 1u);
     CHECK(statics.queryable.shapes[1].stableKey == 3u);
     CHECK(statics.physicsOnly.shapes[0].stableKey == 2u);
+}
+
+namespace
+{
+    constexpr auto kRunnerGiveUp = std::chrono::seconds(30);
+
+    JoltTickWorldHostConfig freeRunningConfig()
+    {
+        JoltTickWorldHostConfig config = configOf(/*isAuthority=*/true, /*runInline=*/false);
+        config.freeRunning = true;
+        return config;
+    }
+
+    uint32_t authorityOwnerCountOnThisThread()
+    {
+        return tickDriverThread::OwnerThreadCounts::onThisThread(tickDriverThread::kAuthorityRoleBit);
+    }
+
+    struct RunnerBuildProbes
+    {
+        bool owner = false;
+        bool freeRunning = false;
+        bool stepsInline = true;
+        bool shadowWorld = true;
+        bool mayAccess = false;
+        bool entryCheckInstalled = false;
+        uint32_t ownerCountRaisedByBuild = 0u;
+        uint32_t ownerCountRaisedAfterTeardown = 0u;
+        bool tornDownSeen = false;
+    };
+
+    template <typename RigT>
+    uint32_t differingSlotBodies(const RigT& first, const RigT& second)
+    {
+        const JoltBodyBindTable& firstTable = first.bodyAdapter->bindTable();
+        const JoltBodyBindTable& secondTable = second.bodyAdapter->bindTable();
+        const JoltWorld& firstWorld = first.host.stepWorld();
+        const JoltWorld& secondWorld = second.host.stepWorld();
+        uint32_t differing = 0u;
+        for (uint32_t slot = 0u; slot < firstWorld.simulatableSlots(); ++slot)
+        {
+            for (uint32_t index = 0u; index < firstWorld.bodiesPerSlot(); ++index)
+            {
+                const BodyId firstBody = JoltPhysicsBodyAdapter::bodyIdOf(firstWorld.slotBodyId(slot, index));
+                const BodyId secondBody = JoltPhysicsBodyAdapter::bodyIdOf(secondWorld.slotBodyId(slot, index));
+                const bool same = firstBody == secondBody && firstTable.bindingOf(firstBody) == secondTable.bindingOf(secondBody)
+                    && (!firstTable.isBound(firstBody)
+                        || firstTable.lockedRotationInertiaOf(firstBody) == secondTable.lockedRotationInertiaOf(secondBody));
+                differing += same ? 0u : 1u;
+            }
+        }
+        return differing;
+    }
+
+    template <typename DeclarationT>
+    bool sameBindings(const HostSim& first, const HostSim& second)
+    {
+        const PhysicsRuntimeBindings& a = first.getPhysicsComposite().get<DeclarationT>().bindings;
+        const PhysicsRuntimeBindings& b = second.getPhysicsComposite().get<DeclarationT>().bindings;
+        return a.ownBodyId == b.ownBodyId && a.parentBodyId == b.parentBodyId && a.shapeIds == b.shapeIds
+            && a.queryVolumeIds == b.queryVolumeIds && a.attachmentOffset == b.attachmentOffset;
+    }
+} // namespace
+
+TEST_CASE("JoltTickWorldHost.Build.AFreeRunningAuthorityBuildsOnItsRunnerWithoutAShadowWorld", "[JoltTickWorldHost]")
+{
+    const uint32_t testThreadOwnersBefore = authorityOwnerCountOnThisThread();
+    REQUIRE(testThreadOwnersBefore == 0u);
+
+    std::optional<HostRig<FakeEngine>> rig;
+    RunnerBuildProbes probes;
+    std::promise<void> built;
+    std::promise<void> tornDown;
+    std::future<void> builtSeen = built.get_future();
+    std::future<void> tornDownSeen = tornDown.get_future();
+
+    std::thread runner([&]
+    {
+        const uint32_t ownersBefore = authorityOwnerCountOnThisThread();
+        rig.emplace(freeRunningConfig());
+        const TickDriverThreadContext& context = rig->host.threadContext();
+        probes.owner = context.isOwnerThreadForRole();
+        probes.freeRunning = context.threading() == StepThreading::FreeRunning;
+        probes.stepsInline = context.stepsInline();
+        probes.shadowWorld = rig->host.hasShadowWorld();
+        probes.mayAccess = rig->host.stepWorld().callerMayAccess();
+        probes.entryCheckInstalled = context.entryCheck() != nullptr;
+        probes.ownerCountRaisedByBuild = authorityOwnerCountOnThisThread() - ownersBefore;
+        built.set_value();
+        probes.tornDownSeen = tornDownSeen.wait_for(kRunnerGiveUp) == std::future_status::ready;
+        probes.ownerCountRaisedAfterTeardown = authorityOwnerCountOnThisThread() - ownersBefore;
+    });
+
+    const bool runnerBuilt = builtSeen.wait_for(kRunnerGiveUp) == std::future_status::ready;
+    bool testThreadMayAccess = true;
+    bool testThreadIsOwner = true;
+    std::vector<std::string> lines;
+    if (runnerBuilt)
+    {
+        testThreadMayAccess = rig->host.stepWorld().callerMayAccess();
+        testThreadIsOwner = rig->host.threadContext().isOwnerThreadForRole();
+        lines = rig->texts();
+        rig.reset();
+    }
+    const uint32_t testThreadOwnersAfterTeardown = authorityOwnerCountOnThisThread();
+    tornDown.set_value();
+    runner.join();
+
+    REQUIRE(runnerBuilt);
+    CHECK(probes.owner);
+    CHECK(probes.freeRunning);
+    CHECK_FALSE(probes.stepsInline);
+    CHECK_FALSE(probes.shadowWorld);
+    CHECK(probes.mayAccess);
+    CHECK(probes.entryCheckInstalled);
+    CHECK_FALSE(testThreadMayAccess);
+    CHECK_FALSE(testThreadIsOwner);
+    CHECK(lines == std::vector<std::string>{
+        "[SimHost.Mode] role=Authority stepping=runner viz=none",
+        "[SimHost.World] slots=8 bodiesPerSlot=2 ringDepthTicks=0 statics=2 physicsOnlyStatics=1 staticBodies=1 physicsOnlyBodies=1",
+        "[SimHost.Contacts] installed=0 stepListener=null shadowListener=none reserved=0",
+    });
+    CHECK(probes.ownerCountRaisedByBuild == 1u);
+    CHECK(probes.tornDownSeen);
+    CHECK(probes.ownerCountRaisedAfterTeardown == 1u);
+    CHECK(testThreadOwnersAfterTeardown == testThreadOwnersBefore);
+}
+
+TEST_CASE("JoltTickWorldHost.Bind.AFreeRunningHostBindsOnTheRunnerUnderTheEntryCheck", "[JoltTickWorldHost]")
+{
+    std::optional<HostRig<FakeEngine>> rig;
+    HostSim first;
+    HostSim second;
+    std::optional<uint32_t> firstSlot;
+    std::optional<uint32_t> secondSlot;
+    std::vector<uint32_t> published;
+    bool runnerMayAccess = false;
+    bool runnerEntryCheckInstalled = false;
+    std::thread runner([&]
+    {
+        rig.emplace(freeRunningConfig());
+        runnerEntryCheckInstalled = rig->host.threadContext().entryCheck() != nullptr;
+        PublishRecorder publish;
+        firstSlot = rig->host.acquire(21u, "BP_Brawler_C_0", true, std::nullopt, std::ref(publish));
+        if (firstSlot.has_value())
+            rig->host.bind(*firstSlot, 4u, first, HostStaticData{}, [](double) {});
+        secondSlot = rig->host.acquire(22u, "BP_Brawler_C_1", true, std::nullopt, std::ref(publish));
+        if (secondSlot.has_value())
+            rig->host.bind(*secondSlot, 5u, second, HostStaticData{}, [](double) {});
+        runnerMayAccess = rig->host.stepWorld().callerMayAccess();
+        published = publish.published;
+    });
+    runner.join();
+
+    REQUIRE(rig.has_value());
+    CHECK(runnerEntryCheckInstalled);
+    CHECK(runnerMayAccess);
+    CHECK_FALSE(rig->host.stepWorld().callerMayAccess());
+
+    HostRig<FakeEngine> inlineRig(configOf(/*isAuthority=*/true, /*runInline=*/false));
+    HostSim inlineFirst;
+    HostSim inlineSecond;
+    bindAt(inlineRig, inlineFirst, 21u, "BP_Brawler_C_0", 0u, 4u, true);
+    bindAt(inlineRig, inlineSecond, 22u, "BP_Brawler_C_1", 1u, 5u, true);
+    CHECK(rig->host.stepWorld().callerMayAccess());
+
+    REQUIRE(firstSlot == std::optional<uint32_t>(0u));
+    REQUIRE(secondSlot == std::optional<uint32_t>(1u));
+    CHECK(published == std::vector<uint32_t>{ 0u, 1u });
+    CHECK(differingSlotBodies(*rig, inlineRig) == 0u);
+    CHECK(joltTickWorldHost::boundBodyCount(rig->host.stepWorld(), rig->bodyAdapter->bindTable())
+        == joltTickWorldHost::boundBodyCount(inlineRig.host.stepWorld(), inlineRig.bodyAdapter->bindTable()));
+    CHECK(joltTickWorldHost::boundBodyCount(rig->host.stepWorld(), rig->bodyAdapter->bindTable()) == 4u);
+    CHECK(sameBindings<HostRadialDeclaration>(first, inlineFirst));
+    CHECK(sameBindings<HostCapsuleDeclaration>(first, inlineFirst));
+    CHECK(sameBindings<HostRadialDeclaration>(second, inlineSecond));
+    CHECK(sameBindings<HostCapsuleDeclaration>(second, inlineSecond));
+    CHECK(rig->textsStartingWith("[SimHost.Bind]") == inlineRig.textsStartingWith("[SimHost.Bind]"));
+    CHECK(rig->textsStartingWith("[SimHost.Slot]") == inlineRig.textsStartingWith("[SimHost.Slot]"));
+    CHECK(rig->textsStartingWith("[SimHost.Bind]").size() == 2u);
 }
 
 #endif // WITH_LOW_LEVEL_TESTS

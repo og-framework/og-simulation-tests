@@ -3,6 +3,9 @@
 
 #pragma once
 
+#include <algorithm>
+#include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -14,17 +17,18 @@
 #include <string>
 #include <thread>
 #include <utility>
+#include <variant>
 #include <vector>
 
 #include "glm/gtc/quaternion.hpp"
 #include "glm/vec3.hpp"
 #include "OGSimulation/QueryGeometry.h"
-#include "OGSimulation/SimulationTickBackend.h"
+#include "OGTickDriver/SimulationTickBackend.h"
 #include "OGSimulation/StaticGeometry.h"
 #include "OGSimulation/StepHooks.h"
-#include "OGSimulation/TickDriverConcepts.h"
-#include "OGSimulation/TickDriverLog.h"
-#include "OGSimulation/TickDriverThreadContext.h"
+#include "OGTickDriver/TickDriverConcepts.h"
+#include "OGTickDriver/TickDriverLog.h"
+#include "OGTickDriver/TickDriverThreadContext.h"
 #include "../StepDriver/StepDriverTestSupport.h"
 
 namespace tickDriverFakes
@@ -261,6 +265,126 @@ namespace tickDriverFakes
     using FakeEngine = BasicFakeEngine<true>;
     using FakeEngineNoDiagnostics = BasicFakeEngine<false>;
 
+    namespace realClock
+    {
+        using Clock = std::chrono::steady_clock;
+
+        inline Clock::time_point origin()
+        {
+            static const Clock::time_point start = Clock::now();
+            return start;
+        }
+
+        inline double seconds() { return std::chrono::duration<double>(Clock::now() - origin()).count(); }
+
+        inline Clock::time_point at(double whenSeconds)
+        {
+            return origin() + std::chrono::ceil<Clock::duration>(std::chrono::duration<double>(whenSeconds)) + Clock::duration(1);
+        }
+    } // namespace realClock
+
+    class RealClockFakeEngine
+    {
+    public:
+        static constexpr bool kHostDiagnostics = true;
+        using Handle = std::shared_ptr<FakeTask>;
+        using Completion = FakeCompletion;
+
+        RealClockFakeEngine() = default;
+        RealClockFakeEngine(const RealClockFakeEngine&) = delete;
+        RealClockFakeEngine& operator=(const RealClockFakeEngine&) = delete;
+
+        double nowSeconds() const { return realClock::seconds(); }
+        uint64_t frameNumber() const { return m_frame.load(); }
+
+        void advanceFrame() { m_frame.fetch_add(1u); }
+
+        bool logEnabled(HostLogLevel level) const
+        {
+            return static_cast<int>(level) >= static_cast<int>(minimumLevel.load());
+        }
+
+        void log(HostLogLevel level, const char* line)
+        {
+            const std::lock_guard<std::mutex> guard(m_linesMutex);
+            m_lines.push_back(LoggedLine{ level, line });
+        }
+
+        std::vector<LoggedLine> snapshotLines() const
+        {
+            const std::lock_guard<std::mutex> guard(m_linesMutex);
+            return m_lines;
+        }
+
+        bool isPending(const Handle&) const { return false; }
+
+        template <typename F>
+        Handle dispatchAfter(const Handle&, F&& work)
+        {
+            std::forward<F>(work)();
+            Handle task = std::make_shared<FakeTask>();
+            task->id = inlineDispatches.fetch_add(1u) + 1u;
+            task->done = true;
+            return task;
+        }
+
+        void waitFor(const Handle&) {}
+
+        template <typename F>
+        bool deferUntil(Completion&, const Handle&, F&&)
+        {
+            return false;
+        }
+
+        std::atomic<HostLogLevel> minimumLevel{ HostLogLevel::Verbose };
+        std::atomic<uint64_t> inlineDispatches{ 0u };
+
+    private:
+        std::atomic<uint64_t> m_frame{ 0u };
+        mutable std::mutex m_linesMutex;
+        std::vector<LoggedLine> m_lines;
+    };
+
+    template <bool HostDiagnostics = true>
+    class BasicFakeRunnerHost
+    {
+    public:
+        explicit BasicFakeRunnerHost(BasicFakeEngine<HostDiagnostics>& engine, Events* events = nullptr)
+            : m_engine(&engine)
+            , m_events(events)
+        {
+        }
+
+        void sleepUntil(double untilSeconds)
+        {
+            if (m_events != nullptr)
+                m_events->push_back("sleepUntil");
+            sleeps.push_back(untilSeconds);
+            m_engine->now = std::max(m_engine->now, untilSeconds);
+        }
+
+        std::vector<double> sleeps;
+
+    private:
+        BasicFakeEngine<HostDiagnostics>* m_engine;
+        Events* m_events;
+    };
+
+    using FakeRunnerHost = BasicFakeRunnerHost<true>;
+    using FakeRunnerHostNoDiagnostics = BasicFakeRunnerHost<false>;
+
+    class RealRunnerHost
+    {
+    public:
+        void sleepUntil(double untilSeconds)
+        {
+            sleepCalls.fetch_add(1u);
+            std::this_thread::sleep_until(realClock::at(untilSeconds));
+        }
+
+        std::atomic<uint32_t> sleepCalls{ 0u };
+    };
+
     struct FakeManager
     {
     };
@@ -349,6 +473,284 @@ namespace tickDriverFakes
 
     using RecordingGame = BasicRecordingGame<>;
 
+    namespace idleScript
+    {
+        struct HonourDeadline
+        {
+        };
+
+        struct Wakes
+        {
+            std::vector<double> times;
+        };
+
+        struct ActivityAt
+        {
+            std::vector<double> times;
+        };
+
+        struct Unavailable
+        {
+        };
+
+        struct EarlyDeadline
+        {
+        };
+
+        struct RealDeadline
+        {
+        };
+
+        struct RealSpin
+        {
+        };
+
+        inline constexpr double kOnePassSeconds = 50e-6;
+        inline constexpr double kEarlyDeadlineSeconds = 1e-6;
+    } // namespace idleScript
+
+    using IdleScript = std::variant<idleScript::HonourDeadline, idleScript::Wakes, idleScript::ActivityAt, idleScript::Unavailable,
+        idleScript::EarlyDeadline, idleScript::RealDeadline, idleScript::RealSpin>;
+
+    struct IdleCall
+    {
+        double deadline = 0.0;
+        double now = 0.0;
+        double returnedAt = 0.0;
+        IdleWake wake = IdleWake::Deadline;
+    };
+
+    inline const char* idleWakeName(IdleWake wake)
+    {
+        switch (wake)
+        {
+        case IdleWake::Deadline:
+            return "Deadline";
+        case IdleWake::Activity:
+            return "Activity";
+        case IdleWake::Unavailable:
+            return "Unavailable";
+        }
+        return "?";
+    }
+
+    template <bool HostDiagnostics = true, typename ManagerT = FakeManager, typename StorageT = FakeStorage,
+        typename RenderSnapshotT = FakeRenderSnapshot>
+    class BasicRecordingIdleGame : public BasicRecordingGame<ManagerT, StorageT, RenderSnapshotT>
+    {
+        using Base = BasicRecordingGame<ManagerT, StorageT, RenderSnapshotT>;
+
+    public:
+        using Manager = ManagerT;
+        using Storage = StorageT;
+        using RenderSnapshot = RenderSnapshotT;
+        using Engine = BasicFakeEngine<HostDiagnostics>;
+
+        BasicRecordingIdleGame(Events& events, Manager& gameManager, Storage& gameStorage, Engine& clock,
+            IdleScript script = idleScript::HonourDeadline{})
+            : Base(events, gameManager, gameStorage)
+            , m_events(&events)
+            , m_engine(&clock)
+            , m_script(std::move(script))
+        {
+        }
+
+        BasicRecordingIdleGame(Events& events, Manager& gameManager, Storage& gameStorage, IdleScript script)
+            : Base(events, gameManager, gameStorage)
+            , m_events(&events)
+            , m_engine(nullptr)
+            , m_script(std::move(script))
+        {
+        }
+
+        void setScript(IdleScript script)
+        {
+            m_script = std::move(script);
+            m_cursor = 0u;
+        }
+
+        void setStopAfterSteps(std::atomic<bool>& stop, uint32_t steps)
+        {
+            OG_CHECK(steps > 0u, "BasicRecordingIdleGame::setStopAfterSteps: the stop is set after at least one onStepEnded");
+            m_stop = &stop;
+            m_stopAfterSteps = steps;
+        }
+
+        void beforePump(double hostNowSeconds, TickRateDoor& rate)
+        {
+            Base::beforePump(hostNowSeconds, rate);
+            if (beforePumpHook)
+                beforePumpHook();
+        }
+
+        void onStepEnded()
+        {
+            Base::onStepEnded();
+            const uint32_t ended = stepsEnded.fetch_add(1u) + 1u;
+            if (m_stop != nullptr && ended >= m_stopAfterSteps)
+                m_stop->store(true);
+        }
+
+        IdleWake idleUntil(double deadline)
+        {
+            IdleCall call;
+            call.deadline = deadline;
+            call.now = clockNow();
+            call.wake = follow(deadline);
+            call.returnedAt = clockNow();
+            idleCalls.push_back(call);
+            m_events->push_back(std::string("idleUntil:") + idleWakeName(call.wake));
+            return call.wake;
+        }
+
+        void wake()
+        {
+            {
+                const std::lock_guard<std::mutex> guard(m_wakeMutex);
+                m_wakeRequested = true;
+            }
+            m_wakeChanged.notify_all();
+        }
+
+        std::function<void()> beforePumpHook;
+        std::vector<IdleCall> idleCalls;
+        std::atomic<uint32_t> stepsEnded{ 0u };
+        uint32_t scriptExhaustedCalls = 0u;
+
+    private:
+        bool isRealScript() const
+        {
+            return std::holds_alternative<idleScript::RealDeadline>(m_script) || std::holds_alternative<idleScript::RealSpin>(m_script);
+        }
+
+        double clockNow() const
+        {
+            if (isRealScript())
+                return realClock::seconds();
+            OG_CHECK(m_engine != nullptr,
+                "BasicRecordingIdleGame: a virtual-time idle script advances the BasicFakeEngine it was constructed over");
+            return m_engine->now;
+        }
+
+        IdleWake honourOrActivity(double deadline, const std::vector<double>* activities)
+        {
+            const double now = m_engine->now;
+            const double end = deadline > now ? deadline : now + idleScript::kOnePassSeconds;
+            if (activities != nullptr && m_cursor < activities->size() && (*activities)[m_cursor] < end)
+            {
+                m_engine->now = std::max(now, (*activities)[m_cursor]);
+                ++m_cursor;
+                return IdleWake::Activity;
+            }
+            m_engine->now = end;
+            return IdleWake::Deadline;
+        }
+
+        IdleWake follow(double deadline)
+        {
+            if (std::holds_alternative<idleScript::HonourDeadline>(m_script))
+                return honourOrActivity(deadline, nullptr);
+            if (const idleScript::Wakes* wakes = std::get_if<idleScript::Wakes>(&m_script))
+            {
+                if (m_cursor >= wakes->times.size())
+                {
+                    ++scriptExhaustedCalls;
+                    return honourOrActivity(deadline, nullptr);
+                }
+                m_engine->now = std::max(m_engine->now, wakes->times[m_cursor]);
+                ++m_cursor;
+                return m_engine->now < deadline ? IdleWake::Activity : IdleWake::Deadline;
+            }
+            if (const idleScript::ActivityAt* activity = std::get_if<idleScript::ActivityAt>(&m_script))
+                return honourOrActivity(deadline, &activity->times);
+            if (std::holds_alternative<idleScript::Unavailable>(m_script))
+                return IdleWake::Unavailable;
+            if (std::holds_alternative<idleScript::EarlyDeadline>(m_script))
+            {
+                m_engine->now += idleScript::kEarlyDeadlineSeconds;
+                return IdleWake::Deadline;
+            }
+            if (std::holds_alternative<idleScript::RealDeadline>(m_script))
+            {
+                std::unique_lock<std::mutex> lock(m_wakeMutex);
+                const bool woken = m_wakeChanged.wait_until(lock, realClock::at(deadline), [this] { return m_wakeRequested; });
+                m_wakeRequested = false;
+                return woken ? IdleWake::Activity : IdleWake::Deadline;
+            }
+            while (realClock::seconds() < deadline)
+            {
+            }
+            return IdleWake::Deadline;
+        }
+
+        Events* m_events;
+        Engine* m_engine;
+        IdleScript m_script;
+        size_t m_cursor = 0u;
+        std::atomic<bool>* m_stop = nullptr;
+        uint32_t m_stopAfterSteps = 0u;
+        std::mutex m_wakeMutex;
+        std::condition_variable m_wakeChanged;
+        bool m_wakeRequested = false;
+    };
+
+    using RecordingIdleGame = BasicRecordingIdleGame<true>;
+    using RecordingIdleGameNoDiagnostics = BasicRecordingIdleGame<false>;
+
+    template <typename GameT>
+    class BasicSamplingGame : public GameT
+    {
+    public:
+        template <typename... ArgsT>
+        explicit BasicSamplingGame(Events& events, ArgsT&&... args)
+            : GameT(events, std::forward<ArgsT>(args)...)
+            , m_sampleEvents(&events)
+        {
+        }
+
+        void sampleInput()
+        {
+            m_sampleEvents->push_back("sampleInput");
+            ++sampleInputCalls;
+        }
+
+        uint32_t sampleInputCalls = 0u;
+
+    private:
+        Events* m_sampleEvents;
+    };
+
+    using SamplingGame = BasicSamplingGame<RecordingGame>;
+    using SamplingIdleGame = BasicSamplingGame<RecordingIdleGame>;
+
+    template <typename GameT>
+    class BasicReceivingGame : public GameT
+    {
+    public:
+        template <typename... ArgsT>
+        explicit BasicReceivingGame(Events& events, ArgsT&&... args)
+            : GameT(events, std::forward<ArgsT>(args)...)
+            , m_receiveEvents(&events)
+        {
+        }
+
+        void receiveForStep()
+        {
+            m_receiveEvents->push_back("receiveForStep");
+            ++receiveForStepCalls;
+            if (onReceive)
+                onReceive();
+        }
+
+        std::function<void()> onReceive;
+        uint32_t receiveForStepCalls = 0u;
+
+    private:
+        Events* m_receiveEvents;
+    };
+
+    using ReceivingGame = BasicReceivingGame<RecordingGame>;
+
     class FakePresenter
     {
     public:
@@ -428,7 +830,27 @@ namespace tickDriverFakes
     {
         bool isAuthority = false;
         bool runInline = false;
+        std::optional<StepThreading> threading;
+
+        StepThreading resolvedThreading() const
+        {
+            return threading.value_or(isAuthority || runInline ? StepThreading::Inline : StepThreading::FrameBounded);
+        }
     };
+
+    inline const char* steppingWord(StepThreading threading)
+    {
+        switch (threading)
+        {
+        case StepThreading::Inline:
+            return "inline";
+        case StepThreading::FrameBounded:
+            return "worker";
+        case StepThreading::FreeRunning:
+            return "runner";
+        }
+        return "?";
+    }
 
     struct ConfigureAtBuild
     {
@@ -472,6 +894,13 @@ namespace tickDriverFakes
             m_context.template configure<HostDiagnostics>(roleBit, stepsInline);
         }
 
+        BasicFakeWorldHost(Events& events, uint8_t roleBit, StepThreading threading, uint32_t ringDepthTicks = 8u)
+            : m_events(&events)
+            , m_world(ringDepthTicks, events)
+        {
+            m_context.template configure<HostDiagnostics>(roleBit, threading);
+        }
+
         BasicFakeWorldHost(Events& events, ConfigureAtBuild, uint32_t ringDepthTicks = 8u)
             : m_events(&events)
             , m_world(ringDepthTicks, events)
@@ -482,11 +911,11 @@ namespace tickDriverFakes
             const StaticWorldDescription& physicsOnlyStatics, std::optional<FakeAdapter>& bodyAdapter,
             std::optional<FakeAdapter>& queryAdapter)
         {
-            const bool stepsInline = config.isAuthority || config.runInline;
+            const StepThreading threading = config.resolvedThreading();
             m_context.template configure<HostDiagnostics>(
-                config.isAuthority ? tickDriverThread::kAuthorityRoleBit : tickDriverThread::kClientRoleBit, stepsInline);
-            m_events->push_back(std::string("configure:") + (config.isAuthority ? "authority" : "client")
-                + (stepsInline ? ":inline" : ":worker"));
+                config.isAuthority ? tickDriverThread::kAuthorityRoleBit : tickDriverThread::kClientRoleBit, threading);
+            m_events->push_back(std::string("configure:") + (config.isAuthority ? "authority" : "client") + ":"
+                + steppingWord(threading));
             builtStatics.emplace_back(queryableStatics.shapes.size(), physicsOnlyStatics.shapes.size());
             bodyAdapter.emplace(*m_events, "body", m_context);
             queryAdapter.emplace(*m_events, "query", m_context);
@@ -706,4 +1135,20 @@ namespace tickDriverFakes
         "FakeWorldHostNoDiagnostics must model TickBackendWorldHost");
     static_assert(TickBackendWorldBuild<FakeWorldHost, std::optional<FakeAdapter>, std::optional<FakeAdapter>>,
         "FakeWorldHost's build must model TickBackendWorldBuild over its two fake adapters");
+    static_assert(TickDriverEngine<RealClockFakeEngine>, "RealClockFakeEngine must model TickDriverEngine");
+    static_assert(TickDriverRunnerHost<FakeRunnerHost>, "FakeRunnerHost must model TickDriverRunnerHost");
+    static_assert(TickDriverRunnerHost<FakeRunnerHostNoDiagnostics>, "FakeRunnerHostNoDiagnostics must model TickDriverRunnerHost");
+    static_assert(TickDriverRunnerHost<RealRunnerHost>, "RealRunnerHost must model TickDriverRunnerHost");
+    static_assert(TickDriverIdleGame<RecordingIdleGame>, "RecordingIdleGame must model TickDriverIdleGame");
+    static_assert(TickDriverIdleGame<RecordingIdleGameNoDiagnostics>, "RecordingIdleGameNoDiagnostics must model TickDriverIdleGame");
+    static_assert(TickDriverSampleGame<SamplingGame>, "SamplingGame must model TickDriverSampleGame");
+    static_assert(TickDriverSampleGame<SamplingIdleGame> && TickDriverIdleGame<SamplingIdleGame>,
+        "SamplingIdleGame must model both TickDriverSampleGame and TickDriverIdleGame");
+    static_assert(!TickDriverSampleGame<RecordingGame> && !TickDriverSampleGame<RecordingIdleGame>,
+        "RecordingGame and RecordingIdleGame must not sample, so every existing trace keeps its events");
+    static_assert(TickDriverReceiveGame<ReceivingGame> && !TickDriverSampleGame<ReceivingGame>,
+        "ReceivingGame must model TickDriverReceiveGame and nothing else the plain game does not");
+    static_assert(!TickDriverReceiveGame<RecordingGame> && !TickDriverReceiveGame<RecordingIdleGame>
+            && !TickDriverReceiveGame<SamplingGame>,
+        "RecordingGame, RecordingIdleGame and SamplingGame must not receive, so every existing trace keeps its events");
 } // namespace tickDriverFakes

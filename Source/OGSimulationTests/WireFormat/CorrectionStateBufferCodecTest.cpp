@@ -53,14 +53,12 @@
 //     not. It was missed by that task's own tree-wide sweep because the sweep did
 //     not reach the header of the file it was editing two hunks below.
 //
-// These run against the ENGINE-AGNOSTIC codec, which is the same code the UE
-// USTRUCT (FSimulationStateSyncBuffer) delegates to — a std::vector-backed
-// buffer here versus its TArray-backed one, per the codec's BUFFER CONCEPT. The
-// USTRUCT's UE-only half (NetSerialize's version byte + watermark trim, and the
-// OnRep refusal path that compares the byte against kWireFormatVersion) is not
-// reachable from this target and follows the existing deferral for
-// engine-coupled wire tests (WireFormat_Bundle.cpp / docs/low-level-tests.md
-// "Future: testing UE-coupled code").
+// These run against the ENGINE-AGNOSTIC codec, which is the same code og-sim's
+// CorrectionStateBuffer (Network/SimPayloadBuffers.h) delegates to — a std::vector-backed
+// buffer here versus its fixed array, per the codec's BUFFER CONCEPT; that buffer is
+// tested in SimPayloadBuffersTest.cpp. (Was the UE USTRUCT FSimulationStateSyncBuffer,
+// deleted by og-input-latency task P5-9; its UE-only half, NetSerialize's version byte +
+// watermark trim and the OnRep refusal path, was never reachable from this target.)
 //////////////////////////////////////////////////////////////////////////////
 
 namespace
@@ -101,7 +99,7 @@ namespace
     using CorrTestState = SimulationComposite<CorrTestPosition, CorrTestHealth>;
 
     // UE-free byte buffer satisfying the codec's BUFFER CONCEPT — the same two
-    // methods FSimulationStateSyncBuffer exposes over its TArray<uint8>. Fixed
+    // methods og-sim's CorrectionStateBuffer exposes over its fixed array. Fixed
     // capacity, like the real one (kBufferBytes), so there is no grow path here
     // either.
     struct CorrTestBuffer

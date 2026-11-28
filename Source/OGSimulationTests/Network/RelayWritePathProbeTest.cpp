@@ -32,10 +32,6 @@
 //      an off-by-one in either `runs` or `writes` silently moves the verdict. It is
 //      asserted here on hand-computed distributions, not on round numbers.
 //
-//   4. QueuedBits IS NEGATIVE WHEN THERE IS HEADROOM. It is a debt counter, so
-//      `min` is the most headroom and `max` is the closest to saturation. Getting
-//      that backwards would report a healthy connection as a saturated one.
-//
 // Pure telemetry: nothing here feeds back into any simulated value.
 //////////////////////////////////////////////////////////////////////////////
 
@@ -530,112 +526,6 @@ TEST_CASE("RelayWriteProbe: a burst longer than the stage still loses its oldest
     REQUIRE(summary.observableX1000 == 692u);      // 9/13
     REQUIRE(summary.observableX1000 < 990u);       // the gate would FAIL here
     REQUIRE(summary.replaceLatestObservableX1000 == 153u);   // 2/13
-}
-
-// ---------------------------------------------------------------------------
-// ConnectionBudgetProbe
-// ---------------------------------------------------------------------------
-
-TEST_CASE("ConnectionBudgetProbe: occupancy is measured against the negotiated net speed",
-          "[Network][RelayWriteProbe]")
-{
-    // The shipped configuration, with the numbers the engine derivation predicts:
-    //   CurrentNetSpeed  = 250000 B/s (MaxClientRate clamp)
-    //   DesiredTickRate  = 60 Hz      (NetServerMaxTickRate on a dedicated server)
-    //   allowance        = 4166 B/tick
-    // and a modelled 3-character round of 1414 B/tick -> 33.9 % occupancy.
-    ConnectionBudgetProbe probe(/*windowSamples=*/4u);
-    ConnectionBudgetWindowSummary summary;
-
-    std::uint64_t bytes   = 0u;
-    std::uint64_t packets = 0u;
-    std::uint64_t micros  = 0u;
-    bool closed = false;
-
-    for (std::uint32_t i = 0u; i < 5u; ++i)
-    {
-        closed = probe.noteSample(/*connectionId=*/7u,
-                                  /*netSpeedBps=*/250000,
-                                  /*queuedBits=*/-60000,
-                                  bytes, packets, /*outTotalPacketsLost=*/0u,
-                                  /*tickRateHz=*/60u, micros, summary);
-        bytes   += 1414u;
-        packets += 2u;
-        micros  += 16667u;
-    }
-
-    REQUIRE(closed);
-    REQUIRE(summary.connectionId == 7u);
-    REQUIRE(summary.samples == 4u);
-    REQUIRE(summary.netSpeedBps == 250000);
-    REQUIRE(summary.allowanceBytesPerTick == 4166u);
-    REQUIRE(summary.outBytes == 4u * 1414u);
-    REQUIRE(summary.bytesPerSample == 1414u);
-    REQUIRE(summary.bytesPerPacket == 707u);
-    REQUIRE(summary.occupancyPctX10 == 339u);      // 33.9 %
-    REQUIRE(summary.notReadySamples == 0u);
-}
-
-TEST_CASE("ConnectionBudgetProbe: QueuedBits is a debt counter, so min is the MOST headroom",
-          "[Network][RelayWriteProbe]")
-{
-    ConnectionBudgetProbe probe(/*windowSamples=*/3u);
-    ConnectionBudgetWindowSummary summary;
-
-    const std::int32_t queued[4] = { -66000, -30000, 500, -30000 };
-
-    bool closed = false;
-    for (std::uint32_t i = 0u; i < 4u; ++i)
-    {
-        closed = probe.noteSample(/*connectionId=*/1u, /*netSpeedBps=*/250000,
-                                  queued[i], /*outTotalBytes=*/0u,
-                                  /*outTotalPackets=*/0u, /*outTotalPacketsLost=*/0u,
-                                  /*tickRateHz=*/60u, /*nowMicros=*/i * 16667u,
-                                  summary);
-    }
-
-    REQUIRE(closed);
-    // The seeding sample is not measured, so the window covers queued[1..3].
-    REQUIRE(summary.samples == 3u);
-    REQUIRE(summary.queuedBitsMin == -30000);
-    REQUIRE(summary.queuedBitsMax == 500);
-    // One sample at or above zero: that is one frame on which IsNetReady() was
-    // false and Iris wrote NOTHING. A non-zero count here is the send-path
-    // deferral candidate's evidence.
-    REQUIRE(summary.notReadySamples == 1u);
-}
-
-TEST_CASE("ConnectionBudgetProbe: outgoing packet loss is reported as an ack-derived delta",
-          "[Network][RelayWriteProbe]")
-{
-    ConnectionBudgetProbe probe(/*windowSamples=*/2u);
-    ConnectionBudgetWindowSummary summary;
-
-    REQUIRE_FALSE(probe.noteSample(3u, 250000, -60000, 1000u, 10u, 5u, 60u, 0u, summary));
-    REQUIRE_FALSE(probe.noteSample(3u, 250000, -60000, 2000u, 20u, 6u, 60u, 16667u, summary));
-    REQUIRE(probe.noteSample(3u, 250000, -60000, 3000u, 30u, 8u, 60u, 33334u, summary));
-
-    REQUIRE(summary.outBytes == 2000u);
-    REQUIRE(summary.outPackets == 20u);
-    REQUIRE(summary.outPacketsLost == 3u);   // 8 - 5, measured not configured
-    REQUIRE(summary.elapsedMs == 33u);
-}
-
-TEST_CASE("ConnectionBudgetProbe: a reconnect re-anchors instead of reporting a huge delta",
-          "[Network][RelayWriteProbe]")
-{
-    ConnectionBudgetProbe probe(/*windowSamples=*/2u);
-    ConnectionBudgetWindowSummary summary;
-
-    REQUIRE_FALSE(probe.noteSample(9u, 250000, -60000, 5000u, 50u, 0u, 60u, 0u, summary));
-    // Counters go BACKWARDS — a new UNetConnection on the same id. Differencing
-    // would underflow into a multi-gigabyte "delta" and poison the window.
-    REQUIRE_FALSE(probe.noteSample(9u, 250000, -60000, 10u, 1u, 0u, 60u, 16667u, summary));
-    REQUIRE_FALSE(probe.noteSample(9u, 250000, -60000, 110u, 2u, 0u, 60u, 33334u, summary));
-    REQUIRE(probe.noteSample(9u, 250000, -60000, 210u, 3u, 0u, 60u, 50001u, summary));
-
-    REQUIRE(summary.outBytes == 200u);
-    REQUIRE(summary.outPackets == 2u);
 }
 
 #endif // WITH_LOW_LEVEL_TESTS

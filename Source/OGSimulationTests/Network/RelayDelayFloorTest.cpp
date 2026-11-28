@@ -40,10 +40,13 @@
 //      report a zero delay delta, which is correct: felt delay did not change, so
 //      there is no prediction-stall debt.
 //
-// WHAT IT DELIBERATELY DOES NOT COVER. The UE transport — the replicated uint8
-// on ASimulationTimingRelay, its OnRep, the latch/replay, and the composition
-// root's GConfig read — is engine surface this suite links none of (there is no
-// engine-coupled LLT target; see docs/low-level-tests.md). Those are PIE-gated.
+// WHAT IT DELIBERATELY DOES NOT COVER. The transport — og-sim-net's RelayFloor
+// message with its client-side replay, the UE session's intake
+// (UESimulationSession::onRelayDelayFloorReceived) and the session's GConfig read —
+// sits above the contract these cases drive; its UE half is engine surface this suite
+// links none of (there is no engine-coupled LLT target; see docs/low-level-tests.md)
+// and is PIE-gated. (Was a replicated uint8 on ASimulationTimingRelay with its OnRep
+// and latch/replay, deleted by og-input-latency task P5-9.)
 // What is testable here is the contract sitting UNDER that transport, plus the
 // clamp function both intake points call.
 //
@@ -435,7 +438,8 @@ TEST_CASE("RelayDelayFloor: clampRelayDelayFloorTicks is the shared intake guard
     REQUIRE(clampRelayDelayFloorTicks(-1000, cfg) == 0);
 
     // BOTH INTAKE POINTS CALL EXACTLY THIS. The ini override at the composition
-    // root and the client's floor OnRep are UE-side (no engine-coupled LLT target
+    // root and the client's floor arrival (og-sim-net's RelayFloor message, into
+    // UESimulationSession::onRelayDelayFloorReceived) are UE-side (no engine-coupled LLT target
     // exists to drive them), but neither owns a private rule — they hand their
     // value to this function and then to
     // SimulationManager::setRelayDelayFloorTicks, which calls it again.

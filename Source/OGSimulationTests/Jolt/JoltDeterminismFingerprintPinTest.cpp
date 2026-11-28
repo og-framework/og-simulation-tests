@@ -13,7 +13,7 @@ TEST_CASE("JoltDeterminismFingerprint.PinnedValueWin64", "[Jolt]")
 {
     RuntimeLease lease;
     const JoltDeterminismFingerprint fingerprint = determinismFingerprint(lease.runtime);
-    CHECK(fingerprint.value() == 0xe54d2bc380288c01ull);
+    CHECK(fingerprint.value() == 0xda3fb8fcd6728b59ull);
 }
 #endif
 

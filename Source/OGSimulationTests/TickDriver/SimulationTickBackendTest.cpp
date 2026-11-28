@@ -2,13 +2,16 @@
 #if WITH_LOW_LEVEL_TESTS
 
 #include <algorithm>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <optional>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -23,14 +26,14 @@
 #include "OGSimulation/SimulationComposite.h"
 #include "OGSimulation/SimulationManager.h"
 #include "OGSimulation/SimulationObjectStorage.h"
-#include "OGSimulation/SimulationTickBackend.h"
-#include "OGSimulation/SimulationTickDriver.h"
+#include "OGTickDriver/SimulationTickBackend.h"
+#include "OGTickDriver/SimulationTickDriver.h"
 #include "OGSimulation/SimulationTimeContext.h"
 #include "OGSimulation/StaticGeometry.h"
-#include "OGSimulation/TickDriverConcepts.h"
-#include "OGSimulation/TickDriverPresenter.h"
-#include "OGSimulation/TickDriverThreadContext.h"
-#include "OGSimulation/TickDriverWindow.h"
+#include "OGTickDriver/TickDriverConcepts.h"
+#include "OGTickDriver/TickDriverPresenter.h"
+#include "OGTickDriver/TickDriverThreadContext.h"
+#include "OGTickDriver/TickDriverWindow.h"
 #include "TickDriverFakes.h"
 
 namespace simulationTickBackendTest
@@ -501,6 +504,265 @@ TEST_CASE("SimulationTickBackend.Doors.ForwardToTheWorldHostThePresenterAndTheDr
     rig.backend.forgetPresenterTarget(9u, 5u);
     rig.backend.forgetPresenterTarget(9u, 99u);
     rig.backend.stop();
+}
+
+namespace simulationTickBackendLoopTest
+{
+    using namespace simulationTickBackendTest;
+
+    class LoopEngine : public FakeEngine
+    {
+    public:
+        explicit LoopEngine(Events& events)
+            : m_events(&events)
+        {
+        }
+
+        void log(HostLogLevel level, const char* line)
+        {
+            m_events->push_back(std::string("log:") + line);
+            FakeEngine::log(level, line);
+        }
+
+    private:
+        Events* m_events;
+    };
+
+    static_assert(TickDriverEngine<LoopEngine>, "LoopEngine must model TickDriverEngine");
+
+    using IdleGame = BasicRecordingIdleGame<true, TestManager, Storage, Snapshot>;
+    using LoopBackend = SimulationTickBackend<IdleGame, FakeWorldHost, TestSimulatable, LoopEngine>;
+
+    static_assert(TickDriverIdleGame<IdleGame>, "the loop rig's game models TickDriverIdleGame");
+
+    struct LoopRig
+    {
+        LoopRig()
+            : engine(events)
+            , host(events, kConfigureAtBuild, kRingDepthTicks)
+            , manager(false, events)
+            , game(events, manager, storage, engine)
+            , runner(engine, &events)
+            , backend(game, host, engine)
+        {
+            config.isAuthority = true;
+            config.threading = StepThreading::FreeRunning;
+        }
+
+        template <typename AfterBuildF, typename AfterStartF>
+        void run(double idleSlackSeconds, AfterBuildF&& afterBuild, AfterStartF&& afterStart)
+        {
+            StaticWorldDescription queryable;
+            queryable.shapes.resize(2u);
+            StaticWorldDescription physicsOnly;
+            physicsOnly.shapes.resize(1u);
+            backend.runAuthorityLoop(config, std::move(queryable), std::move(physicsOnly),
+                AuthorityLoopConfig{ static_cast<double>(kDt), 60, idleSlackSeconds }, runner, stop,
+                std::forward<AfterBuildF>(afterBuild), std::forward<AfterStartF>(afterStart), bodyAdapter, queryAdapter);
+        }
+
+        Events events;
+        FakeWorldHost::Config config;
+        LoopEngine engine;
+        FakeWorldHost host;
+        TestManager manager;
+        Storage storage;
+        IdleGame game;
+        FakeRunnerHost runner;
+        std::atomic<bool> stop{ false };
+        std::optional<FakeAdapter> bodyAdapter;
+        std::optional<FakeAdapter> queryAdapter;
+        LoopBackend backend;
+    };
+
+    class AnchorReadingSink : public FakeRenderSink
+    {
+    public:
+        std::optional<glm::vec3> readAnchor(uint32_t id) const
+        {
+            ++reads[id];
+            return FakeRenderSink::readAnchor(id);
+        }
+
+        mutable std::map<uint32_t, uint32_t> reads;
+    };
+
+    uint32_t anchorReadsOfAPresentWithoutTheDrain(LoopRig& rig, const PresentControls& controls, AnchorReadingSink& sink,
+        uint32_t id)
+    {
+        sink.reads.clear();
+        rig.backend.presenter().present_GameThread(rig.backend.driver(), controls, sink, rig.host);
+        return sink.reads[id];
+    }
+
+    bool startsWith(const std::string& text, const std::string& prefix)
+    {
+        return text.rfind(prefix, 0) == 0u;
+    }
+
+    std::string frameLineOf(const FakeEngine& engine)
+    {
+        for (const LoggedLine& line : engine.lines)
+        {
+            if (startsWith(line.text, "[SimHost.Frame]"))
+                return line.text;
+        }
+        return std::string();
+    }
+} // namespace simulationTickBackendLoopTest
+
+using namespace simulationTickBackendLoopTest;
+
+TEST_CASE("SimulationTickBackend.AuthorityLoop.RunsBuildAfterBuildStartAfterStartAndTheLoopInOrder", "[TickDriver]")
+{
+    {
+        LoopRig rig;
+        rig.game.setStopAfterSteps(rig.stop, 3u);
+        LoopBackend::Driver* started = nullptr;
+        rig.run(0.0005,
+            [&rig] { rig.events.push_back("afterBuild"); },
+            [&rig, &started](LoopBackend::Driver& driver)
+            {
+                rig.events.push_back("afterStart");
+                started = &driver;
+            });
+
+        Events ordered;
+        for (const std::string& event : rig.events)
+        {
+            if (startsWith(event, "configure:") || startsWith(event, "emplace:") || event == "afterBuild"
+                || startsWith(event, "log:[SimHost.Frame]") || event == "afterStart" || event == "onStepStarted")
+                ordered.push_back(event);
+        }
+        REQUIRE(ordered.size() >= 7u);
+        CHECK(Events(ordered.begin(), ordered.begin() + 7) == Events{
+            "configure:authority:runner",
+            "emplace:body",
+            "emplace:query",
+            "afterBuild",
+            "log:[SimHost.Frame] role=Authority stepping=runner dt=0.016667 maxCatchUpSteps=60 rateScale=[0.75,1.25] "
+            "timeBase=monotonic idleSlackUs=500",
+            "afterStart",
+            "onStepStarted",
+        });
+        CHECK(started == &rig.backend.driver());
+        CHECK(rig.game.stepsEnded.load() == 3u);
+        CHECK(rig.host.builtStatics == std::vector<std::pair<size_t, size_t>>{ { 2u, 1u } });
+        CHECK(rig.host.threadContext().threading() == StepThreading::FreeRunning);
+        rig.backend.stop();
+        CHECK_FALSE(rig.backend.driver().getDiagnostics().isRunning());
+    }
+    {
+        LoopRig rig;
+        rig.run(0.0, [] {}, [&rig](LoopBackend::Driver&) { rig.stop.store(true); });
+        CHECK(std::count(rig.events.begin(), rig.events.end(), std::string("onStepStarted")) == 0);
+        CHECK(std::count(rig.events.begin(), rig.events.end(), std::string("beforePump")) == 0);
+        CHECK(std::count_if(rig.events.begin(), rig.events.end(),
+            [](const std::string& event) { return startsWith(event, "log:[SimHost.Frame]"); }) == 1);
+        CHECK(rig.game.stepsEnded.load() == 0u);
+        CHECK(rig.game.idleCalls.empty());
+        rig.backend.stop();
+    }
+}
+
+TEST_CASE("SimulationTickBackend.AuthorityLoop.PresenterRegistrationsCrossThroughTheRingToPresent", "[TickDriver]")
+{
+    LoopRig rig;
+    rig.game.setStopAfterSteps(rig.stop, 8u);
+    TestSimulatable simulatable;
+    const TestStaticData staticData;
+    AnchorReadingSink sink;
+    PresentControls controls;
+    controls.newestOnly = true;
+
+    bool bound = false;
+    uint32_t readsBeforeTheDrain = 99u;
+    uint32_t readsAfterPresent = 0u;
+    uint32_t readsAfterForgetBeforeTheDrain = 0u;
+    uint32_t readsAfterForgetAndPresent = 99u;
+    std::vector<std::pair<uint32_t, bool>> occupancyBeforeRegistering;
+    uint32_t wakes = 0u;
+    rig.game.beforePumpHook = [&]
+    {
+        if (++wakes != 4u)
+            return;
+        bound = rig.backend.acquireAndBind(7u, "seven", true, std::nullopt, [](uint32_t) {}, 3u, simulatable, staticData);
+        rig.backend.onRegistered(3u, 7u);
+        readsBeforeTheDrain = anchorReadsOfAPresentWithoutTheDrain(rig, controls, sink, 3u);
+        rig.backend.present(controls, sink);
+        readsAfterPresent = anchorReadsOfAPresentWithoutTheDrain(rig, controls, sink, 3u);
+        rig.backend.forgetPresenterTarget(3u, 7u);
+        readsAfterForgetBeforeTheDrain = anchorReadsOfAPresentWithoutTheDrain(rig, controls, sink, 3u);
+        rig.backend.present(controls, sink);
+        readsAfterForgetAndPresent = anchorReadsOfAPresentWithoutTheDrain(rig, controls, sink, 3u);
+        rig.backend.releaseSlot(7u, 3u);
+    };
+
+    rig.run(0.0, [] {}, [](LoopBackend::Driver&) {});
+
+    CHECK(wakes >= 4u);
+    CHECK(bound);
+    CHECK(readsBeforeTheDrain == 0u);
+    CHECK(readsAfterPresent >= 1u);
+    CHECK(readsAfterForgetBeforeTheDrain >= 1u);
+    CHECK(readsAfterForgetAndPresent == 0u);
+    CHECK_FALSE(rig.host.slotOf(7u).has_value());
+    CHECK(std::count(rig.events.begin(), rig.events.end(), std::string("bind:0:3")) == 1);
+    CHECK(std::count(rig.events.begin(), rig.events.end(), std::string("release:7:0:3")) == 1);
+    rig.backend.stop();
+}
+
+TEST_CASE("SimulationTickBackend.Start.ThreadingComesFromTheWorldHostsContext", "[TickDriver]")
+{
+    const auto startedFrameLine = [](Rig& rig, double idleSlackSeconds)
+    {
+        rig.build();
+        rig.backend.start(static_cast<double>(kDt), rig.isAuthority, 60, idleSlackSeconds);
+        const std::string line = frameLineOf(rig.engine);
+        rig.backend.stop();
+        return line;
+    };
+
+    {
+        Rig rig(true);
+        CHECK(startedFrameLine(rig, 0.0)
+            == "[SimHost.Frame] role=Authority stepping=inline dt=0.016667 maxCatchUpSteps=60 rateScale=[0.75,1.25] timeBase=worldDelta");
+        CHECK(rig.host.threadContext().threading() == StepThreading::Inline);
+    }
+    {
+        Rig rig(false, true);
+        CHECK(startedFrameLine(rig, 0.0)
+            == "[SimHost.Frame] role=Client stepping=inline dt=0.016667 maxCatchUpSteps=60 rateScale=[0.75,1.25] timeBase=worldDelta");
+        CHECK(rig.host.threadContext().threading() == StepThreading::Inline);
+    }
+    {
+        Rig rig(false);
+        CHECK(startedFrameLine(rig, 0.0)
+            == "[SimHost.Frame] role=Client stepping=worker dt=0.016667 maxCatchUpSteps=60 rateScale=[0.75,1.25] timeBase=worldDelta");
+        CHECK(rig.host.threadContext().threading() == StepThreading::FrameBounded);
+    }
+    {
+        Rig rig(true);
+        rig.config.threading = StepThreading::FreeRunning;
+        CHECK(startedFrameLine(rig, 0.00025)
+            == "[SimHost.Frame] role=Authority stepping=runner dt=0.016667 maxCatchUpSteps=60 rateScale=[0.75,1.25] "
+               "timeBase=monotonic idleSlackUs=250");
+        CHECK(rig.host.threadContext().threading() == StepThreading::FreeRunning);
+    }
+}
+
+TEST_CASE("SimulationTickBackend.FreeRunning.AFrameThreadBindIsRefused", "[.][TickBackendFreeRunningFrameThreadBindRefused]")
+{
+    Rig rig(true);
+    rig.config.threading = StepThreading::FreeRunning;
+    std::thread runner([&rig] { rig.build(); });
+    runner.join();
+    REQUIRE(rig.bodyAdapter.has_value());
+
+    TestSimulatable simulatable;
+    const TestStaticData staticData;
+    rig.backend.acquireAndBind(7u, "seven", true, std::nullopt, [](uint32_t) {}, 3u, simulatable, staticData);
+    FAIL("SimulationTickBackend::acquireAndBind accepted a frame-thread bind on a free-running authority");
 }
 
 #endif

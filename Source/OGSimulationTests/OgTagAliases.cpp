@@ -27,10 +27,10 @@
 // KU1CrossArch mode ([Determinism][KU1CrossArch], Task 4) stay OPT-IN and are NOT
 // pulled in by [@og].
 // Note on [WireFormat]: Stage 1 wire-type regression tests (Task 12). The
-// engine-agnostic FInputRedundancyBundle codec tests carry [WireFormat][Bundle]
-// and run by default. The UE-coupled buffer-NetSerialize tests ([WireFormat]
-// [Buffers]) are deferred to a future engine-coupled LLT target (see Task 12
-// impl notes / docs/low-level-tests.md "Future: testing UE-coupled code").
+// engine-agnostic bundle codec tests carry [WireFormat][Bundle] and run by default.
+// The UE-coupled buffer-NetSerialize tests ([WireFormat][Buffers]) were deferred (Task 12
+// impl notes / docs/low-level-tests.md "Future: testing UE-coupled code"); those buffers went
+// with og-input-latency task P5-9, and SimPayloadBuffersTest.cpp tests their successors.
 // Note on [Network]: Stage 3 per-connection netcode surface (og-netcode-v2 tasks
 // 2/4/5/10) — the NetConfig concept plus the engine-agnostic ConnectionTierTable
 // / ServerInputDelayQueue templates, all exercised over the engine-free
@@ -64,7 +64,12 @@
 // IntegrateScopeTest.cpp, the simulationLog::IntegrateScope log context that
 // integrateAll opens around each integrate. Its nested-scope vacuity arm is
 // hidden ([.][IntegrationExecutorNestedScope]) because it is expected to abort.
+// Note on [Session]: og-sim-session's tests (og-session-runtime task 22), built into this
+// target from the plugin's og-sim-session/tests folder. Its death case is hidden
+// ([.][SessionThreadsDeath]) because it is expected to fire an OG_CHECK.
+// Note on [KnobTable]: og-session-runtime task 35 -- Config/KnobTableTest.cpp, the
+// knob table's rows, reads, clamps and proof lines (OGSimulation/Config/KnobTable.h).
 CATCH_REGISTER_TAG_ALIAS("[@og]",
-    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Network],[Reconciliation],[Determinism][Production],[SimulatableList],[StorageView],[SystemsExecutor],[CorrectionCache],[InputResolution],[LinearBodyState],[SimulationComposite],[Registration],[IntegrationExecutor],[Scheduler],[StepDriver],[Mailbox],[PhysicsWorld],[StaticGeometry],[ThreadRunner],[LatencyProbe],[Jolt],[NetTransport],[HotPathSession],[Dilation],[Outbound],[Lifecycle],[RenderSnapshot],[RenderInterpolation],[TickDriver],[TickDriverWindow],[TickDriverHooks],[TickDriverPresenter],[TickSlotTable],[JoltTickWorldHost],[SimulationFrame]")
+    "[PCTM],[DAttack],[Catch2Bridge],[ClientPredictionClock],[NetworkTimeEstimator],[ServerTickClock],[WireFormat],[Network],[Reconciliation],[Determinism][Production],[SimulatableList],[StorageView],[SystemsExecutor],[CorrectionCache],[InputResolution],[LinearBodyState],[SimulationComposite],[Registration],[IntegrationExecutor],[Scheduler],[StepDriver],[Mailbox],[PhysicsWorld],[StaticGeometry],[ThreadRunner],[LatencyProbe],[Jolt],[NetTransport],[HotPathSession],[Dilation],[Outbound],[Lifecycle],[RenderSnapshot],[RenderInterpolation],[TickDriver],[TickDriverWindow],[TickDriverHooks],[TickDriverPresenter],[TickSlotTable],[JoltTickWorldHost],[SimulationFrame],[Session],[KnobTable]")
 
 #endif // WITH_LOW_LEVEL_TESTS

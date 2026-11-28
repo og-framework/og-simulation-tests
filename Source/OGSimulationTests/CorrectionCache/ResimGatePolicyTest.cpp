@@ -3,6 +3,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <string>
 #include <utility>
 #include <vector>
 
@@ -606,7 +607,8 @@ TEST_CASE("ResimGate.Policy.TheResimGateProbeAccessorObservesTheShippedFeed",
 //      `m_resimulationTick` in lockstep while the two are in sync. This is
 //      exact, deterministic arithmetic, not a race against drift correction.
 //   2. `prepareResimulation(physicsStep=0, simTick=1)` — the SAME public entry
-//      point Chaos's rewind hook calls in production — sets the resim cursor
+//      point the step driver's resim calls in production (Chaos's rewind hook did,
+//      until og-session-runtime tasks 3-6 removed it) — sets the resim cursor
 //      to 1, one tick behind the frontier (2), so `isResimulating()` becomes
 //      true.
 //   3. One resim replay tick (`onGameSimulation`, `isResimulation=true` →
@@ -614,8 +616,8 @@ TEST_CASE("ResimGate.Policy.TheResimGateProbeAccessorObservesTheShippedFeed",
 //      `advanceResimulation()`, bringing the resim cursor to 2 — EQUAL to the
 //      frontier. That is "our clock has caught up", the production comment's
 //      own words at the `[Resim.Finish]` site: `isResimulating()` now reads
-//      false while Chaos (via `updateInfo`) still reports a resim step.
-//   4. `onPostGameSimulation(isResimulation=true)` — `chaosIsResim (true) &&
+//      false while the host (via `updateInfo`) still reports a resim step.
+//   4. `onPostGameSimulation(isResimulation=true)` — `engineIsResim (true) &&
 //      !clockIsResim (true)` — takes the `[Resim.Finish]` branch and reaches
 //      line 390.
 //
@@ -636,12 +638,13 @@ TEST_CASE("ResimGate.Policy.OnPostGameSimulationFeedsSurvivingAnchorsToTheProbe"
 	rig.manager.onGameSimulation(SimulationUpdateInfo(/*isResimulation=*/false, /*isFirstResimulationStep=*/false));
 
 	// Step 2: prepare a resim from tick 1 — one behind the frontier (2) — the
-	// same door `FSimulationManagerAsyncCallback::TriggerRewindIfNeeded_Internal`
-	// calls in production.
+	// same door `SimulationStepDriver::resimulateIfRequested` calls in production
+	// (the former Chaos adapter's rewind hook, removed by og-session-runtime
+	// tasks 3-6, called it too).
 	rig.manager.prepareResimulation(/*physicsStep=*/0, /*simTick=*/1u);
 
 	// Step 3: one resim replay tick brings the resim cursor to 2, equal to the
-	// frontier — the clock has caught up mid-Chaos-resim.
+	// frontier — the clock has caught up mid-resim.
 	rig.manager.onGameSimulation(SimulationUpdateInfo(/*isResimulation=*/true, /*isFirstResimulationStep=*/true));
 
 	// Precondition this whole sequence exists to set up — named explicitly so
@@ -734,6 +737,40 @@ TEST_CASE("SimulationManager.SystemsExecutorReceivesTheManagerRole",
 			[](const std::pair<bool, bool>& f) { return f.second; });
 		REQUIRE(resimFires == 2);   // pre + post of the one replay tick
 	}
+}
+
+// ---------------------------------------------------------------------------
+// og-input-latency P5-37: the host's step time on [AuthoritySimulation]. The authority rig of this
+// file, with a logger: a noted time is written on the next authority step's line only, then
+// cleared; an un-noted step writes the line as it was before the field.
+// ---------------------------------------------------------------------------
+TEST_CASE("SimulationManager.AuthorityLineCarriesANotedStepTimeOnTheNextStepOnly",
+	"[CorrectionCache][ResimGate]")
+{
+	ManagerRig rig(/*shouldRunPrediction=*/false);
+	std::vector<std::string> lines;
+	rig.manager.setLogger([&lines](const char* line) {
+		if (std::string(line).rfind("[AuthoritySimulation]", 0) == 0)
+			lines.emplace_back(line);
+	});
+	const auto step = [&rig] {
+		rig.manager.onGameSimulation(SimulationUpdateInfo(/*isResimulation=*/false, /*isFirstResimulationStep=*/false));
+	};
+
+	step();
+	rig.manager.noteAuthorityStepSeconds(16777300.25);
+	step();
+	step();
+	rig.manager.noteAuthorityStepSeconds(2.0);
+	rig.manager.noteAuthorityStepSeconds(3.5);
+	step();
+
+	REQUIRE(lines == std::vector<std::string>{
+		"[AuthoritySimulation] tick=1",
+		"[AuthoritySimulation] tick=2 stepSeconds=16777300.250000",
+		"[AuthoritySimulation] tick=3",
+		"[AuthoritySimulation] tick=4 stepSeconds=3.500000",
+	});
 }
 
 #endif // WITH_LOW_LEVEL_TESTS

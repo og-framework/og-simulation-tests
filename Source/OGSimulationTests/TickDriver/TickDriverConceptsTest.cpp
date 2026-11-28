@@ -3,17 +3,21 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <chrono>
 #include <cstdio>
+#include <future>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "catch_amalgamated.hpp"
 #include "OGSimulation/SimulationScheduler.h"
-#include "OGSimulation/TickDriverConcepts.h"
-#include "OGSimulation/TickDriverLog.h"
-#include "OGSimulation/TickDriverThreadContext.h"
+#include "OGTickDriver/TickDriverConcepts.h"
+#include "OGTickDriver/TickDriverLog.h"
+#include "OGTickDriver/TickDriverThreadContext.h"
 #include "TickDriverFakes.h"
 
 namespace
@@ -358,14 +362,148 @@ TEST_CASE("TickDriverThreadContext.Scopes.MarkTheRoleAndOpenTheAccessScope", "[T
     CHECK(client.lock().locks() == 2u);
 }
 
+TEST_CASE("TickDriverThreadContext.FreeRunning.TheConfiguringThreadIsTheOwnerAndAnotherThreadIsRefused", "[TickDriver]")
+{
+    TickDriverThreadContext context;
+    std::promise<void> configured;
+    std::future<void> runnerConfigured = configured.get_future();
+    std::promise<void> checkedOnTheTestThread;
+    std::future<void> testThreadChecked = checkedOnTheTestThread.get_future();
+    bool ownerOnRunner = false;
+    bool predicateOnRunner = false;
+    bool freeRunningOnRunner = false;
+    bool stepsInlineOnRunner = true;
+    bool entryCheckSetOnRunner = false;
+    bool entryCheckIsThePredicateOnRunner = false;
+    bool runnerSawTheTestThreadFinish = false;
+    std::thread runner([&]
+    {
+        context.configure<true>(kAuthorityRoleBit, StepThreading::FreeRunning);
+        ownerOnRunner = context.isOwnerThreadForRole();
+        predicateOnRunner = context.stepWorldPredicate()();
+        freeRunningOnRunner = context.threading() == StepThreading::FreeRunning;
+        stepsInlineOnRunner = context.stepsInline();
+        entryCheckSetOnRunner = context.entryCheck() != nullptr;
+        entryCheckIsThePredicateOnRunner = context.entryCheck() == context.stepWorldPredicate();
+        configured.set_value();
+        runnerSawTheTestThreadFinish = testThreadChecked.wait_for(std::chrono::seconds(30)) == std::future_status::ready;
+    });
+    const bool runnerConfiguredInTime = runnerConfigured.wait_for(std::chrono::seconds(30)) == std::future_status::ready;
+
+    const bool ownerOnTestThread = context.isOwnerThreadForRole();
+    const bool predicateOnTestThread = context.stepWorldPredicate() != nullptr && context.stepWorldPredicate()();
+    std::mutex worldMutex;
+    bool predicateUnderTheWorldLock = false;
+    {
+        const WorldLockScope<std::mutex> worldLock(worldMutex, context);
+        predicateUnderTheWorldLock = context.stepWorldPredicate()();
+    }
+    bool predicateInsideAStep = false;
+    {
+        const StepScope step(context);
+        predicateInsideAStep = context.stepWorldPredicate()();
+    }
+    checkedOnTheTestThread.set_value();
+    runner.join();
+
+    REQUIRE(runnerConfiguredInTime);
+    CHECK(runnerSawTheTestThreadFinish);
+    CHECK(ownerOnRunner);
+    CHECK(predicateOnRunner);
+    CHECK(freeRunningOnRunner);
+    CHECK_FALSE(stepsInlineOnRunner);
+    CHECK(entryCheckSetOnRunner);
+    CHECK(entryCheckIsThePredicateOnRunner);
+
+    CHECK_FALSE(ownerOnTestThread);
+    CHECK_FALSE(predicateOnTestThread);
+    CHECK(predicateUnderTheWorldLock);
+    CHECK(predicateInsideAStep);
+    CHECK_FALSE(context.stepWorldPredicate()());
+    CHECK(context.threading() == StepThreading::FreeRunning);
+}
+
+TEST_CASE("TickDriverThreadContext.EntryCheck.IsNullUnlessFreeRunning", "[TickDriver]")
+{
+    SECTION("an Inline authority")
+    {
+        TickDriverThreadContext context;
+        context.configure<true>(kAuthorityRoleBit, StepThreading::Inline);
+        CHECK(context.threading() == StepThreading::Inline);
+        CHECK(context.entryCheck() == nullptr);
+    }
+    SECTION("an Inline client")
+    {
+        TickDriverThreadContext context;
+        context.configure<true>(kClientRoleBit, StepThreading::Inline);
+        CHECK(context.threading() == StepThreading::Inline);
+        CHECK(context.entryCheck() == nullptr);
+    }
+    SECTION("a FrameBounded client")
+    {
+        TickDriverThreadContext context;
+        context.configure<true>(kClientRoleBit, StepThreading::FrameBounded);
+        CHECK(context.threading() == StepThreading::FrameBounded);
+        CHECK(context.entryCheck() == nullptr);
+    }
+    SECTION("a FrameBounded authority")
+    {
+        TickDriverThreadContext context;
+        context.configure<true>(kAuthorityRoleBit, StepThreading::FrameBounded);
+        CHECK(context.threading() == StepThreading::FrameBounded);
+        CHECK(context.entryCheck() == nullptr);
+    }
+    SECTION("an unconfigured context")
+    {
+        const TickDriverThreadContext context;
+        CHECK(context.threading() == StepThreading::FrameBounded);
+        CHECK(context.entryCheck() == nullptr);
+    }
+    SECTION("a FreeRunning authority, the positive control")
+    {
+        TickDriverThreadContext context;
+        context.configure<true>(kAuthorityRoleBit, StepThreading::FreeRunning);
+        CHECK(context.entryCheck() != nullptr);
+        CHECK(context.entryCheck() == context.stepWorldPredicate());
+    }
+}
+
+TEST_CASE("TickDriverThreadContext.Configure.TheBoolOverloadSelectsInlineOrFrameBounded", "[TickDriver]")
+{
+    for (const uint8_t role : { kAuthorityRoleBit, kClientRoleBit })
+    {
+        for (const bool inlineSteps : { true, false })
+        {
+            const int roleBit = role;
+            CAPTURE(roleBit, inlineSteps);
+            TickDriverThreadContext context;
+            context.configure<true>(role, inlineSteps);
+            CHECK(context.threading() == (inlineSteps ? StepThreading::Inline : StepThreading::FrameBounded));
+            CHECK(context.stepsInline() == inlineSteps);
+            CHECK(context.stepWorldPredicate() == TickDriverThreadContext::predicateFor<true>(role, inlineSteps));
+            CHECK(context.shadowPredicate() == TickDriverThreadContext::shadowPredicateFor<true>(role));
+            CHECK(context.entryCheck() == nullptr);
+        }
+    }
+}
+
+TEST_CASE("TickDriverThreadContext.FreeRunning.AClientIsRefused", "[.][TickDriverFreeRunningClientRefused]")
+{
+    TickDriverThreadContext context;
+    context.configure<true>(kClientRoleBit, StepThreading::FreeRunning);
+    FAIL("TickDriverThreadContext::configure accepted a FreeRunning client: its OG_CHECK did not fire");
+}
+
 TEST_CASE("TickRateDoor.ForwardsToTheScheduler", "[TickDriver]")
 {
     SimulationScheduler scheduler(SchedulerConfig{ 1.0 / 60.0, 4u }, 0.0);
-    TickRateDoor door(scheduler);
+    uint64_t refused = 0u;
+    TickRateDoor door(scheduler, 0, false, refused);
 
     door.setRateScale(1.05);
     CHECK(scheduler.rateScale() == 1.05);
     CHECK(door.rateScale() == 1.05);
+    CHECK(door.refusedRateChanges() == 0u);
 
     scheduler.pump(1.0);
     CHECK(door.physicsStepCount() == scheduler.physicsStepCount());
@@ -373,6 +511,54 @@ TEST_CASE("TickRateDoor.ForwardsToTheScheduler", "[TickDriver]")
     CHECK(door.lostTime().steps == scheduler.lostTime().steps);
     CHECK(door.lostTime().steps > 0u);
     CHECK(door.lostTime().seconds == scheduler.lostTime().seconds);
+    CHECK(door.nextDeadline() == scheduler.nextDeadline());
+    CHECK(door.currentInterval() == scheduler.currentStepInterval());
+    CHECK(door.currentInterval() == (1.0 / 60.0) / 1.05);
+}
+
+TEST_CASE("TickRateDoor.ReadsTheDeadlineTheIntervalAndTheOffsetItWasBuiltWith", "[TickDriver]")
+{
+    SimulationScheduler scheduler(SchedulerConfig{ 1.0 / 60.0, 4u, 0.75, 1.25 }, 0.0);
+    uint64_t refused = 0u;
+    const TickRateDoor before(scheduler, 2, false, refused);
+    CHECK(before.nextDeadline() == scheduler.nextDeadline());
+    CHECK(before.currentInterval() == 1.0 / 60.0);
+    CHECK(before.tickOffset() == 2);
+
+    scheduler.setRateScale(1.2);
+    scheduler.pump(0.5);
+    CHECK(before.nextDeadline() == scheduler.nextDeadline());
+    CHECK(before.currentInterval() == scheduler.currentStepInterval());
+    CHECK(before.currentInterval() == (1.0 / 60.0) / 1.2);
+    CHECK(before.tickOffset() == 2);
+
+    const TickRateDoor negative(scheduler, -7, true, refused);
+    CHECK(negative.tickOffset() == -7);
+}
+
+TEST_CASE("TickRateDoor.ARefusingDoorChangesNothingAndCountsEveryCall", "[TickDriver]")
+{
+    SimulationScheduler scheduler(SchedulerConfig{ 1.0 / 60.0, 4u, 0.75, 1.25 }, 0.0);
+    uint64_t refused = 0u;
+    TickRateDoor door(scheduler, 0, true, refused);
+    const double deadline = scheduler.nextDeadline();
+
+    door.setRateScale(1.01);
+    CHECK(scheduler.rateScale() == 1.0);
+    CHECK(scheduler.currentStepInterval() == 1.0 / 60.0);
+    CHECK(scheduler.nextDeadline() == deadline);
+    CHECK(door.refusedRateChanges() == 1u);
+    CHECK(refused == 1u);
+
+    door.setRateScale(1.0);
+    door.setRateScale(std::numeric_limits<double>::quiet_NaN());
+    CHECK(door.refusedRateChanges() == 3u);
+
+    TickRateDoor nextFrames(scheduler, 0, true, refused);
+    nextFrames.setRateScale(0.8);
+    CHECK(nextFrames.refusedRateChanges() == 4u);
+    CHECK(refused == 4u);
+    CHECK(scheduler.rateScale() == 1.0);
 }
 
 TEST_CASE("TickDriverFakes.Engine.ManualExecutorRunsInOrderAndWaitsRunTheQueue", "[TickDriver]")
@@ -441,7 +627,8 @@ TEST_CASE("TickDriverFakes.RecordingGameAndHosts.RecordIntoOneOrderedList", "[Ti
     FakePresenter presenter(events);
     FakeWorldHost host(events, kAuthorityRoleBit, true);
     SimulationScheduler scheduler(SchedulerConfig{ 1.0 / 60.0, 4u }, 0.0);
-    TickRateDoor door(scheduler);
+    uint64_t refused = 0u;
+    TickRateDoor door(scheduler, 0, false, refused);
 
     TickOutcome outcome;
     outcome.tick = 12u;

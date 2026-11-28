@@ -18,8 +18,8 @@
 #include "catch_amalgamated.hpp"
 #include "OGSimulation/BodySlotAssignment.h"
 #include "OGSimulation/BodySlotOccupancy.h"
-#include "OGSimulation/TickDriverLog.h"
-#include "OGSimulation/TickSlotTable.h"
+#include "OGTickDriver/TickDriverLog.h"
+#include "OGTickDriver/TickSlotTable.h"
 #include "TickDriverFakes.h"
 
 namespace
@@ -115,22 +115,22 @@ namespace
 
             std::optional<uint32> GetPhysicsSlot() const
             {
-                if (PhysicsSlotValue == 0u)
+                if (ReplicatedSlotValue == 0u)
                     return std::nullopt;
-                return static_cast<uint32>(PhysicsSlotValue) - 1u;
+                return static_cast<uint32>(ReplicatedSlotValue) - 1u;
             }
 
             void SetAuthoritativePhysicsSlot(uint32 Slot)
             {
                 REQUIRE(hasAuthority);
                 REQUIRE(Slot < kMaxSimulatableSlots);
-                REQUIRE(PhysicsSlotValue == 0u);
-                PhysicsSlotValue = static_cast<uint8>(Slot + 1u);
+                REQUIRE(ReplicatedSlotValue == 0u);
+                ReplicatedSlotValue = static_cast<uint8>(Slot + 1u);
                 published.push_back(Slot);
             }
 
             bool hasAuthority;
-            uint8 PhysicsSlotValue = 0u;
+            uint8 ReplicatedSlotValue = 0u;
             std::vector<uint32> published;
         };
 
@@ -199,8 +199,9 @@ namespace
 
             AOGBrawlerUECharacter* const character = Cast<AOGBrawlerUECharacter>(&owner);
             checkfRef(character != nullptr,
-                "tryAcquireJoltSlot: '%s' is not an AOGBrawlerUECharacter. The slot the authority chooses reaches the "
-                "clients on that class's replicated PhysicsSlotValue, so only that class can hold a Jolt slot.",
+                "tryAcquireJoltSlot: '%s' is not an AOGBrawlerUECharacter. The slot the authority chose reached the "
+                "clients on that class's replicated PhysicsSlotValue (deleted by og-input-latency task P5-8), so only "
+                "that class could hold a Jolt slot.",
                 *owner.GetName());
 
             std::array<bool, kMaxSimulatableSlots> taken{};
@@ -438,10 +439,10 @@ namespace
                 break;
             case 4:
                 if (const auto actor = pickActor([this](const ActorState& s, size_t index)
-                    { return s.knownOnClient && m_tableClientActors[index].PhysicsSlotValue != m_tableAuthorityActors[index].PhysicsSlotValue; }))
+                    { return s.knownOnClient && m_tableClientActors[index].ReplicatedSlotValue != m_tableAuthorityActors[index].ReplicatedSlotValue; }))
                 {
-                    m_legacyClientActors[*actor].PhysicsSlotValue = m_legacyAuthorityActors[*actor].PhysicsSlotValue;
-                    m_tableClientActors[*actor].PhysicsSlotValue = m_tableAuthorityActors[*actor].PhysicsSlotValue;
+                    m_legacyClientActors[*actor].ReplicatedSlotValue = m_legacyAuthorityActors[*actor].ReplicatedSlotValue;
+                    m_tableClientActors[*actor].ReplicatedSlotValue = m_tableAuthorityActors[*actor].ReplicatedSlotValue;
                 }
                 break;
             case 5:
@@ -580,7 +581,7 @@ namespace
                     found != legacy.m_worlds.m_joltSlotByOwner.end() ? std::optional<uint32_t>(found->second) : std::nullopt;
                 if (legacySlot != table.table().slotOf(ownerKey(tableActors[index]))
                     || legacyActors[index].published != tableActors[index].published
-                    || legacyActors[index].PhysicsSlotValue != tableActors[index].PhysicsSlotValue)
+                    || legacyActors[index].ReplicatedSlotValue != tableActors[index].ReplicatedSlotValue)
                     return false;
             }
             return true;

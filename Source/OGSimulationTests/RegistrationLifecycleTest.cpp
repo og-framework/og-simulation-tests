@@ -50,15 +50,19 @@
 //      registration is invisible to the collect on the step it was queued and
 //      fully visible on the next; an unregistration likewise.
 //
-//      ⛔ NO ADAPTER IN THE TREE USES THE QUEUE. It was wired into the
-//      og-brawler-unreal composition root, measured, and HELD - adopting it
+//      ⛔ ONLY TWO MODES USE THE QUEUE: og-sim-net's client session on an
+//      immediate client and its server session on the authority loop
+//      (og-input-latency P5-17, P5-19), where the readers that iterate the maps
+//      run on the queue's own thread. A FRAME-LOCKED client and an INLINE
+//      server do not: there it was wired into the og-brawler-unreal
+//      composition root, measured, and HELD - adopting it
 //      inverts the game/physics crossing rather than closing it, because two
 //      per-tick GAME-thread readers ITERATE the maps registration would then
 //      mutate from the physics thread. The ruling and the full reader list are
 //      in the queue's own banner and in og-simulation's
 //      docs/ThreadingCrossings.md row 11. These cases pin the primitive's
-//      semantics so that adoption, when it happens, is a wiring change against
-//      something already tested - they assert nothing about production wiring.
+//      semantics - they assert nothing about production wiring (og-sim-net's
+//      SimNetLifecycleQueueTest.cpp covers its use).
 //
 //      ⛔ RENAMED 2026-09-19 (task 3 rework 1), AND THE OLD NAMES ARE THE POINT.
 //      They were `RegistrationAppliesOnThePhysicsThreadBetweenSteps` and
@@ -461,7 +465,7 @@ TEST_CASE("TheNoCacheTripwireIsRateLimitedToOneLinePerTick",
 }
 
 // ===========================================================================
-// A — THE MARSHALLING PRIMITIVE'S SEMANTICS (the queue alone; HELD, NOT WIRED)
+// A — THE MARSHALLING PRIMITIVE'S SEMANTICS (the queue alone; og-sim-net's tests cover its use)
 // ===========================================================================
 
 TEST_CASE("ADeferredRegistrationIsInvisibleUntilApplied",

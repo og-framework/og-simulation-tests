@@ -32,7 +32,7 @@
 #include "OGSimulation/SimulationObjectStorage.h"
 #include "OGSimulation/SimulationTimeContext.h"
 #include "OGSimulation/StepHooks.h"
-#include "OGSimulation/TickDriverLog.h"
+#include "OGTickDriver/TickDriverLog.h"
 
 namespace legacyRenderUe
 {
